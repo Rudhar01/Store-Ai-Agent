@@ -1116,7 +1116,15 @@ async def widget_config(shop: str):
 
 @router.get("/widget.js")
 async def widget_js():
-    return Response(content=WIDGET_JS, media_type="application/javascript")
+    return Response(
+        content=WIDGET_JS,
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 # --------------------------------------------------------------------------
