@@ -22,6 +22,8 @@ import json
 import re
 from pathlib import Path
 
+import llm_selector
+
 try:
     from langfuse import observe
 except ImportError:
