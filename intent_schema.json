@@ -1,0 +1,546 @@
+{
+  "schema_version": "1.2",
+  "description": "Intent classification schema for the Universal AI Agent Plugin (Shopify build). Each user message is classified into exactly one intent AND one action of that intent. Every action carries its own description, entities and example utterances so similar actions can be told apart.",
+  "intents": [
+    {
+      "name": "registration_login",
+      "description": "User wants to create an account, sign in, sign out, or recover access.",
+      "actions": [
+        {
+          "name": "register",
+          "description": "Create a new account.",
+          "requires_confirmation": true,
+          "required_entities": [],
+          "optional_entities": [
+            "email",
+            "phone",
+            "full_name"
+          ],
+          "example_utterances": [
+            "I want to create an account",
+            "Sign me up",
+            "Register me"
+          ]
+        },
+        {
+          "name": "login",
+          "description": "Sign in to an existing account.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "email"
+          ],
+          "example_utterances": [
+            "Log me in",
+            "I want to sign in",
+            "Login"
+          ]
+        },
+        {
+          "name": "logout",
+          "description": "Sign out of the account.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [],
+          "example_utterances": [
+            "Sign me out",
+            "Log out"
+          ]
+        },
+        {
+          "name": "forgot_password",
+          "description": "Recover access when the password is forgotten.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "email"
+          ],
+          "example_utterances": [
+            "I forgot my password",
+            "Reset my password"
+          ]
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": [
+        "email",
+        "phone",
+        "full_name"
+      ],
+      "example_utterances": [
+        "I want to create an account",
+        "Sign me up",
+        "Register me",
+        "Log me in",
+        "I want to sign in",
+        "Login",
+        "Sign me out",
+        "Log out",
+        "I forgot my password",
+        "Reset my password"
+      ]
+    },
+    {
+      "name": "order_tracking",
+      "description": "User wants the status of one order or a list of their orders. Logged-in shoppers need no order number or email, guests can provide email or order number.",
+      "actions": [
+        {
+          "name": "track_order",
+          "description": "Where is ONE specific order, its delivery status, tracking number, carrier status, checkpoints or ETA. Use this for 'where is my order' / 'track package' questions.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "order_number",
+            "order_id",
+            "email"
+          ],
+          "example_utterances": [
+            "Where is my order?",
+            "Track order #1042",
+            "When will my package arrive?",
+            "What is the status of order 1001",
+            "Track shipment for #1055",
+            "mera order kahan hai"
+          ]
+        },
+        {
+          "name": "list_recent_orders",
+          "description": "Show a list of ALL the shopper's orders (all, past, current, active or pending) or their order history, not the status of one specific order.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "email"
+          ],
+          "example_utterances": [
+            "Show all my orders",
+            "Show me my orders",
+            "Show my orders for test@example.com",
+            "Show all my past and current orders",
+            "mere saare orders dikhao",
+            "What have I ordered before?",
+            "Show my order history",
+            "mere orders dikhao"
+          ]
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": [
+        "order_number",
+        "order_id",
+        "email"
+      ],
+      "example_utterances": [
+        "Where is my order?",
+        "Track order #1042",
+        "When will my package arrive?",
+        "mera order kahan hai",
+        "Show all my orders",
+        "Show me my orders",
+        "What have I ordered before?",
+        "Show my order history",
+        "mere saare orders dikhao",
+        "mere orders dikhao"
+      ]
+    },
+    {
+      "name": "cart_management",
+      "description": "User wants to view, add, remove, edit, or clear the contents of their shopping cart directly from messages.",
+      "actions": [
+        {
+          "name": "add_item",
+          "description": "Add a product or variant directly to the cart.",
+          "requires_confirmation": false,
+          "required_entities": [
+            "product_name_or_id"
+          ],
+          "optional_entities": [
+            "variant",
+            "quantity"
+          ],
+          "example_utterances": [
+            "Add this to my cart",
+            "Add 2 blue shirts to my cart",
+            "I want to buy the linen tote",
+            "Add black hoodie to cart",
+            "Put 1 mug in my cart",
+            "isse cart mein daalo"
+          ]
+        },
+        {
+          "name": "remove_item",
+          "description": "Remove one product directly from the cart.",
+          "requires_confirmation": false,
+          "required_entities": [
+            "product_name_or_id"
+          ],
+          "optional_entities": [
+            "variant"
+          ],
+          "example_utterances": [
+            "Remove the blue shirt from my cart",
+            "Delete the mug from my cart",
+            "Take the shoes out of my cart",
+            "Remove hoodie from cart",
+            "cart se hatao"
+          ]
+        },
+        {
+          "name": "edit_quantity",
+          "description": "Update or change the quantity of a product directly in the cart.",
+          "requires_confirmation": false,
+          "required_entities": [
+            "product_name_or_id",
+            "quantity"
+          ],
+          "optional_entities": [
+            "variant"
+          ],
+          "example_utterances": [
+            "Change the quantity of shirt to 2",
+            "Make it 3 of the mug",
+            "Update cart to 4 hoodies",
+            "Set quantity of jacket to 1",
+            "quantity badal ke 2 kar do"
+          ]
+        },
+        {
+          "name": "view_cart",
+          "description": "Show what is currently in the cart with items, quantities, prices, and total.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [],
+          "example_utterances": [
+            "What's in my cart?",
+            "Show my cart",
+            "How much is my cart?",
+            "View cart items",
+            "mera cart dikhao"
+          ]
+        },
+        {
+          "name": "clear_cart",
+          "description": "Remove EVERYTHING from the cart and empty it.",
+          "requires_confirmation": true,
+          "required_entities": [],
+          "optional_entities": [],
+          "example_utterances": [
+            "Empty my cart",
+            "Clear my cart",
+            "Remove everything from my cart",
+            "cart khali karo"
+          ]
+        }
+      ],
+      "required_entities": [
+        "product_name_or_id",
+        "quantity"
+      ],
+      "optional_entities": [
+        "variant"
+      ],
+      "example_utterances": [
+        "Add this to my cart",
+        "Add 2 blue shirts to my cart",
+        "I want to buy the linen tote",
+        "Remove the blue shirt from my cart",
+        "Delete the mug from my cart",
+        "Change the quantity to 2",
+        "Make it 3 of the mug",
+        "What's in my cart?",
+        "Show my cart",
+        "How much is my cart?",
+        "Empty my cart",
+        "Clear my cart",
+        "Remove everything from my cart"
+      ]
+    },
+    {
+      "name": "warranty_claim",
+      "description": "User wants to file or check a warranty, replacement, or return claim for a purchased item.",
+      "actions": [
+        {
+          "name": "submit_claim",
+          "description": "File a warranty or replacement claim for a damaged, defective, or incorrect product from an order.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "order_number",
+            "order_id",
+            "email",
+            "issue_description",
+            "product_name",
+            "claim_type"
+          ],
+          "example_utterances": [
+            "I want to claim warranty for order #1001",
+            "This product arrived broken, I want a warranty replacement",
+            "File a warranty claim, the headphones stopped working",
+            "My jacket zipper broke, claim warranty",
+            "I received a damaged item in order 1042, need warranty claim",
+            "warranty claim karni hai"
+          ]
+        },
+        {
+          "name": "check_claim_status",
+          "description": "Check the review progress or approval status of a previously filed warranty or return claim.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "order_number",
+            "order_id",
+            "claim_id",
+            "email"
+          ],
+          "example_utterances": [
+            "What's the status of my warranty claim?",
+            "Check warranty claim for order #1001",
+            "Status of claim CLM-1001-A1",
+            "Has my warranty return been approved?",
+            "Any update on my warranty claim?"
+          ]
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": [
+        "order_number",
+        "order_id",
+        "email",
+        "issue_description",
+        "product_name",
+        "claim_type",
+        "claim_id"
+      ],
+      "example_utterances": [
+        "I want to claim warranty for order #1001",
+        "This product arrived broken, I want a replacement",
+        "File a warranty claim, the zip is faulty",
+        "What's the status of my warranty claim?",
+        "Any update on my claim?",
+        "Has my claim been approved?"
+      ]
+    },
+    {
+      "name": "payment_checkout",
+      "description": "User wants to save payment credentials, initiate checkout and payment, or provide the OTP in the chat to pay for their order.",
+      "actions": [
+        {
+          "name": "save_payment_credentials",
+          "description": "Save or update customer payment credentials (cardholder name, card number, expiry date, CVV, billing address) for 1-click checkout.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "cardholder_name",
+            "card_number",
+            "expiry",
+            "cvv",
+            "payment_method",
+            "billing_address"
+          ],
+          "example_utterances": [
+            "Save my payment credentials",
+            "Store my credit card details",
+            "Update my payment method",
+            "Save card ending in 4242 for checkout",
+            "Save my Visa card",
+            "payment details save kardo"
+          ]
+        },
+        {
+          "name": "initiate_payment",
+          "description": "Proceed to checkout and initiate payment for items in cart using stored credentials, triggering an OTP challenge.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "payment_method",
+            "email",
+            "phone"
+          ],
+          "example_utterances": [
+            "Pay for my cart",
+            "I want to checkout and pay",
+            "Proceed to payment with saved card",
+            "Pay for the order",
+            "Buy items in my cart now",
+            "Complete checkout and pay",
+            "cart ka payment kardo",
+            "Pay now"
+          ]
+        },
+        {
+          "name": "confirm_payment_otp",
+          "description": "Provide the 6-digit OTP code in chat to authenticate and complete the payment.",
+          "requires_confirmation": false,
+          "required_entities": [
+            "otp_code"
+          ],
+          "optional_entities": [],
+          "example_utterances": [
+            "My OTP is 492015",
+            "Here is the OTP 123456",
+            "Confirm payment with OTP 859302",
+            "Authorize payment 736201",
+            "492015",
+            "mera otp hai 123456"
+          ]
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": [
+        "cardholder_name",
+        "card_number",
+        "expiry",
+        "cvv",
+        "payment_method",
+        "otp_code"
+      ],
+      "example_utterances": [
+        "Save my payment credentials",
+        "Store my credit card",
+        "Pay for my cart",
+        "Checkout and pay now",
+        "My OTP is 123456",
+        "Confirm payment with OTP 492015"
+      ]
+    },
+    {
+      "name": "product_search",
+      "description": "User wants to find products or get product suggestions.",
+      "actions": [
+        {
+          "name": "search_products",
+          "description": "Find products by name, category or attributes, optionally filtered by price, color or size.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "query",
+            "category",
+            "price_min",
+            "price_max",
+            "color",
+            "size",
+            "sort_by"
+          ],
+          "example_utterances": [
+            "Show me running shoes under $50",
+            "Do you have this in blue?",
+            "What's your cheapest jacket?"
+          ]
+        },
+        {
+          "name": "get_recommendations",
+          "description": "Suggest products PERSONALLY for this shopper (based on their orders and searches), without naming what they want. May carry a budget or category.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "category",
+            "price_max"
+          ],
+          "example_utterances": [
+            "Recommend something for me",
+            "What should I buy?",
+            "mujhe kuch recommend karo",
+            "Suggest something under 1000",
+            "Suggest products I might like"
+          ]
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": [
+        "query",
+        "category",
+        "price_min",
+        "price_max",
+        "color",
+        "size",
+        "sort_by"
+      ],
+      "example_utterances": [
+        "Show me running shoes under $50",
+        "Do you have this in blue?",
+        "What's your cheapest jacket?",
+        "Recommend something for me",
+        "What should I buy?",
+        "Suggest products I might like",
+        "mujhe kuch recommend karo"
+      ]
+    },
+    {
+      "name": "policy_query",
+      "description": "User is asking about store policies (refund, returns, shipping, warranty, privacy, terms, cancellation).",
+      "actions": [
+        {
+          "name": "answer_policy_question",
+          "description": "Answer a question about a store policy.",
+          "requires_confirmation": false,
+          "required_entities": [
+            "policy_type"
+          ],
+          "optional_entities": [],
+          "example_utterances": [
+            "What's your refund policy?",
+            "How long does shipping take?",
+            "What is your return policy?",
+            "Do you have a warranty policy?",
+            "What is your cancellation policy?",
+            "Do you sell my data to anyone?"
+          ]
+        }
+      ],
+      "required_entities": [
+        "policy_type"
+      ],
+      "optional_entities": [],
+      "example_utterances": [
+        "What's your refund policy?",
+        "How long does shipping take?",
+        "What is your return policy?",
+        "What is your warranty policy?",
+        "Do you sell my data to anyone?"
+      ],
+      "policy_types": [
+        "refund_policy",
+        "return_policy",
+        "shipping_policy",
+        "privacy_policy",
+        "warranty_policy",
+        "terms_of_service",
+        "cancellation_policy"
+      ]
+    },
+    {
+      "name": "fallback",
+      "description": "Message doesn't clearly match any defined intent, or confidence is too low to act on. Agent should ask a clarifying question rather than guess.",
+      "actions": [
+        {
+          "name": "clarify",
+          "description": "Ask the shopper what they mean.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [],
+          "example_utterances": [
+            "hmm",
+            "can you help me with something",
+            "asdkfj"
+          ]
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": [],
+      "example_utterances": [
+        "hmm",
+        "can you help me with something",
+        "asdkfj"
+      ]
+    }
+  ],
+  "classification_output_format": {
+    "intent": "one of the intent names above",
+    "action": "one of that intent's action names",
+    "entities": "key-value object of any entities extracted from the message, kept in the language the user wrote them in",
+    "confidence": "float between 0 and 1",
+    "requires_confirmation": "boolean, copied from the matched action definition",
+    "language": "ISO 639-1 code of the language the user's message was written or spoken in, e.g. 'en', 'hi', 'pa', 'es', 'fr', 'ar'"
+  },
+  "confidence_threshold": 0.6,
+  "below_threshold_behavior": "route to fallback.clarify instead of guessing"
+}
