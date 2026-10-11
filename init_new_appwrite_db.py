@@ -32,10 +32,19 @@ try:
     from appwrite.client import Client
     from appwrite.services.databases import Databases
     from appwrite.exception import AppwriteException
-    from appwrite.enums.index_type import IndexType
 except ImportError:
     print("Error: The 'appwrite' package is required. Run: pip install appwrite")
     sys.exit(1)
+
+try:
+    from appwrite.enums.databases_index_type import DatabasesIndexType
+    INDEX_TYPE_KEY = DatabasesIndexType.KEY
+except ImportError:
+    try:
+        from appwrite.enums.index_type import IndexType
+        INDEX_TYPE_KEY = IndexType.KEY
+    except ImportError:
+        INDEX_TYPE_KEY = "key"
 
 from appwrite_client import (
     APPWRITE_ENDPOINT, APPWRITE_PROJECT_ID,
@@ -173,17 +182,17 @@ def create_all_collections(databases, db_id):
     _run("events.external_id", databases.create_string_attribute, db_id, ANALYTICS_EVENTS_COLLECTION, "external_id", 100, False)
 
     print("\n[3/3] Creating indexes...")
-    _run("idx_stores_domain", databases.create_index, db_id, STORES_COLLECTION, "idx_shop_domain", IndexType.KEY, ["shop_domain"])
-    _run("idx_customizations_store", databases.create_index, db_id, CUSTOMIZATIONS_COLLECTION, "idx_store", IndexType.KEY, ["store"])
-    _run("idx_users_store", databases.create_index, db_id, DASHBOARD_USERS_COLLECTION, "idx_store", IndexType.KEY, ["store"])
-    _run("idx_users_email", databases.create_index, db_id, DASHBOARD_USERS_COLLECTION, "idx_email", IndexType.KEY, ["email"])
-    _run("idx_features_store", databases.create_index, db_id, FEATURES_COLLECTION, "idx_store", IndexType.KEY, ["store"])
-    _run("idx_store_info_store", databases.create_index, db_id, STORE_INFO_COLLECTION, "idx_store", IndexType.KEY, ["store"])
-    _run("idx_faqs_store", databases.create_index, db_id, FAQS_COLLECTION, "idx_store", IndexType.KEY, ["store"])
-    _run("idx_feedback_store", databases.create_index, db_id, FEEDBACK_COLLECTION, "idx_store", IndexType.KEY, ["store"])
-    _run("idx_flows_store", databases.create_index, db_id, FLOWS_COLLECTION, "idx_store", IndexType.KEY, ["store"])
-    _run("idx_events_store", databases.create_index, db_id, ANALYTICS_EVENTS_COLLECTION, "idx_store", IndexType.KEY, ["store"])
-    _run("idx_events_type", databases.create_index, db_id, ANALYTICS_EVENTS_COLLECTION, "idx_event_type", IndexType.KEY, ["event_type"])
+    _run("idx_stores_domain", databases.create_index, db_id, STORES_COLLECTION, "idx_shop_domain", INDEX_TYPE_KEY, ["shop_domain"])
+    _run("idx_customizations_store", databases.create_index, db_id, CUSTOMIZATIONS_COLLECTION, "idx_store", INDEX_TYPE_KEY, ["store"])
+    _run("idx_users_store", databases.create_index, db_id, DASHBOARD_USERS_COLLECTION, "idx_store", INDEX_TYPE_KEY, ["store"])
+    _run("idx_users_email", databases.create_index, db_id, DASHBOARD_USERS_COLLECTION, "idx_email", INDEX_TYPE_KEY, ["email"])
+    _run("idx_features_store", databases.create_index, db_id, FEATURES_COLLECTION, "idx_store", INDEX_TYPE_KEY, ["store"])
+    _run("idx_store_info_store", databases.create_index, db_id, STORE_INFO_COLLECTION, "idx_store", INDEX_TYPE_KEY, ["store"])
+    _run("idx_faqs_store", databases.create_index, db_id, FAQS_COLLECTION, "idx_store", INDEX_TYPE_KEY, ["store"])
+    _run("idx_feedback_store", databases.create_index, db_id, FEEDBACK_COLLECTION, "idx_store", INDEX_TYPE_KEY, ["store"])
+    _run("idx_flows_store", databases.create_index, db_id, FLOWS_COLLECTION, "idx_store", INDEX_TYPE_KEY, ["store"])
+    _run("idx_events_store", databases.create_index, db_id, ANALYTICS_EVENTS_COLLECTION, "idx_store", INDEX_TYPE_KEY, ["store"])
+    _run("idx_events_type", databases.create_index, db_id, ANALYTICS_EVENTS_COLLECTION, "idx_event_type", INDEX_TYPE_KEY, ["event_type"])
 
     print("\n=======================================================")
     print(" ALL 10 COLLECTIONS, ATTRIBUTES, & INDEXES INITIALIZED!")
