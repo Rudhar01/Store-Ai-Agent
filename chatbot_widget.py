@@ -1095,10 +1095,18 @@ async def widget_config(shop: str):
     if not store:
         return {"error": "unknown store"}
     cfg = repo.ensure_customization(store["$id"])
+    agent_name = cfg.get("agent_name", "AI Assistant")
+    agent_title = cfg.get("agent_title", "How can I help you today?")
+    greeting = cfg.get("greeting_message") or (
+        f"Hey there! I'm {agent_name}. How can I help you today?"
+        if agent_title == "How can I help you today?"
+        else f"Hey there! I'm {agent_name}. {agent_title}"
+    )
     return {
         "status": cfg.get("status", "active"),
-        "agent_name": cfg.get("agent_name", "AI Assistant"),
-        "agent_title": cfg.get("agent_title", "How can I help you today?"),
+        "agent_name": agent_name,
+        "agent_title": agent_title,
+        "greeting_message": greeting,
         "icon_type": cfg.get("icon_type", "preset"),
         "theme_color": cfg.get("theme_color", "#2b2b2b"),
         "custom_icon_url": cfg.get("custom_icon_url", ""),
@@ -1144,9 +1152,16 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .chat-fab.open .icon-mic { display:none; }",
     "#ai-chat-widget-root .chat-fab.open .icon-close { display:block; }",
     "#ai-chat-widget-root .chat-fab.custom-icon .icon-mic { display:none; }",
-    "#ai-chat-widget-root .fab-greeting { position:fixed; bottom:24px; right:72px; max-width:220px; background:#1a1a1a; color:#fff; font-size:12.5px; font-weight:600; line-height:1.3; padding:8px 12px; border-radius:14px; border-bottom-right-radius:4px; box-shadow:0 6px 16px rgba(0,0,0,.2); z-index:2147482999; cursor:pointer; opacity:0; transform:translateY(6px) scale(.95); pointer-events:none; transition:opacity .25s ease, transform .25s cubic-bezier(.34,1.56,.64,1); }",
-    "#ai-chat-widget-root .fab-greeting.show { opacity:1; transform:translateY(0) scale(1); pointer-events:auto; }",
-    "#ai-chat-widget-root .fab-greeting .fg-order { display:block; margin-top:3px; font-size:11px; font-weight:500; line-height:1.35; opacity:.85; }",
+    "#ai-chat-widget-root .fab-greeting { position:fixed; bottom:22px; right:74px; width:max-content; max-width:min(340px, calc(100vw - 92px)); background:#ffffff; color:#111827; padding:11px 14px; border-radius:18px; border-bottom-right-radius:4px; box-shadow:0 8px 30px rgba(0,0,0,.12), 0 2px 6px rgba(0,0,0,.04); border:1px solid rgba(0,0,0,.08); z-index:2147482999; cursor:pointer; opacity:0; transform:translateY(8px) scale(.96); pointer-events:none; transition:opacity .28s cubic-bezier(.16,1,.3,1), transform .28s cubic-bezier(.16,1,.3,1), box-shadow .2s ease; display:none; flex-direction:column; gap:4px; }",
+    "#ai-chat-widget-root .fab-greeting:hover { transform:translateY(-2px) scale(1.01); box-shadow:0 12px 36px rgba(0,0,0,.16); }",
+    "#ai-chat-widget-root .fab-greeting.show { opacity:1; transform:translateY(0) scale(1); pointer-events:auto; display:flex !important; }",
+    "#ai-chat-widget-root .fab-greeting::after { content:''; position:absolute; bottom:12px; right:-7px; width:0; height:0; border-top:6px solid transparent; border-bottom:6px solid transparent; border-left:7px solid #ffffff; filter:drop-shadow(2px 0 1px rgba(0,0,0,.04)); }",
+    "#ai-chat-widget-root .fg-header { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:1px; }",
+    "#ai-chat-widget-root .fg-bot-tag { display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:700; color:#4b5563; }",
+    "#ai-chat-widget-root .fg-avatar-mini { width:18px; height:18px; border-radius:50%; background:#2563eb; color:#fff; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0; background-size:cover; background-position:center; }",
+    "#ai-chat-widget-root .fg-close { background:transparent; border:none; color:#9ca3af; font-size:16px; line-height:1; cursor:pointer; padding:0 3px; border-radius:4px; transition:color .15s ease; }",
+    "#ai-chat-widget-root .fg-close:hover { color:#111827; }",
+    "#ai-chat-widget-root .fg-text { font-size:12.5px; font-weight:500; color:#1f2937; line-height:1.42; word-break:break-word; }",
     "#ai-chat-widget-root .widget { position:fixed; bottom:max(72px, env(safe-area-inset-bottom) + 60px); right:18px; width:min(340px, calc(100vw - 24px)); max-height:min(540px, calc(100vh - 90px)); background:rgba(255,255,255,.88); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); border:1.5px solid rgba(0,0,0,.12); border-radius:18px; padding:12px; box-shadow:0 14px 34px rgba(0,0,0,.16); transform-origin:bottom right; transform:scale(.9) translateY(10px); opacity:0; pointer-events:none; transition:transform .2s cubic-bezier(.2,.9,.3,1.2), opacity .15s ease, width .25s ease, max-height .25s ease; z-index:2147483000; display:flex; flex-direction:column; }",
     "#ai-chat-widget-root .widget.open { transform:scale(1) translateY(0); opacity:1; pointer-events:auto; }",
     "#ai-chat-widget-root .widget.expanded { width:min(420px, calc(100vw - 24px)); max-height:min(640px, calc(100vh - 40px)); }",
@@ -1241,7 +1256,16 @@ WIDGET_JS = r"""
       '<svg class="icon-mic" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>' +
       '<svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>' +
     "</button>" +
-    '<div class="fab-greeting" id="fabGreeting"></div>' +
+    '<div class="fab-greeting" id="fabGreeting" style="display:none;">' +
+      '<div class="fg-header">' +
+        '<div class="fg-bot-tag">' +
+          '<div class="fg-avatar-mini" id="fgAvatarMini">AI</div>' +
+          '<span class="fg-name" id="fgBotName">AI Assistant</span>' +
+        '</div>' +
+        '<button class="fg-close" id="fgClose" aria-label="Close" title="Dismiss">&times;</button>' +
+      '</div>' +
+      '<div class="fg-text" id="fgText">Hey there! How can I help you today?</div>' +
+    '</div>' +
     '<div class="widget" id="chatWidget">' +
       '<div class="header">' +
         '<div class="avatar" id="headerAvatar">AI</div>' +
@@ -1289,6 +1313,80 @@ WIDGET_JS = r"""
   var headerName = document.getElementById("headerName");
   var greetingBubble = document.getElementById("greetingBubble");
   var fabGreeting = document.getElementById("fabGreeting");
+  var fgClose = document.getElementById("fgClose");
+  var fgBotName = document.getElementById("fgBotName");
+  var fgText = document.getElementById("fgText");
+  var fgAvatarMini = document.getElementById("fgAvatarMini");
+  var greetingDismissed = false;
+  try {
+    greetingDismissed = sessionStorage.getItem("aiChatGreetingDismissed_" + SHOP) === "1";
+  } catch (e) {}
+
+  function showOutsideGreeting(name, message, color) {
+    if (greetingDismissed) return;
+    if (widget.classList.contains("open")) return;
+    if (!fabGreeting) return;
+
+    var botName = name || (headerName ? headerName.textContent : "AI Assistant");
+    if (fgBotName) fgBotName.textContent = botName;
+    if (fgAvatarMini) {
+      if (color) fgAvatarMini.style.background = color;
+      fgAvatarMini.textContent = (botName || "AI").slice(0, 2).toUpperCase();
+    }
+
+    var text = message;
+    if (!text) {
+      if (customerName) {
+        text = "Hey " + customerName + "! I'm " + botName + ". Can I help you find something or check an order today?";
+      } else {
+        text = "Hey there! I'm " + botName + ". How can I help you today?";
+      }
+    }
+    if (fgText) fgText.textContent = text;
+
+    fabGreeting.style.display = "flex";
+    setTimeout(function () {
+      if (!widget.classList.contains("open") && !greetingDismissed) {
+        fabGreeting.classList.add("show");
+      }
+    }, 500);
+  }
+
+  function hideOutsideGreeting(permanent) {
+    if (!fabGreeting) return;
+    fabGreeting.classList.remove("show");
+    setTimeout(function () {
+      if (!fabGreeting.classList.contains("show")) {
+        fabGreeting.style.display = "none";
+      }
+    }, 300);
+    if (permanent) {
+      greetingDismissed = true;
+      try { sessionStorage.setItem("aiChatGreetingDismissed_" + SHOP, "1"); } catch (e) {}
+    }
+  }
+
+  if (fabGreeting) {
+    fabGreeting.addEventListener("click", function (e) {
+      if (e.target && (e.target.id === "fgClose" || e.target.classList.contains("fg-close"))) {
+        e.stopPropagation();
+        hideOutsideGreeting(true);
+        return;
+      }
+      hideOutsideGreeting(false);
+      var isOpen = widget.classList.toggle("open", true);
+      fab.classList.toggle("open", true);
+      renderQuickActions();
+      persistState();
+    });
+  }
+
+  if (fgClose) {
+    fgClose.addEventListener("click", function (e) {
+      e.stopPropagation();
+      hideOutsideGreeting(true);
+    });
+  }
 
   var SESSION_ID = (function () {
     var k = "aiChatSessionId_" + SHOP;
@@ -1825,7 +1923,10 @@ WIDGET_JS = r"""
     syncCustomerSession();
     var isOpen = widget.classList.toggle("open");
     fab.classList.toggle("open", isOpen);
-    if (isOpen) { renderQuickActions(); }
+    if (isOpen) {
+      hideOutsideGreeting(false);
+      renderQuickActions();
+    }
     persistState();
   });
 
@@ -1909,8 +2010,14 @@ WIDGET_JS = r"""
           headerAvatar.style.background = cfg.theme_color;
         }
         refreshCartBadge();
+        var greetingMsg = cfg.greeting_message || cfg.agent_title || "";
+        showOutsideGreeting(cfg.agent_name, greetingMsg, cfg.theme_color);
       }
     })
-    .catch(function () { root.style.display = "block"; syncCustomerSession(); });
+    .catch(function () {
+      root.style.display = "block";
+      syncCustomerSession();
+      showOutsideGreeting("AI Assistant", "Hey there! How can I help you today?", "#2b2b2b");
+    });
 })();
 """
