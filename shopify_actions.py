@@ -78,31 +78,38 @@ def _url(store, path: str) -> str:
 
 
 def _access_error(order: dict, email: str, customer_id, order_number: str, what: str = "looked up") -> dict | None:
-    """Decides whether the requester may see/act on this order.
-    Returns None when access is granted, otherwise the error dict to return.
+    order_cust = (order.get("customer") or {})
+    order_cust_id = str(order_cust.get("id") or "").split("/")[-1]
+    raw_cust_id = str(customer_id or "").split("/")[-1]
 
-      1. A logged-in shopper (customer_id comes from a verified app-proxy
-         session token) may access any order linked to their own account -
-         no email needed.
-      2. Otherwise (guest order, or not logged in) the email they give must
-         match the one on the order.
-    """
-    if customer_id and str((order.get("customer") or {}).get("id") or "") == str(customer_id):
+    # 1. Customer ID match
+    if raw_cust_id and order_cust_id and raw_cust_id == order_cust_id:
         return None
-    if not email:
-        msg = ("This order isn't linked to your account. Please confirm the email address used on it."
-               if customer_id else
-               f"For privacy, please confirm the email address used on this order before it can be {what}.")
-        return {"error": "verification_required", "order_number": order_number, "message": msg}
-    order_email = (order.get("email") or order.get("contact_email") or "").strip().lower()
-    if not order_email or order_email != email:
-        print(f"_access_error: email mismatch for #{order_number} (order email present: {bool(order_email)})")
+
+    order_email = (order.get("email") or order.get("contact_email") or order_cust.get("email") or "").strip().lower()
+    clean_email = (email or "").strip().lower()
+
+    # 2. Email match (user logged in with email or verified email)
+    if clean_email and order_email and clean_email == order_email:
+        return None
+
+    # 3. Logged-in customer check
+    if raw_cust_id:
+        if not order_email or (clean_email and clean_email == order_email):
+            return None
+    if clean_email:
+        if not order_email or clean_email == order_email:
+            return None
+        print(f"_access_error: email mismatch for #{order_number} ({clean_email} vs {order_email})")
         return {
             "error": "verification_failed",
             "order_number": order_number,
-            "message": "That email doesn't match our records for this order. Order details can only be shared with the email on file.",
+            "message": "That order appears to be associated with a different email address.",
         }
-    return None
+
+    # 4. Anonymous guest without email
+    msg = f"For privacy, please confirm the email address used on this order before it can be {what}."
+    return {"error": "verification_required", "order_number": order_number, "message": msg}
 
 
 def _extract_order_number(entities: dict, message: str = "") -> str | None:
@@ -253,23 +260,7 @@ async def get_active_products_graphql(store, first: int=100) -> list[dict]:
 
 
 async def get_my_orders(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
-    if customer_id:
-        cust_orders = await get_customer_orders(store, customer_id, first=50)
-        if isinstance(cust_orders, dict) and "active_orders" in cust_orders:
-            all_orders = cust_orders.get("active_orders", []) + cust_orders.get("past_orders", [])
-            return {
-                **cust_orders,
-                "orders": all_orders,
-                "count": len(all_orders),
-            }
-        return cust_orders
-    email = (entities.get("email") or "").strip().lower()
-    if email:
-        return await list_recent_orders(store, entities, session_id, customer_id=customer_id)
-    return {
-        "error": "verification_required",
-        "message": "Please share the email address associated with your orders so I can display your order history.",
-    }
+    return await list_recent_orders(store, entities, session_id, customer_id=customer_id)
 
 
 async def get_recommendations(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
@@ -499,10 +490,18 @@ async def forgot_password(store, entities: dict, session_id: str) -> dict:
 # ==========================================================================
 async def track_order(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
     order_number = _extract_order_number(entities)
+    email = (entities.get("email") or "").strip().lower()
+
+    if not order_number and (customer_id or email):
+        recent = await list_recent_orders(store, entities, session_id, customer_id=customer_id)
+        orders = recent.get("orders") or (recent.get("active_orders", []) + recent.get("past_orders", []))
+        if orders:
+            order_number = orders[0].get("order_number") or str(orders[0].get("id"))
+            entities["order_number"] = order_number
+
     if not order_number:
         return {"error": "missing_order_number", "message": "No order number was given."}
 
-    email = (entities.get("email") or "").strip().lower()
     # Guests must give an email up front; logged-in shoppers are checked
     # against the order's customer after the lookup.
     if not email and not customer_id:
@@ -573,72 +572,81 @@ async def track_order(store, entities: dict, session_id: str, customer_id: str |
 
 
 async def list_recent_orders(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    email = (entities.get("email") or "").strip().lower()
+
     if customer_id:
         cust_orders = await get_customer_orders(store, customer_id, first=50)
         if isinstance(cust_orders, dict) and "active_orders" in cust_orders:
             all_orders = cust_orders.get("active_orders", []) + cust_orders.get("past_orders", [])
-            return {
-                **cust_orders,
-                "orders": all_orders,
-                "count": len(all_orders),
-            }
-        return cust_orders
+            if all_orders or not email:
+                return {
+                    **cust_orders,
+                    "orders": all_orders,
+                    "count": len(all_orders),
+                }
 
-    email = (entities.get("email") or "").strip().lower()
-    if not email:
+    if not email and not customer_id:
         return {
             "error": "verification_required",
             "message": "Please share the email address on your account so your orders can be looked up.",
         }
 
-    resp = await _get(store, "orders.json", {"status": "any", "limit": 50, "order": "created_at desc", "email": email})
-    if resp.status_code != 200:
+    if email:
+        resp = await _get(store, "orders.json", {"status": "any", "limit": 50, "order": "created_at desc", "email": email})
+        if resp.status_code == 200:
+            orders = resp.json().get("orders", [])
+            formatted_orders = []
+            for o in orders:
+                line_items = []
+                for line in o.get("line_items", []):
+                    line_items.append({
+                        "name": line.get("title") or line.get("name") or "Product",
+                        "quantity": line.get("quantity", 1),
+                        "price": line.get("price"),
+                        "variant": line.get("variant_title") or "",
+                    })
+                fulfillment_status = (o.get("fulfillment_status") or "unfulfilled").lower()
+                financial_status = (o.get("financial_status") or "paid").lower()
+                tracking_list = []
+                for f in o.get("fulfillments", []):
+                    tracking_number = f.get("tracking_number") or (f.get("tracking_numbers") or [None])[0]
+                    if tracking_number:
+                        tracking_list.append({
+                            "number": tracking_number,
+                            "company": f.get("tracking_company") or "Carrier",
+                            "url": f.get("tracking_url") or (f.get("tracking_urls") or [None])[0],
+                        })
+                formatted_orders.append({
+                    "id": str(o.get("id")),
+                    "order_number": str(o.get("name") or o.get("order_number") or "").lstrip("#"),
+                    "date": (o.get("created_at") or "")[:10],
+                    "status": fulfillment_status.replace("_", " "),
+                    "fulfillment_status": fulfillment_status,
+                    "financial_status": financial_status,
+                    "total": o.get("total_price"),
+                    "currency": o.get("currency") or "USD",
+                    "items": line_items,
+                    "tracking": tracking_list,
+                })
+
+            active = [o for o in formatted_orders if o.get("status") not in {"fulfilled", "delivered", "cancelled"}]
+            past = [o for o in formatted_orders if o.get("status") in {"fulfilled", "delivered", "cancelled"}]
+            return {
+                "orders": formatted_orders,
+                "active_orders": active,
+                "past_orders": past,
+                "count": len(formatted_orders),
+                "email": email,
+            }
         print(f"list_recent_orders: orders.json -> {resp.status_code} {resp.text[:400]}")
         return {"error": "lookup_failed", "message": "Could not reach Shopify to look up orders."}
 
-    orders = resp.json().get("orders", [])
-    formatted_orders = []
-    for o in orders:
-        line_items = []
-        for line in o.get("line_items", []):
-            line_items.append({
-                "name": line.get("title") or line.get("name") or "Product",
-                "quantity": line.get("quantity", 1),
-                "price": line.get("price"),
-                "variant": line.get("variant_title") or "",
-            })
-        fulfillment_status = (o.get("fulfillment_status") or "unfulfilled").lower()
-        financial_status = (o.get("financial_status") or "paid").lower()
-        tracking_list = []
-        for f in o.get("fulfillments", []):
-            tracking_number = f.get("tracking_number") or (f.get("tracking_numbers") or [None])[0]
-            if tracking_number:
-                tracking_list.append({
-                    "number": tracking_number,
-                    "company": f.get("tracking_company") or "Carrier",
-                    "url": f.get("tracking_url") or (f.get("tracking_urls") or [None])[0],
-                })
-        formatted_orders.append({
-            "id": str(o.get("id")),
-            "order_number": str(o.get("name") or o.get("order_number") or "").lstrip("#"),
-            "date": (o.get("created_at") or "")[:10],
-            "status": fulfillment_status.replace("_", " "),
-            "fulfillment_status": fulfillment_status,
-            "financial_status": financial_status,
-            "total": o.get("total_price"),
-            "currency": o.get("currency") or "USD",
-            "items": line_items,
-            "tracking": tracking_list,
-        })
-
-    active = [o for o in formatted_orders if o.get("status") not in {"fulfilled", "delivered", "cancelled"}]
-    past = [o for o in formatted_orders if o.get("status") in {"fulfilled", "delivered", "cancelled"}]
     return {
-        "orders": formatted_orders,
-        "active_orders": active,
-        "past_orders": past,
-        "count": len(formatted_orders),
-        "email": email,
+        "orders": [],
+        "active_orders": [],
+        "past_orders": [],
+        "count": 0,
+        "message": "You don't have any past orders yet.",
     }
 
 
@@ -865,10 +873,18 @@ async def clear_cart(store, entities: dict, session_id: str) -> dict:
 async def submit_claim(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
     order_number = _extract_order_number(entities)
     issue = entities.get("issue_description") or entities.get("issue") or "Damaged or defective item"
+    email = (entities.get("email") or "").strip().lower()
+
+    if not order_number and (customer_id or email):
+        recent = await list_recent_orders(store, entities, session_id, customer_id=customer_id)
+        orders = recent.get("orders") or (recent.get("active_orders", []) + recent.get("past_orders", []))
+        if orders:
+            order_number = orders[0].get("order_number") or str(orders[0].get("id"))
+            entities["order_number"] = order_number
+
     if not order_number:
         return {"error": "missing_order_number", "message": "Please specify the order number to file a warranty claim."}
 
-    email = (entities.get("email") or "").strip().lower()
     if not email and not customer_id:
         return {
             "error": "verification_required",
@@ -921,6 +937,7 @@ async def submit_claim(store, entities: dict, session_id: str, customer_id: str 
 async def check_claim_status(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
     claim_id = entities.get("claim_id")
     order_number = _extract_order_number(entities)
+    email = (entities.get("email") or "").strip().lower()
 
     if claim_id and claim_id in _WARRANTY_CLAIMS:
         rec = _WARRANTY_CLAIMS[claim_id]
@@ -931,6 +948,13 @@ async def check_claim_status(store, entities: dict, session_id: str, customer_id
             "issue": rec.get("issue"),
             "note": f"Claim {claim_id} is under review by support.",
         }
+
+    if not order_number and not claim_id and (customer_id or email):
+        recent = await list_recent_orders(store, entities, session_id, customer_id=customer_id)
+        orders = recent.get("orders") or (recent.get("active_orders", []) + recent.get("past_orders", []))
+        if orders:
+            order_number = orders[0].get("order_number") or str(orders[0].get("id"))
+            entities["order_number"] = order_number
 
     if not order_number and not claim_id:
         return {"error": "missing_order_number", "message": "Please provide your order number or warranty claim ID to check status."}

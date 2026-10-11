@@ -264,18 +264,68 @@ async def run_tests():
     print("PASS: Follow-up for OTP code handled directly.")
 
     print("\n==================================================")
-    print("  TEST 7: WIDGET JS ASSET SERVING")
+    print("  TEST 7: WIDGET JS ASSET SERVING & SESSION SYNC")
     print("==================================================")
     assert len(chatbot_widget.WIDGET_JS) > 1000
     assert "ai-chat-widget-root" in chatbot_widget.WIDGET_JS
     assert "/cart/add.js" in chatbot_widget.WIDGET_JS
     assert "verify-otp" in chatbot_widget.WIDGET_JS
     assert "save-payment-credentials" in chatbot_widget.WIDGET_JS
-    print("PASS: Widget JS contains complete UI, cart AJAX handlers, and payment modals.")
+    assert "syncCustomerSession" in chatbot_widget.WIDGET_JS, "syncCustomerSession missing from WIDGET_JS"
+    assert "header-cust-badge" in chatbot_widget.WIDGET_JS, "header-cust-badge missing from WIDGET_JS"
+    assert "customer_email: customerEmail" in chatbot_widget.WIDGET_JS, "customer_email missing from WIDGET_JS payload"
+    assert "customer_id: customerId" in chatbot_widget.WIDGET_JS, "customer_id missing from WIDGET_JS payload"
+    print("PASS: Widget JS contains complete UI, cart AJAX handlers, payment modals, and logged-in customer session sync.")
 
     print("\n==================================================")
-    print("  ALL 7 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
+    print("  TEST 8: LOGGED-IN CUSTOMER EMAIL VERIFICATION BYPASS")
+    print("==================================================")
+    logged_in_email = "shopper.vip@example.com"
+    logged_in_cust_id = "cust_998877"
+
+    # 1. Anonymous guest asking for orders -> verification_required
+    guest_orders_res = await shopify_actions.list_recent_orders(
+        store, {}, session_id="guest_session_1", customer_id=None
+    )
+    assert guest_orders_res.get("error") == "verification_required", "Guest should be asked for verification"
+    print("PASS: Anonymous guest is properly prompted for email verification.")
+
+    # 2. Logged-in customer (with email in entities/session) -> NO verification_required
+    auth_orders_res = await shopify_actions.list_recent_orders(
+        store, {"email": logged_in_email}, session_id="auth_session_1", customer_id=None
+    )
+    assert auth_orders_res.get("error") != "verification_required", f"Logged-in user got verification error: {auth_orders_res}"
+    print("PASS: Logged-in user with email never receives verification_required when listing orders.")
+
+    # 3. Logged-in customer (with customer_id) -> NO verification_required
+    auth_cust_orders = await shopify_actions.list_recent_orders(
+        store, {}, session_id="auth_session_2", customer_id=logged_in_cust_id
+    )
+    assert auth_cust_orders.get("error") != "verification_required", f"Customer ID session got verification error: {auth_cust_orders}"
+    print("PASS: Logged-in user with customer_id never receives verification_required when listing orders.")
+
+    # 4. Access check in _access_error with logged-in user email matching order
+    mock_order = {
+        "id": "77701",
+        "name": "#1099",
+        "email": logged_in_email,
+        "customer": {"id": "998877", "email": logged_in_email}
+    }
+    access_res = shopify_actions._access_error(mock_order, logged_in_email, logged_in_cust_id, "1099")
+    assert access_res is None, f"Expected access granted (None), got {access_res}"
+    print("PASS: Logged-in customer granted immediate access to their order without verification prompt.")
+
+    # 5. Session cache remembering customer email
+    chatbot_widget._remember_customer("demo-store.myshopify.com", "auth_session_3", logged_in_cust_id, logged_in_email, "Alex VIP")
+    assert chatbot_widget._session_customer_email("demo-store.myshopify.com", "auth_session_3") == logged_in_email
+    assert chatbot_widget._session_customer_name("demo-store.myshopify.com", "auth_session_3") == "Alex VIP"
+    assert chatbot_widget._session_customer("demo-store.myshopify.com", "auth_session_3") == logged_in_cust_id
+    print("PASS: Customer email, name, and ID seamlessly remembered across session turns.")
+
+    print("\n==================================================")
+    print("  ALL 8 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
     print("==================================================")
 
 if __name__ == "__main__":
     asyncio.run(run_tests())
+

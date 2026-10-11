@@ -149,6 +149,9 @@ class ChatRequest(BaseModel):
     session_id: str = "anonymous"
     shop: str
     customer_token: str | None = None
+    customer_id: str | None = None
+    customer_email: str | None = None
+    customer_name: str | None = None
     visitor_id: str | None = None
     otp_code: str | None = None
     payment_data: dict | None = None
@@ -159,6 +162,9 @@ class ConfirmRequest(BaseModel):
     session_id: str = "anonymous"
     confirmed: bool
     customer_token: str | None = None
+    customer_id: str | None = None
+    customer_email: str | None = None
+    customer_name: str | None = None
     visitor_id: str | None = None
 
 
@@ -170,12 +176,18 @@ class PaymentCredentialsRequest(BaseModel):
     expiry: str | None = None
     cvv: str | None = None
     customer_token: str | None = None
+    customer_id: str | None = None
+    customer_email: str | None = None
+    customer_name: str | None = None
 
 
 class InitiatePaymentRequest(BaseModel):
     shop: str
     session_id: str = "anonymous"
     customer_token: str | None = None
+    customer_id: str | None = None
+    customer_email: str | None = None
+    customer_name: str | None = None
 
 
 class VerifyOtpRequest(BaseModel):
@@ -183,21 +195,38 @@ class VerifyOtpRequest(BaseModel):
     session_id: str = "anonymous"
     otp_code: str
     customer_token: str | None = None
+    customer_id: str | None = None
+    customer_email: str | None = None
+    customer_name: str | None = None
 
 
 _CUSTOMER_SESSIONS: dict[tuple[str, str], str] = {}
+_CUSTOMER_EMAILS: dict[tuple[str, str], str] = {}
+_CUSTOMER_NAMES: dict[tuple[str, str], str] = {}
 
 
-def _remember_customer(shop: str, session_id: str, customer_id: str | None) -> None:
+def _remember_customer(shop: str, session_id: str, customer_id: str | None, email: str | None = None, name: str | None = None) -> None:
     key = (shop, session_id)
     if customer_id:
         _CUSTOMER_SESSIONS[key] = str(customer_id)
-    else:
+    elif customer_id is None and not email:
         _CUSTOMER_SESSIONS.pop(key, None)
+    if email:
+        _CUSTOMER_EMAILS[key] = str(email).strip().lower()
+    if name:
+        _CUSTOMER_NAMES[key] = str(name).strip()
 
 
 def _session_customer(shop: str, session_id: str) -> str | None:
     return _CUSTOMER_SESSIONS.get((shop, session_id))
+
+
+def _session_customer_email(shop: str, session_id: str) -> str | None:
+    return _CUSTOMER_EMAILS.get((shop, session_id))
+
+
+def _session_customer_name(shop: str, session_id: str) -> str | None:
+    return _CUSTOMER_NAMES.get((shop, session_id))
 
 
 def _get_store(shop: str) -> SimpleNamespace | None:
@@ -459,6 +488,16 @@ def _as_variant_id(value):
 # =======================================================================
 @observe(name="execute_and_reply")
 async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, entities: dict, language: str, original_message: str, session_id: str, customer_id: str | None = None) -> dict:
+    shop = store.shop_domain
+    if not customer_id:
+        customer_id = _session_customer(shop, session_id)
+    cached_email = _session_customer_email(shop, session_id)
+    if cached_email and not entities.get("email"):
+        entities["email"] = cached_email
+    cached_name = _session_customer_name(shop, session_id)
+    if cached_name and not entities.get("customer_name"):
+        entities["customer_name"] = cached_name
+
     raw = await shopify_actions.dispatch(intent, action, store, entities, session_id, customer_id=customer_id)
     data, widget_action = _split_widget_action(raw)
 
@@ -682,10 +721,31 @@ async def _chat_impl(req: ChatRequest):
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
+    customer_id = (
+        customer_profiles.read_session_token(req.customer_token, req.shop)
+        or req.customer_id
+        or _session_customer(req.shop, req.session_id)
+    )
+    customer_email = (
+        (req.customer_email or "").strip().lower()
+        or _session_customer_email(req.shop, req.session_id)
+    )
+    customer_name = (
+        (req.customer_name or "").strip()
+        or _session_customer_name(req.shop, req.session_id)
+    )
+
     if req.customer_token and not customer_id:
         return {"reply": "", "session_expired": True}
-    _remember_customer(req.shop, req.session_id, customer_id)
+
+    if customer_id and not customer_email:
+        profile = await customer_profiles.get_profile(req.shop, customer_id)
+        if profile and profile.get("email"):
+            customer_email = profile["email"].strip().lower()
+        if profile and profile.get("name") and not customer_name:
+            customer_name = profile["name"].strip()
+
+    _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
     customer_profile = await customer_profiles.get_profile(req.shop, customer_id) if customer_id else None
 
     _prune_pending()
@@ -777,9 +837,16 @@ async def _chat_impl(req: ChatRequest):
             entities["query"] = extracted
 
     try:
+        if customer_email and not entities.get("email"):
+            entities["email"] = customer_email
+        if customer_id and not entities.get("customer_id"):
+            entities["customer_id"] = str(customer_id)
+        if customer_name and not entities.get("customer_name"):
+            entities["customer_name"] = str(customer_name)
+
         # 1. Order History: Show all orders
         if (intent, action) in (("order_tracking", "list_recent_orders"), ("customer_account", "get_my_orders")):
-            if not customer_id and not entities.get("email"):
+            if not customer_id and not entities.get("email") and not customer_email:
                 email_found = EMAIL_RE.search(message)
                 if email_found:
                     entities["email"] = email_found.group(0).lower()
@@ -792,7 +859,7 @@ async def _chat_impl(req: ChatRequest):
         # 2. Track Order
         if intent == "order_tracking" and action == "track_order":
             has_number = bool(entities.get("order_number") or entities.get("order_id") or _ORDER_NO_RE.search(message))
-            if not has_number and not customer_id:
+            if not has_number and not customer_id and not customer_email and not entities.get("email"):
                 out = _ask(key, "await_order_number", "Ask the shopper for their order number (for example #1001).",
                            language, message, "Sure — what's your order number?", asked=1)
                 _log(req.shop, message, "awaiting_order", intent, action, None, out["reply"])
@@ -903,8 +970,10 @@ async def confirm(req: ConfirmRequest):
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
-    _remember_customer(req.shop, req.session_id, customer_id)
+    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or req.customer_id or _session_customer(req.shop, req.session_id)
+    customer_email = (req.customer_email or "").strip().lower() or _session_customer_email(req.shop, req.session_id)
+    customer_name = (req.customer_name or "").strip() or _session_customer_name(req.shop, req.session_id)
+    _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
 
     _prune_pending()
     pending = PENDING.pop(_pkey(req.shop, req.session_id), None)
@@ -934,7 +1003,10 @@ async def save_payment_credentials_endpoint(req: PaymentCredentialsRequest):
     store = _get_store(req.shop)
     if not store:
         return {"error": "unknown_store"}
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
+    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or req.customer_id or _session_customer(req.shop, req.session_id)
+    customer_email = (req.customer_email or "").strip().lower() or _session_customer_email(req.shop, req.session_id)
+    customer_name = (req.customer_name or "").strip() or _session_customer_name(req.shop, req.session_id)
+    _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
     entities = {
         "cardholder_name": req.cardholder_name,
         "card_number": req.card_number,
@@ -949,7 +1021,10 @@ async def initiate_payment_endpoint(req: InitiatePaymentRequest):
     store = _get_store(req.shop)
     if not store:
         return {"error": "unknown_store"}
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
+    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or req.customer_id or _session_customer(req.shop, req.session_id)
+    customer_email = (req.customer_email or "").strip().lower() or _session_customer_email(req.shop, req.session_id)
+    customer_name = (req.customer_name or "").strip() or _session_customer_name(req.shop, req.session_id)
+    _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
     result = await shopify_actions.initiate_payment(store, {}, req.session_id, customer_id=customer_id)
     if result.get("status") == "otp_required":
         key = _pkey(req.shop, req.session_id)
@@ -962,7 +1037,10 @@ async def verify_otp_endpoint(req: VerifyOtpRequest):
     store = _get_store(req.shop)
     if not store:
         return {"error": "unknown_store"}
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)
+    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or req.customer_id or _session_customer(req.shop, req.session_id)
+    customer_email = (req.customer_email or "").strip().lower() or _session_customer_email(req.shop, req.session_id)
+    customer_name = (req.customer_name or "").strip() or _session_customer_name(req.shop, req.session_id)
+    _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
     result = await shopify_actions.confirm_payment_otp(store, {"otp_code": req.otp_code}, req.session_id, customer_id=customer_id)
     if result.get("status") == "payment_success":
         key = _pkey(req.shop, req.session_id)
@@ -1075,6 +1153,7 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }",
     "#ai-chat-widget-root .avatar { width:26px; height:26px; border-radius:50%; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:10px; background-size:cover; background-position:center; }",
     "#ai-chat-widget-root .header h1 { margin:0; font-size:13px; font-weight:700; color:#1a1a1a; }",
+    "#ai-chat-widget-root .header-cust-badge { display:none; align-items:center; font-size:9.5px; font-weight:600; color:#166534; background:#dcfce7; border:1px solid #bbf7d0; padding:2px 7px; border-radius:999px; max-width:115px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-left:4px; }",
     "#ai-chat-widget-root .header-right { margin-left:auto; display:flex; align-items:center; gap:6px; }",
     "#ai-chat-widget-root .icon-btn { position:relative; width:24px; height:24px; border-radius:50%; background:#f5f5f5; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; }",
     "#ai-chat-widget-root .icon-btn svg { width:14px; height:14px; stroke:#444; }",
@@ -1234,6 +1313,116 @@ WIDGET_JS = r"""
   })();
 
   var customerToken = null;
+  var customerId = null;
+  var customerEmail = null;
+  var customerName = null;
+
+  function updateHeaderProfileBadge() {
+    var badgeEl = document.getElementById("headerCustBadge");
+    if (!badgeEl) {
+      badgeEl = document.createElement("div");
+      badgeEl.id = "headerCustBadge";
+      badgeEl.className = "header-cust-badge";
+      var headerRight = document.querySelector("#ai-chat-widget-root .header-right");
+      if (headerRight && headerRight.parentNode) headerRight.parentNode.insertBefore(badgeEl, headerRight);
+    }
+    if (customerEmail || customerName) {
+      var displayLabel = customerName || (customerEmail ? customerEmail.split("@")[0] : "Logged in");
+      badgeEl.textContent = "\uD83D\uDC64 " + displayLabel;
+      badgeEl.title = "Logged in as " + (customerEmail || customerName);
+      badgeEl.style.display = "inline-flex";
+    } else {
+      badgeEl.style.display = "none";
+    }
+  }
+
+  function syncCustomerSession() {
+    try {
+      customerId = customerId || sessionStorage.getItem("ai_cust_id_" + SHOP) || null;
+      customerEmail = customerEmail || sessionStorage.getItem("ai_cust_email_" + SHOP) || null;
+      customerName = customerName || sessionStorage.getItem("ai_cust_name_" + SHOP) || null;
+
+      if (window.__st && window.__st.cid) {
+        customerId = String(window.__st.cid);
+      }
+      if (window.ShopifyAnalytics && window.ShopifyAnalytics.meta && window.ShopifyAnalytics.meta.page && window.ShopifyAnalytics.meta.page.customerId) {
+        customerId = String(window.ShopifyAnalytics.meta.page.customerId);
+      }
+
+      var isAccountPage = window.location.pathname.indexOf("/account") !== -1;
+      var logoutLink = document.querySelector('a[href*="/account/logout"]');
+      if (logoutLink || isAccountPage) {
+        var emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+        var emailEl = document.querySelector('[data-customer-email], .customer-email, .account-email, #customer_email');
+        if (emailEl && emailEl.textContent && emailRe.test(emailEl.textContent)) {
+          var m = emailEl.textContent.match(emailRe);
+          if (m) customerEmail = m[0].toLowerCase();
+        }
+        if (!customerEmail) {
+          var accountSection = document.querySelector('.customer__account, .account, .customer, #account, main');
+          if (accountSection && emailRe.test(accountSection.innerText)) {
+            var m2 = accountSection.innerText.match(emailRe);
+            if (m2) customerEmail = m2[0].toLowerCase();
+          }
+        }
+        var nameEl = document.querySelector('.customer__title, .account-title, .customer-name, h1, h2');
+        if (nameEl && nameEl.textContent) {
+          var cleanName = nameEl.textContent.replace(/(account|details|orders|overview|my\s*account)/gi, "").trim();
+          if (cleanName && cleanName.length > 1 && cleanName.length < 50) {
+            customerName = cleanName;
+          }
+        }
+      }
+
+      if (customerId) sessionStorage.setItem("ai_cust_id_" + SHOP, customerId);
+      if (customerEmail) sessionStorage.setItem("ai_cust_email_" + SHOP, customerEmail);
+      if (customerName) sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
+
+      if (!customerEmail) {
+        fetch("/account", { credentials: "same-origin", headers: { Accept: "text/html" } })
+          .then(function (res) {
+            if (res.ok && res.url && res.url.indexOf("/account/login") === -1) {
+              return res.text();
+            }
+            return null;
+          })
+          .then(function (html) {
+            if (!html) return;
+            if (html.indexOf("/account/logout") === -1 && html.indexOf("customer_logout") === -1) return;
+            var emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+            var match = html.match(emailRe);
+            if (match && match[0]) {
+              customerEmail = match[0].toLowerCase();
+              sessionStorage.setItem("ai_cust_email_" + SHOP, customerEmail);
+            }
+            var cidMatch = html.match(/"cid":\s*"?(\d+)"?/) || html.match(/"customerId":\s*"?(\d+)"?/);
+            if (cidMatch && cidMatch[1]) {
+              customerId = cidMatch[1];
+              sessionStorage.setItem("ai_cust_id_" + SHOP, customerId);
+            }
+            updateHeaderProfileBadge();
+          })
+          .catch(function () {});
+      }
+
+      if (CFG.customerSessionPath) {
+        fetch(CFG.customerSessionPath, { credentials: "same-origin" })
+          .then(function (res) { return res.json(); })
+          .then(function (data) {
+            if (data && data.authenticated) {
+              customerToken = data.customer_token || customerToken;
+              customerId = data.customer_id || customerId;
+              if (data.first_name) customerName = data.first_name;
+              if (customerId) sessionStorage.setItem("ai_cust_id_" + SHOP, customerId);
+              if (customerName) sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
+              updateHeaderProfileBadge();
+            }
+          })
+          .catch(function () {});
+      }
+    } catch (e) {}
+    updateHeaderProfileBadge();
+  }
   var STATE_KEY = "aiChatWidgetState_" + SHOP;
   var chatHistory = [];
   var quickActionsRendered = false;
@@ -1411,7 +1600,7 @@ WIDGET_JS = r"""
       fetch(CFG.saveCredentialsEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ shop: SHOP, session_id: SESSION_ID, cardholder_name: name, card_number: num, expiry: exp })
+        body: JSON.stringify({ shop: SHOP, session_id: SESSION_ID, cardholder_name: name, card_number: num, expiry: exp, customer_token: customerToken, customer_id: customerId, customer_email: customerEmail, customer_name: customerName })
       }).then(function () {
         sendMessage("Pay for my cart");
       }).catch(function () {
@@ -1448,7 +1637,7 @@ WIDGET_JS = r"""
         fetch(CFG.confirmEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: SESSION_ID, shop: SHOP, confirmed: opt.confirmed, customer_token: customerToken, visitor_id: VISITOR_ID })
+          body: JSON.stringify({ session_id: SESSION_ID, shop: SHOP, confirmed: opt.confirmed, customer_token: customerToken, customer_id: customerId, customer_email: customerEmail, customer_name: customerName, visitor_id: VISITOR_ID })
         })
           .then(function (res) { return res.json(); })
           .then(function (data) { typingEl.remove(); handleChatResponse(data); })
@@ -1614,7 +1803,7 @@ WIDGET_JS = r"""
     fetch(CFG.chatEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: SESSION_ID, shop: SHOP, customer_token: customerToken, visitor_id: VISITOR_ID })
+      body: JSON.stringify({ message: text, session_id: SESSION_ID, shop: SHOP, customer_token: customerToken, customer_id: customerId, customer_email: customerEmail, customer_name: customerName, visitor_id: VISITOR_ID })
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
@@ -1633,6 +1822,7 @@ WIDGET_JS = r"""
   });
 
   fab.addEventListener("click", function () {
+    syncCustomerSession();
     var isOpen = widget.classList.toggle("open");
     fab.classList.toggle("open", isOpen);
     if (isOpen) { renderQuickActions(); }
@@ -1705,11 +1895,13 @@ WIDGET_JS = r"""
   }
 
   // Fetch widget config and activate
+  syncCustomerSession();
   fetch(CFG.configEndpoint)
     .then(function (r) { return r.json(); })
     .then(function (cfg) {
       if (cfg && cfg.status !== "inactive") {
         root.style.display = "block";
+        syncCustomerSession();
         if (cfg.agent_name) headerName.textContent = cfg.agent_name;
         if (cfg.agent_title) greetingBubble.textContent = cfg.agent_title;
         if (cfg.theme_color) {
@@ -1719,6 +1911,6 @@ WIDGET_JS = r"""
         refreshCartBadge();
       }
     })
-    .catch(function () { root.style.display = "block"; });
+    .catch(function () { root.style.display = "block"; syncCustomerSession(); });
 })();
 """
