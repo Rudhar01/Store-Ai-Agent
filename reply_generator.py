@@ -22,6 +22,11 @@ import json
 import re
 import llm_selector
 try:
+    import rag_retriever
+except ImportError:
+    rag_retriever = None
+
+try:
     from langfuse import observe, get_client
 except ImportError:
     def observe(*args, **kwargs):
@@ -100,8 +105,12 @@ def generate_reply(
     if rag_context is None and needs_rag:
         if not store_identifier:
             print("reply_generator: needs_rag=True but no store_identifier given, skipping retrieval")
-        else:
-            rag_context = rag_retriever.retrieve_context(store_identifier, rag_query or original_message)
+        elif rag_retriever:
+            try:
+                rag_context = rag_retriever.retrieve_context(store_identifier, rag_query or original_message)
+            except Exception as e:
+                print(f"reply_generator: rag retrieval failed: {e!r}")
+                rag_context = None
             
     language_name = LANGUAGE_NAMES.get(language, language)
 

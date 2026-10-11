@@ -447,6 +447,16 @@ def update_features(store_id: str, **fields) -> dict:
     return databases.update_document(DATABASE_ID, FEATURES_COLLECTION, existing["$id"], data=fields)
 
 
+def is_feature_enabled(store_id: str, feature_name: str) -> bool:
+    try:
+        features = get_features(store_id)
+        if features and feature_name in features:
+            return bool(features[feature_name])
+    except Exception:
+        pass
+    return _DEFAULT_FEATURES.get(feature_name, True)
+
+
 # --- Store info (business name, support email, timezone) ---
 
 def get_store_info(store_id: str) -> dict | None:
@@ -769,7 +779,7 @@ def get_top_viewed_products(store_id: str, days: int = 14, limit: int = 8):
 
 
 # ---- Shopify Admin API (real orders) -------------------------------
-_SHOPIFY_API_VERSION = _os.environ.get("SHOPIFY_API_VERSION", "2026-07")
+_SHOPIFY_API_VERSION = _os.environ.get("SHOPIFY_API_VERSION", "2024-10")
 _ORDERS_CACHE: dict = {}
 _ORDERS_CACHE_TTL = 60
 

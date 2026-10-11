@@ -41,6 +41,15 @@ except ImportError:
     def get_client(*args, **kwargs):
         return None
 
+
+def _span_error(msg: str) -> None:
+    try:
+        cli = get_client()
+        if cli and hasattr(cli, "update_current_span"):
+            cli.update_current_span(level="ERROR", status_message=msg)
+    except Exception:
+        pass
+
 import repository_appwrite as repo
 from intent_classifier import classify_intent, load_schema
 from reply_generator import generate_reply
@@ -311,7 +320,13 @@ def _feature_enabled(store_id: str, intent: str, action: str, entities: dict) ->
     toggle_name = _FEATURE_FOR_ACTION.get((intent, action))
     if not toggle_name:
         return True
-    return repo.is_feature_enabled(store_id, toggle_name)
+    fn = getattr(repo, "is_feature_enabled", None)
+    if callable(fn):
+        try:
+            return fn(store_id, toggle_name)
+        except Exception:
+            return True
+    return True
 
 
 def _safe_reply(action: str, data: dict, language: str, original_message: str, fallback: str, **extra) -> str:
@@ -328,12 +343,17 @@ _SEARCH_LEAD_IN = re.compile(
     r"tell me about(?:\s+any|\s+some)?|are there(?:\s+any)?|browse|where can i find|what(?:'s|\s+is) your cheapest)\s+",
     re.IGNORECASE,
 )
-_SEARCH_FILLER = re.compile(r"\b(products?|items?|please|for me|any|around|got|add|remove|delete|to my cart|from my cart|my cart|cart)\b", re.IGNORECASE)
+_SEARCH_FILLER = re.compile(r"\b(products?|items?|please|for me|any|around|got|add|remove|delete|to my cart|from my cart|my cart|cart|some|few|available|your|the|best|all)\b", re.IGNORECASE)
 _LEADING_ARTICLE = re.compile(r"^\s*(a|an|the)\s+", re.IGNORECASE)
 _CHECKOUT_RE = re.compile(r"\b(check ?out|place (my|the|an?) order|buy (it )?now|purchase now)\b", re.IGNORECASE)
 _ORDER_NO_RE = re.compile(r"#?\s*(\d{3,})")
 _MY_ORDERS_RE = re.compile(
-    r"\b(my|all|past|previous|recent|active|current|pending|open)\b[^.?!]{0,30}\borders\b|\border (history|list)\b|\bwhat (have|did) i (order|ordered|bought|purchased)\b|\b(show|list|see|view) (me )?(my )?orders\b|\bmere saare orders dikhao\b|\bmere orders\b",
+    r"\b(my|all|past|previous|recent|active|current|pending|open)\b[^.?!]{0,30}\borders\b"
+    r"|\blist of (my |the )?orders\b"
+    r"|\border (history|list)\b"
+    r"|\bwhat (have|did) i (order|ordered|bought|purchased)\b"
+    r"|\b(show|list|see|view|track|where are|check|what are) (me )?(my |the |all )?orders\b"
+    r"|\bmere saare orders dikhao\b|\bmere orders\b",
     re.IGNORECASE)
 _RECOMMEND_RE = re.compile(
     r"\brecommend|\bsuggest|\bsomething for me\b|\bwhat (should|can|do) i (buy|get)\b|\bpick(s)? for me\b|\bwhat would i like\b|\bsomething i (would|might|could) like\b",
@@ -501,14 +521,26 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
     raw = await shopify_actions.dispatch(intent, action, store, entities, session_id, customer_id=customer_id)
     data, widget_action = _split_widget_action(raw)
 
-    if action == "search_products" and isinstance(data, dict) and not data.get("error") and not data.get("results"):
-        query = entities.get("query") or entities.get("category")
-        if query:
-            alt = await _catalog_search(store, str(query))
-            if alt:
-                alt = _apply_price_filters(alt, entities)
+    if action in {"search_products", "get_recommendations", "recommend_products"} and isinstance(data, dict):
+        if not data.get("results"):
+            query = entities.get("query") or entities.get("category") or extract_search_term(original_message)
+            if query:
+                alt = await _catalog_search(store, str(query))
                 if alt:
-                    data = {**data, "results": alt}
+                    alt = _apply_price_filters(alt, entities)
+                    if alt:
+                        data["results"] = alt
+                        data.pop("error", None)
+            if not data.get("results"):
+                try:
+                    resp = await shopify_actions._get(store, "products.json", {"status": "active", "limit": 6})
+                    if resp.status_code == 200:
+                        raw_prods = resp.json().get("products", [])
+                        if raw_prods:
+                            data["results"] = [_product_card(p, store) for p in raw_prods[:6]]
+                            data.pop("error", None)
+                except Exception as e:
+                    print(f"chatbot_widget: fallback products fetch failed: {e!r}")
 
     products = data.get("results") if action in {"search_products", "get_recommendations", "recommend_products", "assistant_help", "clarify"} and isinstance(data, dict) else None
     orders = None
@@ -758,7 +790,7 @@ async def _chat_impl(req: ChatRequest):
             try:
                 followup = await _handle_followup(store, req.shop, key, pending, message, req.session_id)
             except Exception as e:
-                get_client().update_current_span(level="ERROR", status_message=str(e))
+                _span_error(str(e))
                 print(f"chatbot_widget: follow-up error: {e!r}")
                 _log(req.shop, message, "error")
                 return {"reply": "Sorry, something went wrong completing that. Please try again."}
@@ -787,49 +819,69 @@ async def _chat_impl(req: ChatRequest):
         _log(req.shop, message, result.get("status", "done"), "payment_checkout", "confirm_payment_otp", {"otp_code": otp_to_verify}, result.get("reply", ""))
         return result
 
-    try:
-        classification = classify_intent(message, SCHEMA, history=_history_for(key))
-    except Exception as e:
-        get_client().update_current_span(level="ERROR", status_message=str(e))
-        print(f"chatbot_widget: classify_intent error: {e!r}")
-        _log(req.shop, message, "error")
-        return {"reply": "Sorry, something went wrong understanding that. Could you rephrase?"}
-
-    if classification.get("intent") == "fallback" and semantic.enabled():
+    # 1. Fast-path pattern overrides (avoids LLM latency, outages, or token errors)
+    if _PAY_RE.search(message):
+        intent, action = "payment_checkout", "initiate_payment"
+        entities = {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif _MY_ORDERS_RE.search(message):
+        intent, action = "order_tracking", "list_recent_orders"
+        entities = {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif _SEARCH_LEAD_IN.search(message):
+        intent, action = "product_search", "search_products"
+        entities = {"query": extract_search_term(message)}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif re.search(r"\b(snowboard|snowboards|ski|skis|board|boards|boot|boots|jacket|hoodie|shirt|tee)\b", message, re.IGNORECASE) and not _MY_ORDERS_RE.search(message):
+        intent, action = "product_search", "search_products"
+        entities = {"query": extract_search_term(message)}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif _GREETING_RE.search(message.strip()):
+        intent, action = "general_chat", "assistant_help"
+        entities = {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif _POPULAR_RE.search(message.strip()):
+        intent, action = "general_chat", "recommend_products"
+        entities = {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    else:
+        # Nuanced intent classification via schema & LLM
         try:
-            routed = await semantic.route_intent(message)
+            classification = classify_intent(message, SCHEMA, history=_history_for(key))
         except Exception as e:
-            print(f"chatbot_widget: semantic router failed: {e!r}")
-            routed = None
-        if routed and (routed["intent"], routed["action"]) in _RESCUABLE:
-            classification = {
-                **classification,
-                "intent": routed["intent"], "action": routed["action"],
-                "entities": _rescue_entities(routed["intent"], routed["action"], message),
-                "confidence": routed["score"], "requires_confirmation": False,
-            }
+            _span_error(str(e))
+            print(f"chatbot_widget: classify_intent error: {e!r}")
+            classification = {"intent": "fallback", "action": "clarify", "entities": {}, "language": "en", "requires_confirmation": False}
 
-    intent = classification["intent"]
-    action = classification["action"]
-    entities = classification.get("entities") or {}
-    language = classification.get("language", "en")
+        if classification.get("intent") == "fallback" and semantic.enabled():
+            try:
+                routed = await semantic.route_intent(message)
+            except Exception as e:
+                print(f"chatbot_widget: semantic router failed: {e!r}")
+                routed = None
+            if routed and (routed["intent"], routed["action"]) in _RESCUABLE:
+                classification = {
+                    **classification,
+                    "intent": routed["intent"], "action": routed["action"],
+                    "entities": _rescue_entities(routed["intent"], routed["action"], message),
+                    "confidence": routed["score"], "requires_confirmation": False,
+                }
+
+        intent = classification["intent"]
+        action = classification["action"]
+        entities = classification.get("entities") or {}
+        language = classification.get("language", "en")
 
     if intent == "order_tracking" and not (entities.get("order_number") or entities.get("order_id")):
         m = _ORDER_NO_RE.search(message)
         if m:
             entities["order_number"] = m.group(1)
-
-    # Fast-path pattern overrides
-    if _PAY_RE.search(message):
-        intent, action = "payment_checkout", "initiate_payment"
-    elif _MY_ORDERS_RE.search(message):
-        intent, action = "order_tracking", "list_recent_orders"
-    elif (intent, action) == ("customer_account", "get_my_orders"):
-        intent, action = "order_tracking", "list_recent_orders"
-    elif _GREETING_RE.search(message.strip()):
-        intent, action = "general_chat", "assistant_help"
-    elif _POPULAR_RE.search(message.strip()):
-        intent, action = "general_chat", "recommend_products"
 
     if (intent, action) == ("product_search", "search_products") and not entities.get("query"):
         extracted = extract_search_term(message)
@@ -924,7 +976,7 @@ async def _chat_impl(req: ChatRequest):
             return {"status": "done", "reply": reply, "language": language}
 
     except Exception as e:
-        get_client().update_current_span(level="ERROR", status_message=str(e))
+        _span_error(str(e))
         print(f"chatbot_widget: pre-dispatch error: {e!r}")
         _log(req.shop, message, "error", intent, action, entities)
         return {"reply": "Sorry, something went wrong completing that. Please try again."}
@@ -951,7 +1003,7 @@ async def _chat_impl(req: ChatRequest):
         _log(req.shop, message, result.get("status", "done"), intent, action, entities, result.get("reply", ""))
         return result
     except Exception as e:
-        get_client().update_current_span(level="ERROR", status_message=str(e))
+        _span_error(str(e))
         print(f"chatbot_widget: dispatch error: {e}")
         _log(req.shop, message, "error", intent, action, entities)
         return {"reply": "Sorry, something went wrong completing that. Please try again."}
@@ -1114,6 +1166,25 @@ async def widget_config(shop: str):
     }
 
 
+def _extract_name_from_email(email: str) -> tuple[str, str]:
+    if not email or "@" not in email:
+        return "", ""
+    local = email.split("@")[0]
+    clean = re.sub(r"[0-9._-]+.*$", "", local).strip()
+    if not clean:
+        clean = re.sub(r"[0-9]+", "", local).strip("._-")
+    if not clean:
+        return "", ""
+    surnames = r"(thakur|sharma|singh|kumar|patel|gupta|verma|khan|reddy|smith|johnson|williams|brown|jones|miller|davis)"
+    m = re.match(rf"^([a-zA-Z]{{3,15}}?){surnames}$", clean, re.IGNORECASE)
+    if m:
+        first = m.group(1).capitalize()
+        last = m.group(2).capitalize()
+        return first, f"{first} {last}"
+    capitalized = clean.capitalize()
+    return capitalized, capitalized
+
+
 @router.get("/customer-profile")
 async def get_customer_profile(shop: str = "", customer_id: str = None, email: str = None):
     if not shop:
@@ -1121,26 +1192,27 @@ async def get_customer_profile(shop: str = "", customer_id: str = None, email: s
     store = _get_store(shop)
     if not store:
         return {"found": False}
-    if customer_id:
+
+    cid = str(customer_id or "").strip()
+    mail = (email or "").strip().lower()
+    fn = ""
+    ln = ""
+    name = ""
+
+    if cid:
         try:
-            cust = await shopify_actions.get_customer(store, str(customer_id).strip())
+            cust = await shopify_actions.get_customer(store, cid)
             if cust:
-                fn = cust.get("firstName") or ""
-                ln = cust.get("lastName") or ""
+                fn = (cust.get("firstName") or "").strip()
+                ln = (cust.get("lastName") or "").strip()
                 name = (f"{fn} {ln}").strip() or fn or ln
-                mail = ((cust.get("defaultEmailAddress") or {}).get("emailAddress")) or ""
-                return {
-                    "found": True,
-                    "first_name": fn or name,
-                    "last_name": ln,
-                    "name": name,
-                    "email": mail,
-                    "customer_id": str(customer_id),
-                }
+                cust_email = ((cust.get("defaultEmailAddress") or {}).get("emailAddress")) or ""
+                if cust_email:
+                    mail = cust_email.strip().lower()
         except Exception as e:
             print(f"customer-profile by id failed: {e!r}")
-    if email:
-        clean_email = email.strip().lower()
+
+    if not fn and mail:
         try:
             query = """
             query CustomerByEmail($query: String!) {
@@ -1152,25 +1224,34 @@ async def get_customer_profile(shop: str = "", customer_id: str = None, email: s
               }
             }
             """
-            data = await shopify_actions._graphql_admin(store, query, {"query": f"email:{clean_email}"})
+            data = await shopify_actions._graphql_admin(store, query, {"query": f"email:{mail}"})
             nodes = ((data or {}).get("customers") or {}).get("nodes") or []
             if nodes:
                 c = nodes[0]
-                cid = str(c.get("id") or "").split("/")[-1]
-                fn = c.get("firstName") or ""
-                ln = c.get("lastName") or ""
-                name = (f"{fn} {ln}").strip() or fn or c.get("displayName") or ""
-                mail = ((c.get("defaultEmailAddress") or {}).get("emailAddress")) or clean_email
-                return {
-                    "found": True,
-                    "first_name": fn or name,
-                    "last_name": ln,
-                    "name": name,
-                    "email": mail,
-                    "customer_id": cid,
-                }
+                if not cid:
+                    cid = str(c.get("id") or "").split("/")[-1]
+                fn = (c.get("firstName") or "").strip()
+                ln = (c.get("lastName") or "").strip()
+                name = (f"{fn} {ln}").strip() or fn or (c.get("displayName") or "").strip()
         except Exception as e:
             print(f"customer-profile by email failed: {e!r}")
+
+    # Fallback name derivation from email handle if customer record in Shopify lacks firstName
+    if not fn and mail:
+        derived_fn, derived_full = _extract_name_from_email(mail)
+        if derived_fn:
+            fn = derived_fn
+            name = name or derived_full
+
+    if fn or mail or cid:
+        return {
+            "found": True,
+            "first_name": fn,
+            "last_name": ln,
+            "name": name or fn,
+            "email": mail,
+            "customer_id": cid,
+        }
     return {"found": False}
 
 
@@ -1388,20 +1469,23 @@ WIDGET_JS = r"""
     var name = customerName || "";
     if (!name && customerEmail) {
       var nick = customerEmail.split("@")[0].replace(/[0-9._-]+.*$/, "");
+      var mNick = nick.match(/^([a-z]{3,15}?)(thakur|sharma|singh|kumar|patel|gupta|verma|khan|reddy|smith|johnson|williams)$/i);
+      if (mNick && mNick[1]) nick = mNick[1];
       if (nick.length >= 2) name = nick.charAt(0).toUpperCase() + nick.slice(1);
     }
     if (name) {
-      if (lastCustomGreeting && !/^(hi|hey|hello)\b/i.test(lastCustomGreeting)) {
-        return "Hi " + name + "! " + lastCustomGreeting;
-      }
       return "Hi " + name + "! How can I help you today?";
     }
-    if (lastCustomGreeting) return lastCustomGreeting;
+    if (lastCustomGreeting && !/^(hi|hey|hello)\b/i.test(lastCustomGreeting)) return lastCustomGreeting;
     return "Hi there! How can I help you today?";
   }
 
   function updateOutsideGreetingText() {
-    if (fgText) fgText.textContent = getGreetingText();
+    var txt = getGreetingText();
+    if (fgText) fgText.textContent = txt;
+    if (greetingBubble && !widget.classList.contains("open")) {
+      greetingBubble.textContent = txt;
+    }
   }
 
   function showOutsideGreeting(message) {
@@ -1501,14 +1585,39 @@ WIDGET_JS = r"""
     }
   }
 
+  var profileFetchInFlight = false;
+  function fetchRemoteProfile() {
+    if (profileFetchInFlight) return;
+    if (!CFG.customerProfileEndpoint || (!customerId && !customerEmail)) return;
+    profileFetchInFlight = true;
+    fetch(CFG.customerProfileEndpoint + "&customer_id=" + encodeURIComponent(customerId || "") + "&email=" + encodeURIComponent(customerEmail || ""))
+      .then(function (r) { return r.json(); })
+      .then(function (p) {
+        profileFetchInFlight = false;
+        if (p && p.found) {
+          if (p.first_name) customerName = p.first_name;
+          else if (p.name) customerName = p.name.split(" ")[0];
+          if (p.email) customerEmail = p.email;
+          if (p.customer_id) customerId = p.customer_id;
+          if (customerName) sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
+          if (customerEmail) sessionStorage.setItem("ai_cust_email_" + SHOP, customerEmail);
+          if (customerId) sessionStorage.setItem("ai_cust_id_" + SHOP, customerId);
+          updateHeaderProfileBadge();
+          updateOutsideGreetingText();
+        }
+      })
+      .catch(function () { profileFetchInFlight = false; });
+  }
+
   function syncCustomerSession() {
     try {
       customerId = customerId || sessionStorage.getItem("ai_cust_id_" + SHOP) || null;
       customerEmail = customerEmail || sessionStorage.getItem("ai_cust_email_" + SHOP) || null;
       customerName = customerName || sessionStorage.getItem("ai_cust_name_" + SHOP) || null;
 
-      if (window.__st && window.__st.cid) {
-        customerId = String(window.__st.cid);
+      if (window.__st) {
+        if (window.__st.cid) customerId = String(window.__st.cid);
+        else if (window.__st.rid && window.__st.rtyp === "customer") customerId = String(window.__st.rid);
       }
       if (window.ShopifyAnalytics && window.ShopifyAnalytics.meta && window.ShopifyAnalytics.meta.page && window.ShopifyAnalytics.meta.page.customerId) {
         customerId = String(window.ShopifyAnalytics.meta.page.customerId);
@@ -1520,7 +1629,7 @@ WIDGET_JS = r"""
       }
 
       var isAccountPage = window.location.pathname.indexOf("/account") !== -1;
-      var logoutLink = document.querySelector('a[href*="/account/logout"]');
+      var logoutLink = document.querySelector('a[href*="/account/logout"], a[href*="logout"]');
       if (logoutLink || isAccountPage) {
         var emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
         var emailEl = document.querySelector('[data-customer-email], .customer-email, .account-email, #customer_email');
@@ -1529,27 +1638,32 @@ WIDGET_JS = r"""
           if (m) customerEmail = m[0].toLowerCase();
         }
         if (!customerEmail) {
-          var accountSection = document.querySelector('.customer__account, .account, .customer, #account, main');
+          var accountSection = document.querySelector('.customer__account, .account, .customer, #account, main, body');
           if (accountSection && emailRe.test(accountSection.innerText)) {
             var m2 = accountSection.innerText.match(emailRe);
             if (m2) customerEmail = m2[0].toLowerCase();
           }
         }
-        var nameEl = document.querySelector('.customer__title, .account-title, .customer-name, [data-customer-name], .header__account-name');
+        var nameEl = document.querySelector('.customer-name, [data-customer-name], .header__account-name');
         if (nameEl && nameEl.textContent) {
           var cleanName = nameEl.textContent.replace(/(account|details|orders|overview|my\s*account)/gi, "").trim();
           if (cleanName && cleanName.length > 1 && cleanName.length < 50) {
             customerName = cleanName.split(" ")[0];
           }
         }
-        var headings = document.querySelectorAll('h2, h3');
+        var headings = document.querySelectorAll('h2, h3, p');
         for (var i = 0; i < headings.length; i++) {
-          if (/account details|addresses/i.test(headings[i].textContent) && headings[i].nextElementSibling) {
-            var pLines = (headings[i].nextElementSibling.innerText || "").split("\n");
-            var firstLine = (pLines[0] || "").trim();
-            if (firstLine && firstLine.length < 40 && firstLine.indexOf("@") === -1) {
-              customerName = firstLine.split(" ")[0];
-              break;
+          if (/account details|addresses/i.test(headings[i].textContent)) {
+            var targetEl = headings[i].nextElementSibling || headings[i].parentElement;
+            if (targetEl) {
+              var pLines = (targetEl.innerText || "").split("\n");
+              for (var j = 0; j < pLines.length; j++) {
+                var line = (pLines[j] || "").trim();
+                if (line && line.length > 1 && line.length < 40 && line.indexOf("@") === -1 && !/details|addresses|account|orders/i.test(line)) {
+                  customerName = line.split(" ")[0];
+                  break;
+                }
+              }
             }
           }
         }
@@ -1557,6 +1671,8 @@ WIDGET_JS = r"""
 
       if (!customerName && customerEmail) {
         var nick = customerEmail.split("@")[0].replace(/[0-9._-]+.*$/, "");
+        var mNick = nick.match(/^([a-z]{3,15}?)(thakur|sharma|singh|kumar|patel|gupta|verma|khan|reddy|smith|johnson|williams)$/i);
+        if (mNick && mNick[1]) nick = mNick[1];
         if (nick.length >= 2) customerName = nick.charAt(0).toUpperCase() + nick.slice(1);
       }
 
@@ -1564,7 +1680,12 @@ WIDGET_JS = r"""
       if (customerEmail) sessionStorage.setItem("ai_cust_email_" + SHOP, customerEmail);
       if (customerName) sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
 
-      if (!customerName || !customerEmail) {
+      updateHeaderProfileBadge();
+      updateOutsideGreetingText();
+
+      if (customerId || customerEmail) {
+        fetchRemoteProfile();
+      } else {
         fetch("/account", { credentials: "same-origin", headers: { Accept: "text/html" } })
           .then(function (res) {
             if (res.ok && res.url && res.url.indexOf("/account/login") === -1) {
@@ -1574,7 +1695,6 @@ WIDGET_JS = r"""
           })
           .then(function (html) {
             if (!html) return;
-            if (html.indexOf("/account/logout") === -1 && html.indexOf("customer_logout") === -1) return;
             var emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
             var match = html.match(emailRe);
             if (match && match[0]) {
@@ -1586,51 +1706,7 @@ WIDGET_JS = r"""
               customerId = cidMatch[1];
               sessionStorage.setItem("ai_cust_id_" + SHOP, customerId);
             }
-            var mJson = html.match(/"firstName":\s*"([^"]+)"/i) || html.match(/"first_name":\s*"([^"]+)"/i);
-            if (mJson && mJson[1]) {
-              customerName = mJson[1].trim();
-            } else {
-              var mAddr = html.match(/(?:Account details|Addresses)<\/h2>[\s\S]*?<p[^>]*>\s*([A-Za-z\s]+?)(?:<br|\n)/i);
-              if (mAddr && mAddr[1]) {
-                var cName = mAddr[1].trim().split(" ")[0];
-                if (cName && cName.length < 30) customerName = cName;
-              }
-            }
-            if (!customerName && customerEmail) {
-              var n = customerEmail.split("@")[0].replace(/[0-9._-]+.*$/, "");
-              if (n.length >= 2) customerName = n.charAt(0).toUpperCase() + n.slice(1);
-            }
-            if (customerName) sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
-            updateHeaderProfileBadge();
-            updateOutsideGreetingText();
-
-            if (CFG.customerProfileEndpoint && (customerId || customerEmail)) {
-              fetch(CFG.customerProfileEndpoint + "&customer_id=" + encodeURIComponent(customerId || "") + "&email=" + encodeURIComponent(customerEmail || ""))
-                .then(function (r) { return r.json(); })
-                .then(function (p) {
-                  if (p && p.found && (p.first_name || p.name)) {
-                    customerName = p.first_name || p.name.split(" ")[0];
-                    if (p.email) customerEmail = p.email;
-                    if (p.customer_id) customerId = p.customer_id;
-                    sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
-                    updateHeaderProfileBadge();
-                    updateOutsideGreetingText();
-                  }
-                })
-                .catch(function () {});
-            }
-          })
-          .catch(function () {});
-      } else if (CFG.customerProfileEndpoint && (customerId || customerEmail)) {
-        fetch(CFG.customerProfileEndpoint + "&customer_id=" + encodeURIComponent(customerId || "") + "&email=" + encodeURIComponent(customerEmail || ""))
-          .then(function (r) { return r.json(); })
-          .then(function (p) {
-            if (p && p.found && (p.first_name || p.name)) {
-              customerName = p.first_name || p.name.split(" ")[0];
-              sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
-              updateHeaderProfileBadge();
-              updateOutsideGreetingText();
-            }
+            if (customerId || customerEmail) fetchRemoteProfile();
           })
           .catch(function () {});
       }
@@ -2027,6 +2103,7 @@ WIDGET_JS = r"""
   function sendMessage(text) {
     text = (text || "").trim();
     if (!text) return;
+    syncCustomerSession();
     addBubble(text, "user");
     input.value = "";
     micBtn.classList.remove("has-text");
@@ -2094,7 +2171,6 @@ WIDGET_JS = r"""
     recognizer.continuous = false;
     recognizer.interimResults = false;
     var isListening = false;
-
     recognizer.onstart = function () {
       isListening = true;
       micBtn.classList.add("listening");
@@ -2131,6 +2207,11 @@ WIDGET_JS = r"""
 
   // Fetch widget config and activate
   syncCustomerSession();
+  setTimeout(syncCustomerSession, 300);
+  setTimeout(syncCustomerSession, 800);
+  setTimeout(syncCustomerSession, 1800);
+  setTimeout(syncCustomerSession, 3500);
+
   fetch(CFG.configEndpoint)
     .then(function (r) { return r.json(); })
     .then(function (cfg) {

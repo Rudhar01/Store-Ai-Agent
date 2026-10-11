@@ -32,6 +32,10 @@ async def run_tests():
         return SimpleNamespace(status_code=404, json=lambda: {}, text="Not Found")
     shopify_actions._get = mock_get
 
+    async def mock_graphql(store, query, variables=None):
+        return None
+    shopify_actions._graphql_admin = mock_graphql
+
     print("==================================================")
     print("  TEST 1: SCHEMA & INTENT DEFINITIONS")
     print("==================================================")

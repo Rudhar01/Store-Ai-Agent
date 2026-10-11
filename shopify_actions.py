@@ -61,7 +61,7 @@ import difflib
 
 import tracking_provider
 
-SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2026-10")
+SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2024-10")
 
 # In-memory storage for saved payment credentials, pending OTP authorizations, and warranty claims
 _SAVED_PAYMENT_METHODS: dict[str, dict] = {}
@@ -122,17 +122,17 @@ def _extract_order_number(entities: dict, message: str = "") -> str | None:
 
 
 async def _get(store, path: str, params: dict | None = None) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
         return await client.get(_url(store, path), headers=_headers(store), params=params or {})
 
 
 async def _put(store, path: str, json: dict) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
         return await client.put(_url(store, path), headers=_headers(store), json=json)
 
 
 async def _post(store, path: str, json: dict) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
         return await client.post(_url(store, path), headers=_headers(store), json=json)
 
 
@@ -144,7 +144,7 @@ async def _post(store, path: str, json: dict) -> httpx.Response:
 async def _graphql_admin(store, query: str, variables: dict | None = None) -> dict | None:
     url = f"https://{store.shop_domain}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             resp = await client.post(url, headers=_headers(store), json={"query": query, "variables": variables or {}})
     except Exception as e:
         print(f"shopify_actions: GraphQL request failed: {e!r}")
@@ -160,16 +160,24 @@ async def _graphql_admin(store, query: str, variables: dict | None = None) -> di
 
 
 async def get_customer(store, customer_id: str) -> dict | None:
-    query="""
+    raw_id = str(customer_id).strip().split("/")[-1]
+    query = """
     query Customer($id: ID!) {
       customer(id: $id) {
-        id firstName lastName
+        id firstName lastName displayName
         defaultEmailAddress { emailAddress }
         numberOfOrders
+        orders(first: 20, sortKey: CREATED_AT, reverse: true) {
+          nodes {
+            id name createdAt displayFinancialStatus displayFulfillmentStatus
+            totalPriceSet { shopMoney { amount currencyCode } }
+            lineItems(first: 20) { nodes { name quantity } }
+          }
+        }
       }
     }
     """
-    data=await _graphql_admin(store,query,{"id":f"gid://shopify/Customer/{customer_id}"})
+    data = await _graphql_admin(store, query, {"id": f"gid://shopify/Customer/{raw_id}"})
     return (data or {}).get("customer")
 
 
@@ -573,25 +581,55 @@ async def track_order(store, entities: dict, session_id: str, customer_id: str |
 
 async def list_recent_orders(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
     email = (entities.get("email") or "").strip().lower()
+    raw_cid = str(customer_id or entities.get("customer_id") or "").strip().split("/")[-1] or None
 
-    if customer_id:
-        cust_orders = await get_customer_orders(store, customer_id, first=50)
-        if isinstance(cust_orders, dict) and "active_orders" in cust_orders:
-            all_orders = cust_orders.get("active_orders", []) + cust_orders.get("past_orders", [])
-            if all_orders or not email:
-                return {
-                    **cust_orders,
-                    "orders": all_orders,
-                    "count": len(all_orders),
-                }
+    orders_list = []
 
-    if not email and not customer_id:
+    # 1. Try by customer_id if available
+    if raw_cid:
+        try:
+            cust = await get_customer(store, raw_cid)
+            if cust:
+                if not email and (cust.get("defaultEmailAddress") or {}).get("emailAddress"):
+                    email = cust["defaultEmailAddress"]["emailAddress"].strip().lower()
+                nested_nodes = ((cust.get("orders") or {}).get("nodes")) or []
+                if nested_nodes:
+                    for o in nested_nodes:
+                        fulfillment = (o.get("displayFulfillmentStatus") or "unfulfilled").lower().replace("_", " ")
+                        items = [{"name": it.get("name"), "quantity": it.get("quantity", 1)} for it in ((o.get("lineItems") or {}).get("nodes") or [])]
+                        total = (o.get("totalPriceSet") or {}).get("shopMoney") or {}
+                        orders_list.append({
+                            "id": str(o.get("id")),
+                            "order_number": str(o.get("name") or "").lstrip("#"),
+                            "date": (o.get("createdAt") or "")[:10],
+                            "status": fulfillment,
+                            "fulfillment_status": fulfillment,
+                            "financial_status": (o.get("displayFinancialStatus") or "paid").lower(),
+                            "total": total.get("amount", "0.00"),
+                            "currency": total.get("currencyCode", "USD"),
+                            "items": items,
+                            "tracking": [],
+                        })
+        except Exception as e:
+            print(f"list_recent_orders: get_customer failed: {e!r}")
+
+        if not orders_list:
+            try:
+                cust_orders = await get_customer_orders(store, raw_cid, first=50)
+                if isinstance(cust_orders, dict) and "active_orders" in cust_orders:
+                    all_orders = cust_orders.get("active_orders", []) + cust_orders.get("past_orders", [])
+                    if all_orders:
+                        orders_list = all_orders
+            except Exception as e:
+                print(f"list_recent_orders: get_customer_orders failed: {e!r}")
+
+    if not email and not raw_cid:
         return {
             "error": "verification_required",
             "message": "Please share the email address on your account so your orders can be looked up.",
         }
 
-    if email:
+    if not orders_list and email:
         resp = await _get(store, "orders.json", {"status": "any", "limit": 50, "order": "created_at desc", "email": email})
         if resp.status_code == 200:
             orders = resp.json().get("orders", [])
@@ -629,24 +667,19 @@ async def list_recent_orders(store, entities: dict, session_id: str, customer_id
                     "tracking": tracking_list,
                 })
 
-            active = [o for o in formatted_orders if o.get("status") not in {"fulfilled", "delivered", "cancelled"}]
-            past = [o for o in formatted_orders if o.get("status") in {"fulfilled", "delivered", "cancelled"}]
-            return {
-                "orders": formatted_orders,
-                "active_orders": active,
-                "past_orders": past,
-                "count": len(formatted_orders),
-                "email": email,
-            }
-        print(f"list_recent_orders: orders.json -> {resp.status_code} {resp.text[:400]}")
-        return {"error": "lookup_failed", "message": "Could not reach Shopify to look up orders."}
+            orders_list.extend(formatted_orders)
+        else:
+            print(f"list_recent_orders: orders.json -> {resp.status_code} {resp.text[:200]}")
 
+    active = [o for o in orders_list if o.get("status") not in {"fulfilled", "delivered", "cancelled"}]
+    past = [o for o in orders_list if o.get("status") in {"fulfilled", "delivered", "cancelled"}]
     return {
-        "orders": [],
-        "active_orders": [],
-        "past_orders": [],
-        "count": 0,
-        "message": "You don't have any past orders yet.",
+        "orders": orders_list,
+        "active_orders": active,
+        "past_orders": past,
+        "count": len(orders_list),
+        "email": email or "",
+        "message": "Here are your recent orders:" if orders_list else "You don't have any past orders yet.",
     }
 
 
