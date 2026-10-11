@@ -26,6 +26,7 @@ import re
 import time
 import os
 import asyncio
+import difflib
 from types import SimpleNamespace
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
@@ -234,7 +235,7 @@ def _write_events(shop: str, events: list) -> None:
         for ev in events:
             repo.record_event(store_id, **ev)
     except Exception as e:
-        print(f"chatbot_widget: analytics events failed: {e!r}")
+        print(f"chatbot_widget: analytics events failed: {str(e)[:100]}")
 
 
 def _build_events(status: str, intent, action, entities, session_id, visitor_id) -> list:
@@ -265,7 +266,7 @@ def _log(shop: str, message: str, status: str, intent=None, action=None, entitie
             entities = {**(entities if isinstance(entities, dict) else {}), **_extra}
         repo.log_request(shop, message, status, detected_intent=intent, detected_action=action, reply=reply, entities=entities)
     except Exception as e:
-        print(f"chatbot_widget: log_request failed: {e!r}")
+        print(f"chatbot_widget: log_request failed: {str(e)[:100]}")
 
     try:
         _sid2 = _CURRENT_SESSION_ID.get()
@@ -274,7 +275,7 @@ def _log(shop: str, message: str, status: str, intent=None, action=None, entitie
         _vid2 = str(_vid2)[:80] if _vid2 else None
         _EVENT_POOL.submit(_write_events, shop, _build_events(status, intent, action, entities, _sid2, _vid2))
     except Exception as e:
-        print(f"chatbot_widget: analytics events failed: {e!r}")
+        print(f"chatbot_widget: analytics events failed: {str(e)[:100]}")
 
 
 def _feature_enabled(store_id: str, intent: str, action: str, entities: dict) -> bool:
@@ -294,8 +295,8 @@ def _safe_reply(action: str, data: dict, language: str, original_message: str, f
 
 _SEARCH_LEAD_IN = re.compile(
     r"^(?:can you\s+)?(?:please\s+)?(?:show\s+me|find(?:\s+me)?|search(?:\s+for)?|look(?:\s+up|\s+for)?|"
-    r"get(?:\s+me)?|i want(?:\s+to\s+see)?|i'm looking for|i am looking for|do you have(?:\s+any)?|"
-    r"are there(?:\s+any)?|browse|where can i find|what(?:'s|\s+is) your cheapest)\s+",
+    r"get(?:\s+me)?|i want(?:\s+to\s+see)?|i'm looking for|i am looking for|do you have(?:\s+any|\s+some)?|"
+    r"tell me about(?:\s+any|\s+some)?|are there(?:\s+any)?|browse|where can i find|what(?:'s|\s+is) your cheapest)\s+",
     re.IGNORECASE,
 )
 _SEARCH_FILLER = re.compile(r"\b(products?|items?|please|for me|any|around|got|add|remove|delete|to my cart|from my cart|my cart|cart)\b", re.IGNORECASE)
@@ -307,6 +308,12 @@ _MY_ORDERS_RE = re.compile(
     re.IGNORECASE)
 _RECOMMEND_RE = re.compile(
     r"\brecommend|\bsuggest|\bsomething for me\b|\bwhat (should|can|do) i (buy|get)\b|\bpick(s)? for me\b|\bwhat would i like\b|\bsomething i (would|might|could) like\b",
+    re.IGNORECASE)
+_POPULAR_RE = re.compile(
+    r"\b(what('s| is) (popular|trending|best)|what do you recommend|show me (popular|trending) items|best sellers|what do you sell)\b",
+    re.IGNORECASE)
+_GREETING_RE = re.compile(
+    r"^(?:hi|hello|hey|hey there|howdy|hola|namaste|who are you|what can you do|what do you do|help me|tell me about (?:your|this) store|what is this store)\b",
     re.IGNORECASE)
 _PAY_RE = re.compile(r"\b(pay(ment)?|pay now|pay for (my )?(cart|order)|complete payment|proceed to pay(ment)?|buy now with card)\b", re.IGNORECASE)
 _OTP_RE = re.compile(r"\b(?:otp\s*(?:is|code)?\s*[:=]?\s*)?(\d{6})\b", re.IGNORECASE)
@@ -368,13 +375,25 @@ async def _catalog_search_ex(store, term: str, limit: int = 6):
     scored = []
     for p in products:
         hay = _words(p.get("title")) + _words(p.get("product_type")) + _words(p.get("tags"))
-        score = sum(1 for w in words if any(h.startswith(v) for h in hay for v in _term_variants(w)))
-        if score:
+        score = 0.0
+        for w in words:
+            matched = False
+            for v in _term_variants(w):
+                if any(h.startswith(v) or v.startswith(h) for h in hay):
+                    score += 2.0
+                    matched = True
+                    break
+            if not matched:
+                for h in hay:
+                    sim = difflib.SequenceMatcher(None, w, h).ratio()
+                    if sim >= 0.72:
+                        score += sim * 1.8
+                        break
+        if score > 0:
             scored.append((score, p))
     if scored:
-        best = max(sc for sc, _ in scored)
-        top = [p for sc, p in scored if sc == best]
-        return [_product_card(p, store) for p in top[:limit]], False
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [_product_card(p, store) for _, p in scored[:limit]], False
 
     try:
         ranked = await semantic.rank_products(store.shop_domain, products, cleaned, limit)
@@ -452,7 +471,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                 if alt:
                     data = {**data, "results": alt}
 
-    products = data.get("results") if action in {"search_products", "get_recommendations"} and isinstance(data, dict) else None
+    products = data.get("results") if action in {"search_products", "get_recommendations", "recommend_products", "assistant_help", "clarify"} and isinstance(data, dict) else None
     orders = None
     if action in {"list_recent_orders", "get_my_orders"} and isinstance(data, dict):
         if isinstance(data.get("orders"), list):
@@ -747,6 +766,15 @@ async def _chat_impl(req: ChatRequest):
         intent, action = "order_tracking", "list_recent_orders"
     elif (intent, action) == ("customer_account", "get_my_orders"):
         intent, action = "order_tracking", "list_recent_orders"
+    elif _GREETING_RE.search(message.strip()):
+        intent, action = "general_chat", "assistant_help"
+    elif _POPULAR_RE.search(message.strip()):
+        intent, action = "general_chat", "recommend_products"
+
+    if (intent, action) == ("product_search", "search_products") and not entities.get("query"):
+        extracted = extract_search_term(message)
+        if extracted:
+            entities["query"] = extracted
 
     try:
         # 1. Order History: Show all orders

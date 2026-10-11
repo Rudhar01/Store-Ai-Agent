@@ -76,8 +76,8 @@ def build_system_prompt(schema: dict) -> str:
         "You are an intent classifier for a Shopify shopping assistant.",
         "Classify the user's message into exactly one intent and exactly one action of that intent.",
         "Pick the action whose description fits best; descriptions say when NOT to use an action.",
-        "If the message doesn't clearly match anything, or you're not confident, use the 'fallback' intent with the 'clarify' action.",
         "Judge by MEANING, not exact wording: shoppers use slang, typos, short or indirect phrasing, and may mix languages (for example Hinglish). Pick the closest action even when the wording differs from every example.",
+        "Engage the shopper: Every user message in an online store reflects an intent to browse, buy, track, or ask. Greetings, store questions, and 'what can you do' map to 'general_chat.assistant_help'. Interest in any product, category, or 'tell me about X' maps to 'product_search.search_products'. Recommendation requests map to 'general_chat.recommend_products' or 'product_search.get_recommendations'. Reserve 'fallback.clarify' ONLY for uninterpretable gibberish.",
         "If a 'Recent conversation' block is given, use it only to resolve references such as 'that one' or 'the second one'; classify ONLY the latest message.",
         "",
         "Supported intents and actions:",
@@ -232,6 +232,15 @@ def _clean_entities(raw, intent: dict, action: dict) -> dict:
         elif key == "card_number":
             digits = re.sub(r"\D", "", str(value))
             value = digits if len(digits) >= 12 else str(value).strip()
+        elif key in ("query", "product_name_or_id"):
+            val_str = str(value).strip()
+            val_cleaned = re.sub(
+                r"^(?:tell\s+me\s+about\s+(?:some\s+|a\s+|an\s+|the\s+)?|do\s+you\s+have\s+(?:any\s+|some\s+)?|show\s+me\s+(?:some\s+|a\s+|an\s+|the\s+)?|find\s+me\s+|search\s+for\s+|looking\s+for\s+)",
+                "",
+                val_str,
+                flags=re.IGNORECASE,
+            ).strip()
+            value = val_cleaned or val_str
         if value is None:
             continue
         out[key] = value

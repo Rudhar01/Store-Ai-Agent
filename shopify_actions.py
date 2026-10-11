@@ -57,6 +57,7 @@ import hashlib
 import time
 from datetime import datetime
 import httpx
+import difflib
 
 import tracking_provider
 
@@ -325,27 +326,34 @@ async def _get_storefront_token(store) -> str | None:
     if cached:
         return cached
 
-    resp = await _get(store, "storefront_access_tokens.json")
-    if resp.status_code == 200:
-        for tok in resp.json().get("storefront_access_tokens", []):
-            token = tok.get("access_token")
-            if token:
-                _STOREFRONT_TOKENS[store.shop_domain] = token
-                return token
+    try:
+        resp = await _get(store, "storefront_access_tokens.json")
+        if resp.status_code == 200:
+            for tok in resp.json().get("storefront_access_tokens", []):
+                token = tok.get("access_token")
+                if token:
+                    _STOREFRONT_TOKENS[store.shop_domain] = token
+                    return token
+    except Exception as e:
+        print(f"shopify_actions: Storefront token lookup failed: {e!r}")
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        create_resp = await client.post(
-            _url(store, "storefront_access_tokens.json"),
-            headers=_headers(store),
-            json={"storefront_access_token": {"title": _STOREFRONT_TOKEN_TITLE}},
-        )
-    if create_resp.status_code not in (200, 201):
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            create_resp = await client.post(
+                _url(store, "storefront_access_tokens.json"),
+                headers=_headers(store),
+                json={"storefront_access_token": {"title": _STOREFRONT_TOKEN_TITLE}},
+            )
+        if create_resp.status_code not in (200, 201):
+            return None
+
+        token = create_resp.json().get("storefront_access_token", {}).get("access_token")
+        if token:
+            _STOREFRONT_TOKENS[store.shop_domain] = token
+        return token
+    except Exception as e:
+        print(f"shopify_actions: Storefront token creation failed: {e!r}")
         return None
-
-    token = create_resp.json().get("storefront_access_token", {}).get("access_token")
-    if token:
-        _STOREFRONT_TOKENS[store.shop_domain] = token
-    return token
 
 
 def _storefront_url(store) -> str:
@@ -356,18 +364,22 @@ async def _storefront_query(store, query: str, variables: dict) -> dict | None:
     token = await _get_storefront_token(store)
     if not token:
         return None
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            _storefront_url(store),
-            headers={"X-Shopify-Storefront-Access-Token": token, "Content-Type": "application/json"},
-            json={"query": query, "variables": variables},
-        )
-    if resp.status_code != 200:
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.post(
+                _storefront_url(store),
+                headers={"X-Shopify-Storefront-Access-Token": token, "Content-Type": "application/json"},
+                json={"query": query, "variables": variables},
+            )
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+        if body.get("errors"):
+            return None
+        return body.get("data")
+    except Exception as e:
+        print(f"shopify_actions: Storefront query failed: {e!r}")
         return None
-    body = resp.json()
-    if body.get("errors"):
-        return None
-    return body.get("data")
 
 
 def _summarize_cart(cart: dict | None) -> dict:
@@ -410,35 +422,44 @@ def _find_line(cart_summary: dict, product_query: str) -> dict | None:
 
 
 async def _fetch_cart(store, cart_id: str) -> dict | None:
-    query = f"query getCart($id: ID!) {{ cart(id: $id) {{ {_CART_FIELDS} }} }}"
-    data = await _storefront_query(store, query, {"id": cart_id})
-    return (data or {}).get("cart")
+    try:
+        query = f"query getCart($id: ID!) {{ cart(id: $id) {{ {_CART_FIELDS} }} }}"
+        data = await _storefront_query(store, query, {"id": cart_id})
+        return (data or {}).get("cart")
+    except Exception:
+        return None
 
 
 async def _create_cart(store) -> dict | None:
-    mutation = f"""
-    mutation createCart {{
-      cartCreate {{
-        cart {{ {_CART_FIELDS} }}
-        userErrors {{ field message }}
-      }}
-    }}
-    """
-    data = await _storefront_query(store, mutation, {})
-    result = (data or {}).get("cartCreate") or {}
-    if result.get("userErrors"):
+    try:
+        mutation = f"""
+        mutation createCart {{
+          cartCreate {{
+            cart {{ {_CART_FIELDS} }}
+            userErrors {{ field message }}
+          }}
+        }}
+        """
+        data = await _storefront_query(store, mutation, {})
+        result = (data or {}).get("cartCreate") or {}
+        if result.get("userErrors"):
+            return None
+        return result.get("cart")
+    except Exception:
         return None
-    return result.get("cart")
 
 
 async def _get_or_create_cart(store, session_id: str) -> dict | None:
-    cart_id = _SESSION_CARTS.get(session_id)
-    cart = await _fetch_cart(store, cart_id) if cart_id else None
-    if cart is None:
-        cart = await _create_cart(store)
-        if cart:
-            _SESSION_CARTS[session_id] = cart["id"]
-    return cart
+    try:
+        cart_id = _SESSION_CARTS.get(session_id)
+        cart = await _fetch_cart(store, cart_id) if cart_id else None
+        if cart is None:
+            cart = await _create_cart(store)
+            if cart:
+                _SESSION_CARTS[session_id] = cart["id"]
+        return cart
+    except Exception:
+        return None
 
 
 # ==========================================================================
@@ -958,25 +979,101 @@ async def check_claim_status(store, entities: dict, session_id: str, customer_id
 
 
 # ==========================================================================
-# product_search
+# product_search — tokenized substring and fuzzy difflib search across
+# title, tags, product type, and body. Resilient to typos (e.g. showboard -> snowboard).
 # ==========================================================================
-async def search_products(store, entities: dict, session_id: str) -> dict:
-    params = {"status": "active", "limit": 10}
-    query = entities.get("query") or entities.get("category")
-    if query:
-        params["title"] = query
+_SEARCH_STOP_WORDS = {
+    "tell", "me", "about", "some", "do", "you", "have", "show", "get", "find",
+    "looking", "for", "any", "please", "product", "products", "item", "items",
+    "the", "a", "an", "what", "is", "are", "there", "i", "want", "to", "see",
+    "buy", "shop", "can", "could", "give"
+}
 
-    resp = await _get(store, "products.json", params)
+
+def _clean_search_tokens(query: str) -> list[str]:
+    raw_words = re.findall(r"[a-z0-9]+", (query or "").lower())
+    filtered = [w for w in raw_words if w not in _SEARCH_STOP_WORDS and len(w) >= 2]
+    return filtered or [w for w in raw_words if len(w) >= 2] or ([query.strip().lower()] if query and query.strip() else [])
+
+
+def _score_product_match(p: dict, tokens: list[str]) -> float:
+    if not tokens:
+        return 1.0
+    title_str = (p.get("title") or "").lower()
+    title_words = re.findall(r"[a-z0-9]+", title_str)
+    type_words = re.findall(r"[a-z0-9]+", (p.get("product_type") or "").lower())
+    tag_words = re.findall(r"[a-z0-9]+", str(p.get("tags") or "").lower())
+    body_words = re.findall(r"[a-z0-9]+", (p.get("body_html") or "").lower()[:300])
+
+    total_score = 0.0
+    for tok in tokens:
+        tok_sing = tok[:-1] if tok.endswith("s") and len(tok) > 3 else tok
+        best_tok_score = 0.0
+
+        # Substring in title is a massive signal (e.g. "snowboard" in "The Complete Snowboard")
+        if tok in title_str or tok_sing in title_str:
+            best_tok_score = max(best_tok_score, 3.0)
+
+        # Token vs title words
+        for tw in title_words:
+            tw_sing = tw[:-1] if tw.endswith("s") and len(tw) > 3 else tw
+            if tok == tw or tok_sing == tw_sing:
+                best_tok_score = max(best_tok_score, 2.8)
+            elif tw.startswith(tok) or tok.startswith(tw) or tw_sing.startswith(tok_sing):
+                best_tok_score = max(best_tok_score, 2.2)
+            else:
+                sim = difflib.SequenceMatcher(None, tok, tw).ratio()
+                sim_s = difflib.SequenceMatcher(None, tok_sing, tw_sing).ratio()
+                ratio = max(sim, sim_s)
+                if ratio >= 0.72:
+                    best_tok_score = max(best_tok_score, ratio * 2.4)
+
+        # Token vs tags & product_type
+        for tw in type_words + tag_words:
+            tw_sing = tw[:-1] if tw.endswith("s") and len(tw) > 3 else tw
+            if tok == tw or tok_sing == tw_sing:
+                best_tok_score = max(best_tok_score, 2.0)
+            elif tw.startswith(tok) or tok.startswith(tw):
+                best_tok_score = max(best_tok_score, 1.8)
+            else:
+                ratio = max(difflib.SequenceMatcher(None, tok, tw).ratio(), difflib.SequenceMatcher(None, tok_sing, tw_sing).ratio())
+                if ratio >= 0.72:
+                    best_tok_score = max(best_tok_score, ratio * 1.8)
+
+        # Token vs body words
+        for tw in body_words:
+            if tok == tw or tok_sing == tw:
+                best_tok_score = max(best_tok_score, 1.0)
+                break
+
+        total_score += best_tok_score
+
+    return total_score
+
+
+async def search_products(store, entities: dict, session_id: str) -> dict:
+    raw_query = entities.get("query") or entities.get("category") or ""
+    tokens = _clean_search_tokens(raw_query)
+
+    resp = await _get(store, "products.json", {"status": "active", "limit": 100})
     if resp.status_code != 200:
         return {"error": "lookup_failed"}
+
+    all_products = resp.json().get("products", [])
+    if not all_products:
+        return {"results": [], "filters_applied": entities, "message": "No active products currently found in store."}
 
     price_min = entities.get("price_min")
     price_max = entities.get("price_max")
     color = (entities.get("color") or "").lower()
     size = (entities.get("size") or "").lower()
 
-    results = []
-    for p in resp.json().get("products", []):
+    scored = []
+    featured_fallback = []
+
+    for p in all_products:
+        # Resolve best variant
+        best_variant = None
         for variant in p.get("variants", [{}]):
             price = float(variant.get("price", 0) or 0)
             if price_min is not None and price < float(price_min):
@@ -988,15 +1085,39 @@ async def search_products(store, entities: dict, session_id: str) -> dict:
                 continue
             if size and size not in opts:
                 continue
-            results.append({
-                "id": str(variant.get("id")),
-                "name": p.get("title", "Unnamed product"),
-                "price": price,
-                "image": (p.get("image") or {}).get("src", ""),
-            })
+            best_variant = variant
             break
-        if len(results) >= 6:
-            break
+
+        if not best_variant:
+            continue
+
+        price = float(best_variant.get("price", 0) or 0)
+        card = {
+            "id": str(best_variant.get("id")),
+            "name": p.get("title", "Unnamed product"),
+            "price": price,
+            "image": (p.get("image") or {}).get("src", ""),
+            "handle": p.get("handle", ""),
+            "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
+        }
+        featured_fallback.append(card)
+
+        score = _score_product_match(p, tokens) if tokens else 1.0
+        if score >= (0.75 if tokens else 0.0):
+            scored.append((score, card))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    results = [item[1] for item in scored[:6]]
+
+    # If no exact or fuzzy match was found for the specific query, provide top featured products
+    if not results and featured_fallback:
+        return {
+            "results": featured_fallback[:4],
+            "no_exact_match": True,
+            "searched_query": raw_query,
+            "filters_applied": entities,
+            "message": f"We couldn't find an exact match for '{raw_query}', but here are top featured products from our store:",
+        }
 
     return {"results": results, "filters_applied": entities}
 
@@ -1312,10 +1433,87 @@ async def answer_policy_question(store, entities: dict, session_id: str) -> dict
 
 
 # ==========================================================================
-# fallback
+# general_chat — warm, engaging conversational handling and capabilities intro
+# ==========================================================================
+async def assistant_help(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    resp = await _get(store, "products.json", {"status": "active", "limit": 6})
+    sample_products = []
+    if resp.status_code == 200:
+        for p in resp.json().get("products", [])[:4]:
+            var = (p.get("variants") or [{}])[0]
+            sample_products.append({
+                "id": str(var.get("id")),
+                "name": p.get("title", "Store Product"),
+                "price": float(var.get("price", 0) or 0),
+                "image": (p.get("image") or {}).get("src", ""),
+                "handle": p.get("handle", ""),
+                "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
+            })
+    store_name = getattr(store, "shop_domain", "our store").split(".")[0].replace("-", " ").title()
+    return {
+        "store_name": store_name,
+        "capabilities": [
+            "Find & recommend products (e.g., search snowboards, gear, apparel)",
+            "Direct cart updates (add, remove, change quantities)",
+            "Track shipments with live tracking & order history",
+            "Submit and check warranty/return claims",
+            "Store policies (return, refund, shipping, warranty)",
+            "Instant 1-click checkout with 6-digit OTP verification in chat"
+        ],
+        "results": sample_products,
+        "message": f"Welcome to {store_name}! I am your AI shopping assistant. How can I help you today?"
+    }
+
+
+async def recommend_products(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    try:
+        recs = await get_recommendations(store, entities, session_id, customer_id=customer_id)
+        if isinstance(recs, dict) and recs.get("results"):
+            return recs
+    except Exception:
+        pass
+    resp = await _get(store, "products.json", {"status": "active", "limit": 6})
+    featured = []
+    if resp.status_code == 200:
+        for p in resp.json().get("products", [])[:4]:
+            var = (p.get("variants") or [{}])[0]
+            featured.append({
+                "id": str(var.get("id")),
+                "name": p.get("title", "Featured Item"),
+                "price": float(var.get("price", 0) or 0),
+                "image": (p.get("image") or {}).get("src", ""),
+                "handle": p.get("handle", ""),
+                "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
+            })
+    return {
+        "results": featured,
+        "message": "Here are some of our top recommended items right now:"
+    }
+
+
+# ==========================================================================
+# fallback — engaging fallback that suggests popular products & actions
 # ==========================================================================
 async def clarify(store, entities: dict, session_id: str) -> dict:
-    return {"message": "Could not confidently match this to a supported action."}
+    resp = await _get(store, "products.json", {"status": "active", "limit": 4})
+    sample = []
+    if resp.status_code == 200:
+        for p in resp.json().get("products", [])[:3]:
+            var = (p.get("variants") or [{}])[0]
+            sample.append({
+                "id": str(var.get("id")),
+                "name": p.get("title", "Product"),
+                "price": float(var.get("price", 0) or 0),
+                "image": (p.get("image") or {}).get("src", ""),
+                "handle": p.get("handle", ""),
+                "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
+            })
+    return {
+        "status": "clarify",
+        "results": sample,
+        "message": "I'm here to help you shop! You can ask me to search products, track an order, manage your cart, check store policies, or checkout.",
+        "suggestions": ["Search products", "Track order", "View cart", "Return policy"]
+    }
 
 
 # Maps "intent.action" -> async function, built directly from the names
@@ -1343,6 +1541,8 @@ ACTION_MAP = {
     "customer_account.get_recommendations": get_recommendations,
     "product_search.get_recommendations": get_recommendations,
     "recommendations.recommend_products": get_recommendations,
+    "general_chat.assistant_help": assistant_help,
+    "general_chat.recommend_products": recommend_products,
     "fallback.clarify": clarify,
 }
 

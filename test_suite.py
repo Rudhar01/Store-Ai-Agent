@@ -27,6 +27,11 @@ async def run_tests():
     )
     session_id = "test_shopper_session_101"
 
+    # Fast offline mock for non-existent test domain
+    async def mock_get(store, path, params=None):
+        return SimpleNamespace(status_code=404, json=lambda: {}, text="Not Found")
+    shopify_actions._get = mock_get
+
     print("==================================================")
     print("  TEST 1: SCHEMA & INTENT DEFINITIONS")
     print("==================================================")
@@ -98,6 +103,34 @@ async def run_tests():
     )
     assert clear_res["widget_action"]["type"] == "cart_clear"
     print(f"PASS: clear_cart emitted cart_clear action ({clear_res['widget_action']}).")
+
+    print("\n==================================================")
+    print("  TEST 2.5: FUZZY SEARCH & GENERAL CHAT INTENTS")
+    print("==================================================")
+    # Test fuzzy product matching
+    mock_snowboard = {"title": "The Complete Snowboard", "product_type": "Snowboard", "tags": "winter, sports", "body_html": "<p>A great snowboard.</p>"}
+    tokens = shopify_actions._clean_search_tokens("tell me about some showboard")
+    assert "showboard" in tokens
+    score = shopify_actions._score_product_match(mock_snowboard, tokens)
+    assert score >= 1.5, f"Expected high match score for showboard vs snowboard, got {score}"
+    print(f"PASS: Fuzzy token scoring matched typo 'showboard' -> 'The Complete Snowboard' with score {score:.2f}")
+
+    # Test general_chat.assistant_help
+    help_res = await shopify_actions.dispatch("general_chat", "assistant_help", store, {}, session_id=session_id)
+    assert "capabilities" in help_res and len(help_res["capabilities"]) >= 5
+    assert "store_name" in help_res
+    print(f"PASS: general_chat.assistant_help returned {len(help_res['capabilities'])} capabilities.")
+
+    # Test general_chat.recommend_products
+    rec_res = await shopify_actions.dispatch("general_chat", "recommend_products", store, {}, session_id=session_id)
+    assert "results" in rec_res or "message" in rec_res
+    print("PASS: general_chat.recommend_products dispatched successfully.")
+
+    # Test fallback.clarify
+    clarify_res = await shopify_actions.dispatch("fallback", "clarify", store, {}, session_id=session_id)
+    assert clarify_res.get("status") == "clarify"
+    assert "message" in clarify_res
+    print("PASS: fallback.clarify returned engaging store assistance.")
 
     print("\n==================================================")
     print("  TEST 3: POLICIES CHECKING")

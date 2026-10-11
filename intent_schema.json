@@ -423,7 +423,13 @@
           "example_utterances": [
             "Show me running shoes under $50",
             "Do you have this in blue?",
-            "What's your cheapest jacket?"
+            "What's your cheapest jacket?",
+            "tell me about some showboard",
+            "tell me about some snowboards",
+            "what snowboards do you have",
+            "do you have snowboards",
+            "show me what you have",
+            "show me boots"
           ]
         },
         {
@@ -505,6 +511,54 @@
         "warranty_policy",
         "terms_of_service",
         "cancellation_policy"
+      ]
+    },
+    {
+      "name": "general_chat",
+      "description": "User greets the assistant, asks what the store sells, asks about assistant capabilities, or engages in casual shopping conversation.",
+      "actions": [
+        {
+          "name": "assistant_help",
+          "description": "Welcome the shopper, explain what the assistant can do (browse products, update cart, track orders, warranty claims, policy checks, OTP checkout), and invite them to explore.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [],
+          "example_utterances": [
+            "hello",
+            "hi",
+            "hey there",
+            "who are you",
+            "what can you do",
+            "help me",
+            "tell me about your store",
+            "what do you sell",
+            "how can you help me",
+            "tell me about this store"
+          ]
+        },
+        {
+          "name": "recommend_products",
+          "description": "Show trending or featured products when shopper asks for general suggestions without naming a specific product.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [],
+          "example_utterances": [
+            "recommend something for me",
+            "show me popular items",
+            "what is best to buy",
+            "what do you recommend"
+          ]
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": [],
+      "example_utterances": [
+        "hello",
+        "hi",
+        "who are you",
+        "what can you do",
+        "help me",
+        "tell me about your store"
       ]
     },
     {

@@ -159,6 +159,28 @@ def generate_reply(
             " Enthusiastically confirm that the payment was successful, mentioning the order number, total amount paid, "
             "payment method, and estimated 3-5 business days delivery timeframe."
         )
+    elif action_name == "search_products":
+        extra_clause = (
+            " If products are listed in the results, present them enthusiastically with their names and prices. "
+            "If 'no_exact_match' is true in the data, gently explain that the exact term wasn't found, but warmly "
+            "showcase the featured products provided from the store catalog. Never claim the store has no items "
+            "when products are present in the results."
+        )
+    elif action_name == "assistant_help":
+        extra_clause = (
+            " Warmly welcome the shopper to the store, introduce what you can do (search products, manage cart, "
+            "track orders, file warranty claims, check store policies, and fast OTP checkout), and invite them to explore."
+        )
+    elif action_name in ("recommend_products", "get_recommendations"):
+        extra_clause = (
+            " Enthusiastically recommend the products provided in the data, highlighting their names and prices, "
+            "and offer to add any item to their cart."
+        )
+    elif action_name == "clarify":
+        extra_clause = (
+            " Keep the shopper engaged and interested! Warmly ask how you can assist them today with browsing items, "
+            "tracking an order, managing their cart, or checking store policies."
+        )
 
     system_prompt = (
         f"You are a friendly Shopify store assistant. Reply ONLY in {language_name} "
