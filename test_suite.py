@@ -274,11 +274,12 @@ async def run_tests():
     assert "syncCustomerSession" in chatbot_widget.WIDGET_JS, "syncCustomerSession missing from WIDGET_JS"
     assert "header-cust-badge" in chatbot_widget.WIDGET_JS, "header-cust-badge missing from WIDGET_JS"
     assert "showOutsideGreeting" in chatbot_widget.WIDGET_JS, "showOutsideGreeting missing from WIDGET_JS"
-    assert "fg-bot-tag" in chatbot_widget.WIDGET_JS, "fg-bot-tag missing from WIDGET_JS"
+    assert "fgClose" in chatbot_widget.WIDGET_JS, "fgClose missing from WIDGET_JS"
     assert "fg-text" in chatbot_widget.WIDGET_JS, "fg-text missing from WIDGET_JS"
+    assert "getGreetingText" in chatbot_widget.WIDGET_JS, "getGreetingText missing from WIDGET_JS"
     assert "customer_email: customerEmail" in chatbot_widget.WIDGET_JS, "customer_email missing from WIDGET_JS payload"
     assert "customer_id: customerId" in chatbot_widget.WIDGET_JS, "customer_id missing from WIDGET_JS payload"
-    print("PASS: Widget JS contains complete UI, outside greeting bubble, cart AJAX handlers, payment modals, and logged-in customer session sync.")
+    print("PASS: Widget JS contains complete UI, compact personalized greeting bubble, cart AJAX handlers, payment modals, and logged-in customer session sync.")
 
     print("\n==================================================")
     print("  TEST 8: LOGGED-IN CUSTOMER EMAIL VERIFICATION BYPASS")

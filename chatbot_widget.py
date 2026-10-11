@@ -1114,6 +1114,66 @@ async def widget_config(shop: str):
     }
 
 
+@router.get("/customer-profile")
+async def get_customer_profile(shop: str = "", customer_id: str = None, email: str = None):
+    if not shop:
+        return {"found": False}
+    store = _get_store(shop)
+    if not store:
+        return {"found": False}
+    if customer_id:
+        try:
+            cust = await shopify_actions.get_customer(store, str(customer_id).strip())
+            if cust:
+                fn = cust.get("firstName") or ""
+                ln = cust.get("lastName") or ""
+                name = (f"{fn} {ln}").strip() or fn or ln
+                mail = ((cust.get("defaultEmailAddress") or {}).get("emailAddress")) or ""
+                return {
+                    "found": True,
+                    "first_name": fn or name,
+                    "last_name": ln,
+                    "name": name,
+                    "email": mail,
+                    "customer_id": str(customer_id),
+                }
+        except Exception as e:
+            print(f"customer-profile by id failed: {e!r}")
+    if email:
+        clean_email = email.strip().lower()
+        try:
+            query = """
+            query CustomerByEmail($query: String!) {
+              customers(first: 1, query: $query) {
+                nodes {
+                  id firstName lastName displayName
+                  defaultEmailAddress { emailAddress }
+                }
+              }
+            }
+            """
+            data = await shopify_actions._graphql_admin(store, query, {"query": f"email:{clean_email}"})
+            nodes = ((data or {}).get("customers") or {}).get("nodes") or []
+            if nodes:
+                c = nodes[0]
+                cid = str(c.get("id") or "").split("/")[-1]
+                fn = c.get("firstName") or ""
+                ln = c.get("lastName") or ""
+                name = (f"{fn} {ln}").strip() or fn or c.get("displayName") or ""
+                mail = ((c.get("defaultEmailAddress") or {}).get("emailAddress")) or clean_email
+                return {
+                    "found": True,
+                    "first_name": fn or name,
+                    "last_name": ln,
+                    "name": name,
+                    "email": mail,
+                    "customer_id": cid,
+                }
+        except Exception as e:
+            print(f"customer-profile by email failed: {e!r}")
+    return {"found": False}
+
+
 @router.get("/widget.js")
 async def widget_js():
     return Response(
@@ -1144,6 +1204,7 @@ WIDGET_JS = r"""
     initiatePaymentEndpoint: ORIGIN + "/initiate-payment",
     verifyOtpEndpoint: ORIGIN + "/verify-otp",
     configEndpoint: ORIGIN + "/widget-config?shop=" + encodeURIComponent(SHOP),
+    customerProfileEndpoint: ORIGIN + "/customer-profile?shop=" + encodeURIComponent(SHOP),
     customerSessionPath: (THIS_SCRIPT && THIS_SCRIPT.dataset.proxyPath) || "/apps/ai-agent/customer-session"
   };
 
@@ -1160,16 +1221,13 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .chat-fab.open .icon-mic { display:none; }",
     "#ai-chat-widget-root .chat-fab.open .icon-close { display:block; }",
     "#ai-chat-widget-root .chat-fab.custom-icon .icon-mic { display:none; }",
-    "#ai-chat-widget-root .fab-greeting { position:fixed; bottom:22px; right:74px; width:max-content; max-width:min(340px, calc(100vw - 92px)); background:#ffffff; color:#111827; padding:11px 14px; border-radius:18px; border-bottom-right-radius:4px; box-shadow:0 8px 30px rgba(0,0,0,.12), 0 2px 6px rgba(0,0,0,.04); border:1px solid rgba(0,0,0,.08); z-index:2147482999; cursor:pointer; opacity:0; transform:translateY(8px) scale(.96); pointer-events:none; transition:opacity .28s cubic-bezier(.16,1,.3,1), transform .28s cubic-bezier(.16,1,.3,1), box-shadow .2s ease; display:none; flex-direction:column; gap:4px; }",
-    "#ai-chat-widget-root .fab-greeting:hover { transform:translateY(-2px) scale(1.01); box-shadow:0 12px 36px rgba(0,0,0,.16); }",
+    "#ai-chat-widget-root .fab-greeting { position:fixed; bottom:20px; right:70px; width:max-content; max-width:min(230px, calc(100vw - 86px)); background:#ffffff; color:#111827; padding:8px 24px 8px 12px; border-radius:14px; border-bottom-right-radius:3px; box-shadow:0 6px 20px rgba(0,0,0,.10), 0 1px 3px rgba(0,0,0,.04); border:1px solid rgba(0,0,0,.08); z-index:2147482999; cursor:pointer; opacity:0; transform:translateY(6px) scale(.97); pointer-events:none; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1), box-shadow .2s ease; display:none; align-items:center; }",
+    "#ai-chat-widget-root .fab-greeting:hover { transform:translateY(-1px) scale(1.01); box-shadow:0 10px 28px rgba(0,0,0,.14); }",
     "#ai-chat-widget-root .fab-greeting.show { opacity:1; transform:translateY(0) scale(1); pointer-events:auto; display:flex !important; }",
-    "#ai-chat-widget-root .fab-greeting::after { content:''; position:absolute; bottom:12px; right:-7px; width:0; height:0; border-top:6px solid transparent; border-bottom:6px solid transparent; border-left:7px solid #ffffff; filter:drop-shadow(2px 0 1px rgba(0,0,0,.04)); }",
-    "#ai-chat-widget-root .fg-header { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:1px; }",
-    "#ai-chat-widget-root .fg-bot-tag { display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:700; color:#4b5563; }",
-    "#ai-chat-widget-root .fg-avatar-mini { width:18px; height:18px; border-radius:50%; background:#2563eb; color:#fff; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; flex-shrink:0; background-size:cover; background-position:center; }",
-    "#ai-chat-widget-root .fg-close { background:transparent; border:none; color:#9ca3af; font-size:16px; line-height:1; cursor:pointer; padding:0 3px; border-radius:4px; transition:color .15s ease; }",
-    "#ai-chat-widget-root .fg-close:hover { color:#111827; }",
-    "#ai-chat-widget-root .fg-text { font-size:12.5px; font-weight:500; color:#1f2937; line-height:1.42; word-break:break-word; }",
+    "#ai-chat-widget-root .fab-greeting::after { content:''; position:absolute; bottom:11px; right:-6px; width:0; height:0; border-top:5px solid transparent; border-bottom:5px solid transparent; border-left:6px solid #ffffff; filter:drop-shadow(2px 0 1px rgba(0,0,0,.04)); }",
+    "#ai-chat-widget-root .fg-close { position:absolute; top:4px; right:5px; width:16px; height:16px; display:flex; align-items:center; justify-content:center; background:transparent; border:none; color:#9ca3af; font-size:13px; line-height:1; cursor:pointer; padding:0; border-radius:50%; transition:color .15s ease, background .15s ease; }",
+    "#ai-chat-widget-root .fg-close:hover { color:#111827; background:rgba(0,0,0,.06); }",
+    "#ai-chat-widget-root .fg-text { font-size:11.5px; font-weight:500; color:#1f2937; line-height:1.35; word-break:break-word; }",
     "#ai-chat-widget-root .widget { position:fixed; bottom:max(72px, env(safe-area-inset-bottom) + 60px); right:18px; width:min(340px, calc(100vw - 24px)); max-height:min(540px, calc(100vh - 90px)); background:rgba(255,255,255,.88); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); border:1.5px solid rgba(0,0,0,.12); border-radius:18px; padding:12px; box-shadow:0 14px 34px rgba(0,0,0,.16); transform-origin:bottom right; transform:scale(.9) translateY(10px); opacity:0; pointer-events:none; transition:transform .2s cubic-bezier(.2,.9,.3,1.2), opacity .15s ease, width .25s ease, max-height .25s ease; z-index:2147483000; display:flex; flex-direction:column; }",
     "#ai-chat-widget-root .widget.open { transform:scale(1) translateY(0); opacity:1; pointer-events:auto; }",
     "#ai-chat-widget-root .widget.expanded { width:min(420px, calc(100vw - 24px)); max-height:min(640px, calc(100vh - 40px)); }",
@@ -1265,14 +1323,8 @@ WIDGET_JS = r"""
       '<svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>' +
     "</button>" +
     '<div class="fab-greeting" id="fabGreeting" style="display:none;">' +
-      '<div class="fg-header">' +
-        '<div class="fg-bot-tag">' +
-          '<div class="fg-avatar-mini" id="fgAvatarMini">AI</div>' +
-          '<span class="fg-name" id="fgBotName">AI Assistant</span>' +
-        '</div>' +
-        '<button class="fg-close" id="fgClose" aria-label="Close" title="Dismiss">&times;</button>' +
-      '</div>' +
-      '<div class="fg-text" id="fgText">Hey there! How can I help you today?</div>' +
+      '<button class="fg-close" id="fgClose" aria-label="Close" title="Dismiss">&times;</button>' +
+      '<div class="fg-text" id="fgText">Hi there! How can I help you today?</div>' +
     '</div>' +
     '<div class="widget" id="chatWidget">' +
       '<div class="header">' +
@@ -1322,42 +1374,49 @@ WIDGET_JS = r"""
   var greetingBubble = document.getElementById("greetingBubble");
   var fabGreeting = document.getElementById("fabGreeting");
   var fgClose = document.getElementById("fgClose");
-  var fgBotName = document.getElementById("fgBotName");
   var fgText = document.getElementById("fgText");
-  var fgAvatarMini = document.getElementById("fgAvatarMini");
   var greetingDismissed = false;
   try {
     greetingDismissed = sessionStorage.getItem("aiChatGreetingDismissed_" + SHOP) === "1";
   } catch (e) {}
 
-  function showOutsideGreeting(name, message, color) {
+  var lastCustomGreeting = "";
+  function getGreetingText(customMsg) {
+    if (customMsg !== undefined && customMsg !== null && customMsg !== "") {
+      lastCustomGreeting = customMsg;
+    }
+    var name = customerName || "";
+    if (!name && customerEmail) {
+      var nick = customerEmail.split("@")[0].replace(/[0-9._-]+.*$/, "");
+      if (nick.length >= 2) name = nick.charAt(0).toUpperCase() + nick.slice(1);
+    }
+    if (name) {
+      if (lastCustomGreeting && !/^(hi|hey|hello)\b/i.test(lastCustomGreeting)) {
+        return "Hi " + name + "! " + lastCustomGreeting;
+      }
+      return "Hi " + name + "! How can I help you today?";
+    }
+    if (lastCustomGreeting) return lastCustomGreeting;
+    return "Hi there! How can I help you today?";
+  }
+
+  function updateOutsideGreetingText() {
+    if (fgText) fgText.textContent = getGreetingText();
+  }
+
+  function showOutsideGreeting(message) {
     if (greetingDismissed) return;
     if (widget.classList.contains("open")) return;
     if (!fabGreeting) return;
 
-    var botName = name || (headerName ? headerName.textContent : "AI Assistant");
-    if (fgBotName) fgBotName.textContent = botName;
-    if (fgAvatarMini) {
-      if (color) fgAvatarMini.style.background = color;
-      fgAvatarMini.textContent = (botName || "AI").slice(0, 2).toUpperCase();
-    }
-
-    var text = message;
-    if (!text) {
-      if (customerName) {
-        text = "Hey " + customerName + "! I'm " + botName + ". Can I help you find something or check an order today?";
-      } else {
-        text = "Hey there! I'm " + botName + ". How can I help you today?";
-      }
-    }
-    if (fgText) fgText.textContent = text;
+    if (fgText) fgText.textContent = getGreetingText(message);
 
     fabGreeting.style.display = "flex";
     setTimeout(function () {
       if (!widget.classList.contains("open") && !greetingDismissed) {
         fabGreeting.classList.add("show");
       }
-    }, 500);
+    }, 400);
   }
 
   function hideOutsideGreeting(permanent) {
@@ -1454,6 +1513,11 @@ WIDGET_JS = r"""
       if (window.ShopifyAnalytics && window.ShopifyAnalytics.meta && window.ShopifyAnalytics.meta.page && window.ShopifyAnalytics.meta.page.customerId) {
         customerId = String(window.ShopifyAnalytics.meta.page.customerId);
       }
+      if (window.Shopify && window.Shopify.customer) {
+        if (window.Shopify.customer.id) customerId = String(window.Shopify.customer.id);
+        if (window.Shopify.customer.first_name) customerName = window.Shopify.customer.first_name;
+        if (window.Shopify.customer.email) customerEmail = window.Shopify.customer.email;
+      }
 
       var isAccountPage = window.location.pathname.indexOf("/account") !== -1;
       var logoutLink = document.querySelector('a[href*="/account/logout"]');
@@ -1471,20 +1535,36 @@ WIDGET_JS = r"""
             if (m2) customerEmail = m2[0].toLowerCase();
           }
         }
-        var nameEl = document.querySelector('.customer__title, .account-title, .customer-name, h1, h2');
+        var nameEl = document.querySelector('.customer__title, .account-title, .customer-name, [data-customer-name], .header__account-name');
         if (nameEl && nameEl.textContent) {
           var cleanName = nameEl.textContent.replace(/(account|details|orders|overview|my\s*account)/gi, "").trim();
           if (cleanName && cleanName.length > 1 && cleanName.length < 50) {
-            customerName = cleanName;
+            customerName = cleanName.split(" ")[0];
           }
         }
+        var headings = document.querySelectorAll('h2, h3');
+        for (var i = 0; i < headings.length; i++) {
+          if (/account details|addresses/i.test(headings[i].textContent) && headings[i].nextElementSibling) {
+            var pLines = (headings[i].nextElementSibling.innerText || "").split("\n");
+            var firstLine = (pLines[0] || "").trim();
+            if (firstLine && firstLine.length < 40 && firstLine.indexOf("@") === -1) {
+              customerName = firstLine.split(" ")[0];
+              break;
+            }
+          }
+        }
+      }
+
+      if (!customerName && customerEmail) {
+        var nick = customerEmail.split("@")[0].replace(/[0-9._-]+.*$/, "");
+        if (nick.length >= 2) customerName = nick.charAt(0).toUpperCase() + nick.slice(1);
       }
 
       if (customerId) sessionStorage.setItem("ai_cust_id_" + SHOP, customerId);
       if (customerEmail) sessionStorage.setItem("ai_cust_email_" + SHOP, customerEmail);
       if (customerName) sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
 
-      if (!customerEmail) {
+      if (!customerName || !customerEmail) {
         fetch("/account", { credentials: "same-origin", headers: { Accept: "text/html" } })
           .then(function (res) {
             if (res.ok && res.url && res.url.indexOf("/account/login") === -1) {
@@ -1506,7 +1586,51 @@ WIDGET_JS = r"""
               customerId = cidMatch[1];
               sessionStorage.setItem("ai_cust_id_" + SHOP, customerId);
             }
+            var mJson = html.match(/"firstName":\s*"([^"]+)"/i) || html.match(/"first_name":\s*"([^"]+)"/i);
+            if (mJson && mJson[1]) {
+              customerName = mJson[1].trim();
+            } else {
+              var mAddr = html.match(/(?:Account details|Addresses)<\/h2>[\s\S]*?<p[^>]*>\s*([A-Za-z\s]+?)(?:<br|\n)/i);
+              if (mAddr && mAddr[1]) {
+                var cName = mAddr[1].trim().split(" ")[0];
+                if (cName && cName.length < 30) customerName = cName;
+              }
+            }
+            if (!customerName && customerEmail) {
+              var n = customerEmail.split("@")[0].replace(/[0-9._-]+.*$/, "");
+              if (n.length >= 2) customerName = n.charAt(0).toUpperCase() + n.slice(1);
+            }
+            if (customerName) sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
             updateHeaderProfileBadge();
+            updateOutsideGreetingText();
+
+            if (CFG.customerProfileEndpoint && (customerId || customerEmail)) {
+              fetch(CFG.customerProfileEndpoint + "&customer_id=" + encodeURIComponent(customerId || "") + "&email=" + encodeURIComponent(customerEmail || ""))
+                .then(function (r) { return r.json(); })
+                .then(function (p) {
+                  if (p && p.found && (p.first_name || p.name)) {
+                    customerName = p.first_name || p.name.split(" ")[0];
+                    if (p.email) customerEmail = p.email;
+                    if (p.customer_id) customerId = p.customer_id;
+                    sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
+                    updateHeaderProfileBadge();
+                    updateOutsideGreetingText();
+                  }
+                })
+                .catch(function () {});
+            }
+          })
+          .catch(function () {});
+      } else if (CFG.customerProfileEndpoint && (customerId || customerEmail)) {
+        fetch(CFG.customerProfileEndpoint + "&customer_id=" + encodeURIComponent(customerId || "") + "&email=" + encodeURIComponent(customerEmail || ""))
+          .then(function (r) { return r.json(); })
+          .then(function (p) {
+            if (p && p.found && (p.first_name || p.name)) {
+              customerName = p.first_name || p.name.split(" ")[0];
+              sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
+              updateHeaderProfileBadge();
+              updateOutsideGreetingText();
+            }
           })
           .catch(function () {});
       }
@@ -1522,12 +1646,14 @@ WIDGET_JS = r"""
               if (customerId) sessionStorage.setItem("ai_cust_id_" + SHOP, customerId);
               if (customerName) sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
               updateHeaderProfileBadge();
+              updateOutsideGreetingText();
             }
           })
           .catch(function () {});
       }
     } catch (e) {}
     updateHeaderProfileBadge();
+    updateOutsideGreetingText();
   }
   var STATE_KEY = "aiChatWidgetState_" + SHOP;
   var chatHistory = [];
@@ -2019,13 +2145,13 @@ WIDGET_JS = r"""
         }
         refreshCartBadge();
         var greetingMsg = cfg.greeting_message || cfg.agent_title || "";
-        showOutsideGreeting(cfg.agent_name, greetingMsg, cfg.theme_color);
+        showOutsideGreeting(greetingMsg);
       }
     })
     .catch(function () {
       root.style.display = "block";
       syncCustomerSession();
-      showOutsideGreeting("AI Assistant", "Hey there! How can I help you today?", "#2b2b2b");
+      showOutsideGreeting();
     });
 })();
 """
