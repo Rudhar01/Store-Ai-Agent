@@ -277,16 +277,20 @@ def classify_intent(user_message: str, schema: dict | None = None, history: list
         )
         user_content = f"Recent conversation (context only):\n{convo}\n\nLatest message to classify:\n{user_message}"
 
-    response = llm_selector.create_chat_completion(
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": _system_prompt(schema)},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0,
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    )
-    raw = _strip_thinking(response.choices[0].message.content)
+    try:
+        response = llm_selector.create_chat_completion(
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": _system_prompt(schema)},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        raw = _strip_thinking(response.choices[0].message.content)
+    except Exception as e:
+        print(f"intent_classifier: LLM classification failed: {e!r}")
+        return _fallback()
 
     result = _parse_json(raw)
     if result is None:
