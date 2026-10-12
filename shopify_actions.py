@@ -1382,6 +1382,29 @@ async def confirm_payment_otp(store, entities: dict, session_id: str, customer_i
     except Exception as e:
         print(f"shopify_actions: error creating order in Shopify Admin API: {e!r}")
 
+    # Record analytics events for assistant order and purchased line items
+    try:
+        import repository_appwrite as _repo
+        store_doc = _repo._find_store_doc(shop)
+        if store_doc:
+            s_id = store_doc["$id"]
+            _repo.record_event(
+                s_id, _repo.EVENT_ORDER, name=f"Order #{order_number}",
+                value=float(amount), currency=currency, session_id=session_id,
+                visitor_id=f"cust_{customer_id}" if customer_id else "",
+                external_id=str(order_id), platform="shopify",
+            )
+            for it in (items or []):
+                _repo.record_event(
+                    s_id, _repo.EVENT_PURCHASE, name=it.get("name") or "Product",
+                    value=float(it.get("quantity") or 1), currency=currency, session_id=session_id,
+                    visitor_id=f"cust_{customer_id}" if customer_id else "",
+                    external_id=f"{order_id}_{it.get('variant_id') or it.get('id') or ''}",
+                    category=it.get("category") or "", platform="shopify",
+                )
+    except Exception as ev_err:
+        print(f"shopify_actions: failed to record order analytics events: {ev_err!r}")
+
     # Remove pending authorization and clear cart
     _PENDING_PAYMENTS.pop(key, None)
     _PENDING_PAYMENTS.pop(f"{shop}::session::{session_id}", None)

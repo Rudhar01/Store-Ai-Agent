@@ -1219,7 +1219,12 @@ def _make_feature_toggle_handler(store_id: str, key: str, label: str, features: 
 # fields only, so personal data (emails, customer names...) can't leak
 # into the dashboard.
 # --------------------------------------------------------------------
-ANALYTICS_RANGES = {60: "Last 60 days"}
+ANALYTICS_RANGES = {
+    7: "Last 7 days",
+    14: "Last 14 days",
+    30: "Last 30 days",
+    60: "Last 60 days",
+}
 
 _REPO_METRICS = {
     "chat_summary": "get_chat_summary",
@@ -1292,9 +1297,17 @@ _DAILY_ALIASES = {
 }
 
 
+_INVALID_PRODUCT_PHRASE = re.compile(
+    r"\b(?:more|less)\s+(?:then|than)\s+\$?\d+\b|"
+    r"^(?:give me|show me|find|search|filter|under|above|over)\s+(?:more\s+|less\s+)?(?:than\s+|then\s+)?\$?\d+|"
+    r"^[\d\s\$,\.\+\-]+$",
+    re.IGNORECASE,
+)
+
+
 def _safe_label(value, max_len: int = 60):
     text = str(value or "").strip()
-    if not text or _EMAIL_RE.search(text) or _PHONE_RE.search(text):
+    if not text or _EMAIL_RE.search(text) or _PHONE_RE.search(text) or _INVALID_PRODUCT_PHRASE.search(text):
         return None
     return text[:max_len]
 
@@ -2005,7 +2018,7 @@ async def analytics_page():
     client = ui.context.client
 
     saved_days = app.storage.user.get("analytics_days", 60)
-    state = {"days": 60, "grain": "daily", "bundle": None, "req": 0}
+    state = {"days": saved_days if saved_days in ANALYTICS_RANGES else 60, "grain": "daily", "bundle": None, "req": 0}
 
     content = _layout("analytics", store, cfg)
     with content:

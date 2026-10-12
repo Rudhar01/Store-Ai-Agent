@@ -38,6 +38,7 @@ attributes on your existing CUSTOMIZATIONS_COLLECTION.
 """
 
 import json
+import re
 from datetime import datetime, timedelta
 try:
     from appwrite.query import Query
@@ -243,6 +244,22 @@ def get_agent_conversions_by_day(store_id: str, days: int = 60) -> list[dict]:
     return out
 
 
+_NON_PRODUCT_PATTERNS = re.compile(
+    r"\b(?:more|less)\s+(?:then|than)\s+\$?\d+\b|"
+    r"^(?:give me|show me|find|search|filter|under|above|over)\s+(?:more\s+|less\s+)?(?:than\s+|then\s+)?\$?\d+|"
+    r"^[\d\s\$,\.\+\-]+$",
+    re.IGNORECASE,
+)
+
+
+def _is_plausible_product_name(text: str) -> bool:
+    if not text or len(str(text).strip()) < 2:
+        return False
+    if _NON_PRODUCT_PATTERNS.search(str(text).strip()):
+        return False
+    return True
+
+
 def _entity_text(entities: dict, keys: tuple[str, ...]) -> str | None:
     for key in keys:
         val = entities.get(key)
@@ -253,8 +270,7 @@ def _entity_text(entities: dict, keys: tuple[str, ...]) -> str | None:
 
 def get_top_searched_products(store_id: str, limit: int = 8) -> list[tuple[str, int]]:
     """Tallies product names/queries from product_search and
-    cart_management log entries — the closest signal to 'what are people
-    looking for' available from the classifier's extracted entities."""
+    cart_management log entries — prioritizing genuine product names."""
     logs = get_recent_logs(store_id)
     counts: dict[str, int] = {}
     for doc in logs:
@@ -264,8 +280,8 @@ def get_top_searched_products(store_id: str, limit: int = 8) -> list[tuple[str, 
             entities = json.loads(doc.get("entities") or "{}")
         except (json.JSONDecodeError, TypeError):
             continue
-        name = _entity_text(entities, ("query", "product_name_or_id"))
-        if not name:
+        name = _entity_text(entities, ("matched_product", "product_name_or_id", "product_name", "query"))
+        if not name or not _is_plausible_product_name(name):
             continue
         counts[name] = counts.get(name, 0) + 1
     return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
@@ -772,10 +788,10 @@ def get_top_cart_added_products(store_id: str, days: int = 60, limit: int = 8) -
 
 
 def get_top_viewed_products(store_id: str, days: int = 60, limit: int = 8):
-    raise AnalyticsUnavailable(
-        "Storefront product views aren't tracked yet — the assistant only sees what shoppers ask in chat. "
-        "See \"Top product searches\" and \"Most added to cart\" for product interest."
-    )
+    fn = globals().get("events_top_viewed")
+    if callable(fn):
+        return fn(store_id, days, limit)
+    return []
 
 
 # ---- Shopify Admin API (real orders) -------------------------------
@@ -838,8 +854,16 @@ def _fetch_orders(store_id: str, days: int) -> list[dict]:
 
 
 def get_sales_by_day(store_id: str, days: int = 60) -> list[dict]:
-    """[{"date", "orders", "revenue", "currency"}, ...] from real Shopify orders."""
-    orders = _fetch_orders(store_id, days)
+    """[{"date", "orders", "revenue", "currency"}, ...] from real Shopify orders or assistant events."""
+    try:
+        orders = _fetch_orders(store_id, days)
+    except AnalyticsUnavailable:
+        fn = globals().get("events_sales_by_day")
+        if callable(fn):
+            ev_sales = fn(store_id, days)
+            if any(row.get("orders", 0) > 0 for row in ev_sales):
+                return ev_sales
+        raise
     buckets: dict = {}
     currency = ""
     for o in orders:
@@ -862,8 +886,17 @@ def get_sales_by_day(store_id: str, days: int = 60) -> list[dict]:
 
 
 def get_top_purchased_products(store_id: str, days: int = 60, limit: int = 8) -> list[tuple[str, int]]:
+    try:
+        orders = _fetch_orders(store_id, days)
+    except AnalyticsUnavailable:
+        fn = globals().get("events_top_purchases")
+        if callable(fn):
+            ev_purchases = fn(store_id, days, limit)
+            if ev_purchases:
+                return ev_purchases
+        raise
     counts: dict[str, int] = {}
-    for o in _fetch_orders(store_id, days):
+    for o in orders:
         for li in o.get("line_items", []):
             title = (li.get("title") or "").strip()
             if title:
@@ -873,18 +906,26 @@ def get_top_purchased_products(store_id: str, days: int = 60, limit: int = 8) ->
 
 def get_category_popularity(store_id: str, days: int = 60, limit: int = 8) -> list[tuple[str, int]]:
     """Units sold per Shopify product type (needs read_orders + read_products)."""
-    orders = _fetch_orders(store_id, days)
-    store = _shopify_store(store_id, "read_products")
-    types = {
-        p["id"]: (p.get("product_type") or "").strip() or "Uncategorized"
-        for p in _shopify_paged(store, "products.json", {"limit": 250, "fields": "id,product_type"})
-    }
-    counts: dict[str, int] = {}
-    for o in orders:
-        for li in o.get("line_items", []):
-            cat = types.get(li.get("product_id"), "Uncategorized")
-            counts[cat] = counts.get(cat, 0) + int(li.get("quantity") or 0)
-    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    try:
+        orders = _fetch_orders(store_id, days)
+        store = _shopify_store(store_id, "read_products")
+        types = {
+            p["id"]: (p.get("product_type") or "").strip() or "Uncategorized"
+            for p in _shopify_paged(store, "products.json", {"limit": 250, "fields": "id,product_type"})
+        }
+        counts: dict[str, int] = {}
+        for o in orders:
+            for li in o.get("line_items", []):
+                cat = types.get(li.get("product_id"), "Uncategorized")
+                counts[cat] = counts.get(cat, 0) + int(li.get("quantity") or 0)
+        return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    except AnalyticsUnavailable:
+        fn = globals().get("events_category_popularity")
+        if callable(fn):
+            ev_cats = fn(store_id, days, limit)
+            if ev_cats:
+                return ev_cats
+        raise
 
 
 # ====================================================================
@@ -1081,6 +1122,8 @@ def _ev_ranked(store_id: str, days: int, limit: int, event_type: str, field: str
     for doc in _events_since(store_id, days, (event_type,)):
         label = (doc.get(field) or "").strip() or ("Uncategorized" if field == "category" else "")
         if not label:
+            continue
+        if event_type == EVENT_SEARCH and not _is_plausible_product_name(label):
             continue
         try:
             amount = float(doc.get("value") or 1) if weighted else 1

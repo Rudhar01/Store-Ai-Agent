@@ -276,14 +276,36 @@ def _write_events(shop: str, events: list) -> None:
         print(f"chatbot_widget: analytics events failed: {str(e)[:100]}")
 
 
+_INVALID_SEARCH_TERM_RE = re.compile(
+    r"\b(?:more|less)\s+(?:then|than)\s+\$?\d+\b|"
+    r"^(?:give me|show me|find|search|filter|under|above|over)\s+(?:more\s+|less\s+)?(?:than\s+|then\s+)?\$?\d+|"
+    r"^[\d\s\$,\.\+\-]+$",
+    re.IGNORECASE,
+)
+
+
+def _is_valid_product_search_term(text: str) -> bool:
+    if not text or len(str(text).strip()) < 2:
+        return False
+    if _INVALID_SEARCH_TERM_RE.search(str(text).strip()):
+        return False
+    return True
+
+
 def _build_events(status: str, intent, action, entities, session_id, visitor_id) -> list:
     ents = entities if isinstance(entities, dict) else {}
     base = {"platform": "shopify", "session_id": session_id or "", "visitor_id": visitor_id or ""}
     events = [{**base, "event_type": "chat_message", "name": str(intent or "")}]
     if status == "done" and (intent, action) == ("product_search", "search_products"):
-        term = ents.get("query") or ents.get("category")
-        if isinstance(term, str) and term.strip():
-            events.append({**base, "event_type": "search", "name": term.strip(),
+        prod_name = ents.get("matched_product") or ents.get("product_name")
+        if not prod_name:
+            term = ents.get("query") or ents.get("category")
+            if isinstance(term, str) and term.strip() and _is_valid_product_search_term(term):
+                prod_name = term.strip()
+        if prod_name:
+            events.append({**base, "event_type": "search", "name": prod_name,
+                           "category": ents.get("category") if isinstance(ents.get("category"), str) else ""})
+            events.append({**base, "event_type": "product_view", "name": prod_name,
                            "category": ents.get("category") if isinstance(ents.get("category"), str) else ""})
     if status == "done" and (intent, action) == ("cart_management", "add_item"):
         product = ents.get("product_name_or_id") or ents.get("query")
@@ -543,6 +565,10 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                     print(f"chatbot_widget: fallback products fetch failed: {e!r}")
 
     products = data.get("results") if action in {"search_products", "get_recommendations", "recommend_products", "assistant_help", "clarify"} and isinstance(data, dict) else None
+    if products and isinstance(products, list) and len(products) > 0:
+        first_prod = products[0]
+        if isinstance(first_prod, dict) and first_prod.get("name"):
+            entities["matched_product"] = first_prod["name"]
     orders = None
     if action in {"list_recent_orders", "get_my_orders"} and isinstance(data, dict):
         if isinstance(data.get("orders"), list):

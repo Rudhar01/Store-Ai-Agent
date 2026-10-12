@@ -139,7 +139,7 @@ _repo.register_event_providers(
     dashboard_nicegui.register_analytics_provider,
     platform="shopify",
     metrics=["chat_summary", "chat_usage_daily", "product_searches",
-             "agent_cart_adds", "product_cart_adds"],
+             "agent_cart_adds", "product_cart_adds", "product_views"],
 )
 
 
