@@ -72,6 +72,72 @@ THEME_SWATCHES = ["#4B5563", "#6B7280", "#9CA3AF", "#374151", "#1F2937"]
 
 CARD_CLASSES = "bg-white rounded-2xl border border-gray-100 shadow-sm w-full"
 
+# --------------------------------------------------------------------
+# VISUALIZATION & CHART THEMING — Rich, vibrant, modern color palettes
+# --------------------------------------------------------------------
+_CHART_COLORS = [
+    "#3B82F6",  # Electric Royal Blue
+    "#10B981",  # Vivid Emerald Green
+    "#F59E0B",  # Vibrant Amber / Gold
+    "#8B5CF6",  # Bright Violet / Purple
+    "#EC4899",  # Rose / Pink
+    "#06B6D4",  # Cyan / Sky
+    "#F97316",  # Bright Orange
+    "#14B8A6",  # Mint / Teal
+    "#6366F1",  # Indigo
+    "#EF4444",  # Coral Red
+]
+
+
+def _hex_to_rgba(hex_code: str, opacity: float = 1.0) -> str:
+    """Converts a hex color like '#3B82F6' to 'rgba(59, 130, 246, 0.5)'."""
+    try:
+        hex_code = (hex_code or "#3B82F6").lstrip("#")
+        if len(hex_code) == 3:
+            hex_code = "".join(c * 2 for c in hex_code)
+        r = int(hex_code[0:2], 16)
+        g = int(hex_code[2:4], 16)
+        b = int(hex_code[4:6], 16)
+        return f"rgba({r}, {g}, {b}, {opacity})"
+    except Exception:
+        return f"rgba(59, 130, 246, {opacity})"
+
+
+def _area_gradient(color_hex: str, top_opacity: float = 0.28, bottom_opacity: float = 0.02) -> dict:
+    """Generates an ECharts linear gradient object for modern glowing area fills."""
+    return {
+        "type": "linear",
+        "x": 0, "y": 0, "x2": 0, "y2": 1,
+        "colorStops": [
+            {"offset": 0, "color": _hex_to_rgba(color_hex, top_opacity)},
+            {"offset": 1, "color": _hex_to_rgba(color_hex, bottom_opacity)},
+        ],
+    }
+
+
+def _horizontal_bar_gradient(color_hex: str) -> dict:
+    """Generates an ECharts linear gradient for horizontal bars."""
+    return {
+        "type": "linear",
+        "x": 0, "y": 0, "x2": 1, "y2": 0,
+        "colorStops": [
+            {"offset": 0, "color": _hex_to_rgba(color_hex, 0.7)},
+            {"offset": 1, "color": color_hex},
+        ],
+    }
+
+
+def _vertical_bar_gradient(color_hex: str) -> dict:
+    """Generates an ECharts linear gradient for vertical bars."""
+    return {
+        "type": "linear",
+        "x": 0, "y": 0, "x2": 0, "y2": 1,
+        "colorStops": [
+            {"offset": 0, "color": color_hex},
+            {"offset": 1, "color": _hex_to_rgba(color_hex, 0.7)},
+        ],
+    }
+
 
 # --------------------------------------------------------------------
 # Session helpers
@@ -801,18 +867,37 @@ def dashboard_page():
                             ).classes("text-xs text-gray-400 py-8 text-center w-full")
                         else:
                             ui.echart({
-                                "grid": {"left": 32, "right": 12, "top": 12, "bottom": 24},
-                                "xAxis": {"type": "category", "data": [row["date"][5:] for row in conversions],
-                                          "axisLabel": {"fontSize": 10}, "axisLine": {"lineStyle": {"color": "#E5E7EB"}}},
-                                "yAxis": {"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
-                                          "splitLine": {"lineStyle": {"color": "#F3F4F6"}}},
+                                "grid": {"left": 36, "right": 16, "top": 16, "bottom": 24},
+                                "xAxis": {
+                                    "type": "category",
+                                    "data": [row["date"][5:] for row in conversions],
+                                    "axisLabel": {"fontSize": 10, "color": "#6B7280"},
+                                    "axisLine": {"lineStyle": {"color": "#E5E7EB"}},
+                                    "axisTick": {"show": False},
+                                },
+                                "yAxis": {
+                                    "type": "value",
+                                    "minInterval": 1,
+                                    "axisLabel": {"fontSize": 10, "color": "#6B7280"},
+                                    "splitLine": {"lineStyle": {"color": "#F3F4F6", "type": "dashed"}},
+                                },
                                 "series": [{
-                                    "type": "line", "data": [row["count"] for row in conversions],
-                                    "smooth": True, "symbolSize": 6,
-                                    "areaStyle": {"color": BRAND, "opacity": 0.08},
-                                    "itemStyle": {"color": BRAND}, "lineStyle": {"color": BRAND, "width": 2},
+                                    "name": "Cart Adds",
+                                    "type": "line",
+                                    "data": [row["count"] for row in conversions],
+                                    "smooth": 0.35,
+                                    "symbolSize": 6,
+                                    "areaStyle": _area_gradient("#6366F1", top_opacity=0.32, bottom_opacity=0.02),
+                                    "itemStyle": {"color": "#6366F1", "borderColor": "#ffffff", "borderWidth": 2},
+                                    "lineStyle": {"color": "#6366F1", "width": 2.5},
                                 }],
-                                "tooltip": {"trigger": "axis"},
+                                "tooltip": {
+                                    "trigger": "axis",
+                                    "backgroundColor": "rgba(17, 24, 39, 0.92)",
+                                    "borderColor": "#374151",
+                                    "textStyle": {"color": "#F9FAFB", "fontSize": 11},
+                                    "extraCssText": "box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); border-radius: 8px;",
+                                },
                             }).classes("w-full").style("height:200px;")
 
                     elif key == "products":
@@ -821,15 +906,37 @@ def dashboard_page():
                             ui.label("No product searches logged yet.").classes("text-xs text-gray-400 py-8 text-center w-full")
                         else:
                             ui.echart({
-                                "tooltip": {"trigger": "item"},
-                                "legend": {"bottom": 0, "textStyle": {"fontSize": 10}},
+                                "tooltip": {
+                                    "trigger": "item",
+                                    "formatter": "{b}: <b>{c}</b> ({d}%)",
+                                    "backgroundColor": "rgba(17, 24, 39, 0.92)",
+                                    "borderColor": "#374151",
+                                    "textStyle": {"color": "#F9FAFB", "fontSize": 11},
+                                    "extraCssText": "box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); border-radius: 8px;",
+                                },
+                                "legend": {
+                                    "bottom": 0,
+                                    "textStyle": {"fontSize": 11, "color": "#4B5563"},
+                                    "itemWidth": 12, "itemHeight": 12, "itemGap": 12,
+                                },
                                 "series": [{
-                                    "type": "pie", "radius": ["35%", "70%"],
+                                    "type": "pie",
+                                    "radius": ["40%", "72%"],
+                                    "center": ["50%", "45%"],
                                     "data": [{"value": count, "name": name} for name, count in products],
-                                    "label": {"fontSize": 10},
-                                    "itemStyle": {"borderRadius": 4, "borderColor": "#fff", "borderWidth": 2},
+                                    "label": {"show": False},
+                                    "emphasis": {
+                                        "scale": True,
+                                        "scaleSize": 6,
+                                        "itemStyle": {
+                                            "shadowBlur": 10,
+                                            "shadowOffsetX": 0,
+                                            "shadowColor": "rgba(0, 0, 0, 0.2)",
+                                        },
+                                    },
+                                    "itemStyle": {"borderRadius": 6, "borderColor": "#fff", "borderWidth": 2},
                                 }],
-                                "color": ["#4B5563", "#6B7280", "#9CA3AF", "#374151", "#1F2937", "#D1D5DB", "#111827", "#E5E7EB"],
+                                "color": _CHART_COLORS,
                             }).classes("w-full").style("height:280px;")
 
                     elif key == "features":
@@ -839,14 +946,39 @@ def dashboard_page():
                         else:
                             flabels = [repo.INTENT_LABELS.get(k, (k.replace("_", " ").title(), "help_outline"))[0] for k, _ in reversed(features_used)]
                             fcounts = [v for _, v in reversed(features_used)]
+                            n_f = len(features_used)
+                            f_series_data = []
+                            for i, c in enumerate(fcounts):
+                                bcol = _CHART_COLORS[(n_f - 1 - i) % len(_CHART_COLORS)]
+                                f_series_data.append({
+                                    "value": c,
+                                    "itemStyle": {
+                                        "color": _horizontal_bar_gradient(bcol),
+                                        "borderRadius": [0, 6, 6, 0],
+                                    },
+                                })
                             ui.echart({
-                                "grid": {"left": 130, "right": 20, "top": 6, "bottom": 6, "containLabel": False},
-                                "xAxis": {"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
-                                          "splitLine": {"lineStyle": {"color": "#F3F4F6"}}},
-                                "yAxis": {"type": "category", "data": flabels, "axisLabel": {"fontSize": 10, "width": 120, "overflow": "truncate"}},
-                                "series": [{"type": "bar", "data": fcounts, "itemStyle": {"color": "#6B7280", "borderRadius": [0, 4, 4, 0]}, "barMaxWidth": 16}],
-                                "tooltip": {"trigger": "axis"},
-                            }).classes("w-full").style(f"height:{max(180, 30 * len(features_used) + 20)}px;")
+                                "grid": {"left": 130, "right": 24, "top": 8, "bottom": 8, "containLabel": False},
+                                "xAxis": {
+                                    "type": "value", "minInterval": 1,
+                                    "axisLabel": {"fontSize": 10, "color": "#6B7280"},
+                                    "splitLine": {"lineStyle": {"color": "#F3F4F6", "type": "dashed"}},
+                                },
+                                "yAxis": {
+                                    "type": "category", "data": flabels,
+                                    "axisLabel": {"fontSize": 10, "width": 120, "overflow": "truncate", "color": "#374151"},
+                                    "axisLine": {"lineStyle": {"color": "#E5E7EB"}},
+                                    "axisTick": {"show": False},
+                                },
+                                "series": [{"type": "bar", "data": f_series_data, "barMaxWidth": 16}],
+                                "tooltip": {
+                                    "trigger": "axis",
+                                    "backgroundColor": "rgba(17, 24, 39, 0.92)",
+                                    "borderColor": "#374151",
+                                    "textStyle": {"color": "#F9FAFB", "fontSize": 11},
+                                    "extraCssText": "box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); border-radius: 8px;",
+                                },
+                            }).classes("w-full").style(f"height:{max(180, 32 * len(features_used) + 24)}px;")
 
             ui.select(
                 _insight_options, value="cart_adds",
@@ -1366,7 +1498,6 @@ def generate_merchant_tips(b: dict, features: dict, limit: int = 8) -> list:
 # --------------------------------------------------------------------
 # ANALYTICS — UI helpers
 # --------------------------------------------------------------------
-_CHART_COLORS = ["#4B5563", "#6B7280", "#9CA3AF", "#374151", "#1F2937", "#D1D5DB", "#111827", "#E5E7EB"]
 _METRIC_LABELS = {
     "chat_summary": "Chat totals", "chat_usage_daily": "Daily chat usage", "product_views": "Product views",
     "product_searches": "Product searches", "product_purchases": "Purchases", "sales_daily": "Sales trend",
@@ -1381,11 +1512,11 @@ def _fmt(v, decimals: int = 0) -> str:
     return f"{v:,.{decimals}f}" if (decimals or v != int(v)) else f"{int(v):,}"
 
 
-def _section_card(title: str, icon: str, note: str = ""):
+def _section_card(title: str, icon: str, note: str = "", icon_color: str = None):
     card = ui.card().classes(CARD_CLASSES + " p-5 gap-2")
     with card:
         with ui.row().classes("items-center gap-2"):
-            ui.icon(icon, size="17px").style(f"color:{BRAND};")
+            ui.icon(icon, size="17px").style(f"color:{icon_color or BRAND};")
             ui.label(title).classes("font-bold text-gray-900 text-sm")
         if note:
             ui.label(note).classes("text-[11px] text-gray-400 -mt-1")
@@ -1411,14 +1542,14 @@ def _unfiltered_note(m: dict):
         )
 
 
-def _kpi_card(icon: str, label: str, value, sub: str = "", reason: str = "", compact: bool = False):
+def _kpi_card(icon: str, label: str, value, sub: str = "", reason: str = "", compact: bool = False, accent_color: str = None):
     available = value is not None
+    bg_style = f"background:{_hex_to_rgba(accent_color, 0.12)};" if accent_color else f"background:{BRAND_SOFT};"
+    icon_color = accent_color or BRAND
     with ui.card().classes(CARD_CLASSES + " p-4 gap-1"):
         with ui.row().classes("items-center gap-2 no-wrap"):
-            with ui.element("div").classes("w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0").style(
-                f"background:{BRAND_SOFT};"
-            ):
-                ui.icon(icon, size="14px").style(f"color:{BRAND};")
+            with ui.element("div").classes("w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0").style(bg_style):
+                ui.icon(icon, size="14px").style(f"color:{icon_color};")
             ui.label(label).classes("text-xs text-gray-500")
         ui.label(value if available else "—").classes(
             ("text-base leading-tight break-words " if compact else "text-2xl ")
@@ -1427,24 +1558,56 @@ def _kpi_card(icon: str, label: str, value, sub: str = "", reason: str = "", com
         ui.label(sub if available else (reason or "Data not available")).classes("text-[11px] text-gray-400")
 
 
-def _bar_chart(items: list, color: str = "#6B7280"):
+def _bar_chart(items: list, color: str = "#3B82F6", colorful: bool = True):
     labels = [n for n, _ in reversed(items)]
     counts = [c for _, c in reversed(items)]
+    n_items = len(items)
+    series_data = []
+    for i, c in enumerate(counts):
+        bar_color = _CHART_COLORS[(n_items - 1 - i) % len(_CHART_COLORS)] if colorful else color
+        series_data.append({
+            "value": c,
+            "itemStyle": {
+                "color": _horizontal_bar_gradient(bar_color),
+                "borderRadius": [0, 6, 6, 0],
+            },
+        })
     ui.echart({
-        "grid": {"left": 130, "right": 20, "top": 6, "bottom": 6, "containLabel": False},
-        "xAxis": {"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
-                  "splitLine": {"lineStyle": {"color": "#F3F4F6"}}},
-        "yAxis": {"type": "category", "data": labels, "axisLabel": {"fontSize": 10, "width": 120, "overflow": "truncate"}},
-        "series": [{"type": "bar", "data": counts, "itemStyle": {"color": color, "borderRadius": [0, 4, 4, 0]}, "barMaxWidth": 16}],
-        "tooltip": {"trigger": "axis"},
-    }).classes("w-full").style(f"height:{max(180, 30 * len(items) + 20)}px;")
+        "grid": {"left": 130, "right": 24, "top": 8, "bottom": 8, "containLabel": False},
+        "xAxis": {
+            "type": "value", "minInterval": 1,
+            "axisLabel": {"fontSize": 10, "color": "#6B7280"},
+            "splitLine": {"lineStyle": {"color": "#F3F4F6", "type": "dashed"}},
+        },
+        "yAxis": {
+            "type": "category", "data": labels,
+            "axisLabel": {"fontSize": 10, "width": 120, "overflow": "truncate", "color": "#374151"},
+            "axisLine": {"lineStyle": {"color": "#E5E7EB"}},
+            "axisTick": {"show": False},
+        },
+        "series": [{"type": "bar", "data": series_data, "barMaxWidth": 16}],
+        "tooltip": {
+            "trigger": "axis",
+            "backgroundColor": "rgba(17, 24, 39, 0.92)",
+            "borderColor": "#374151",
+            "textStyle": {"color": "#F9FAFB", "fontSize": 11},
+            "extraCssText": "box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); border-radius: 8px;",
+        },
+    }).classes("w-full").style(f"height:{max(180, 32 * len(items) + 24)}px;")
 
 
 def _line_series(name: str, data: list, color: str, area: bool = False, **extra) -> dict:
-    s = {"name": name, "type": "line", "smooth": True, "symbolSize": 5, "data": data,
-         "itemStyle": {"color": color}, "lineStyle": {"color": color, "width": 2}}
+    s = {
+        "name": name,
+        "type": "line",
+        "smooth": 0.35,
+        "symbolSize": 6,
+        "data": data,
+        "itemStyle": {"color": color, "borderColor": "#ffffff", "borderWidth": 2},
+        "lineStyle": {"color": color, "width": 2.5},
+    }
     if area:
-        s["areaStyle"] = {"color": color, "opacity": 0.08}
+        s["areaStyle"] = _area_gradient(color, top_opacity=0.25, bottom_opacity=0.01)
     s.update(extra)
     return s
 
@@ -1452,29 +1615,46 @@ def _line_series(name: str, data: list, color: str, area: bool = False, **extra)
 def _trend_chart(rows: list, defs: list):
     """defs: [(field, display name, colour)]"""
     option = {
-        "grid": {"left": 40, "right": 16, "top": 30 if len(defs) > 1 else 12, "bottom": 24},
-        "xAxis": {"type": "category", "data": [r["label"] for r in rows], "axisLabel": {"fontSize": 10},
-                  "axisLine": {"lineStyle": {"color": "#E5E7EB"}}},
-        "yAxis": {"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
-                  "splitLine": {"lineStyle": {"color": "#F3F4F6"}}},
+        "grid": {"left": 40, "right": 16, "top": 32 if len(defs) > 1 else 16, "bottom": 24},
+        "xAxis": {
+            "type": "category", "data": [r["label"] for r in rows],
+            "axisLabel": {"fontSize": 10, "color": "#6B7280"},
+            "axisLine": {"lineStyle": {"color": "#E5E7EB"}},
+            "axisTick": {"show": False},
+        },
+        "yAxis": {
+            "type": "value", "minInterval": 1,
+            "axisLabel": {"fontSize": 10, "color": "#6B7280"},
+            "splitLine": {"lineStyle": {"color": "#F3F4F6", "type": "dashed"}},
+        },
         "series": [_line_series(name, [r[f] for r in rows], color, area=(i == 0))
                    for i, (f, name, color) in enumerate(defs)],
-        "tooltip": {"trigger": "axis"},
+        "tooltip": {
+            "trigger": "axis",
+            "backgroundColor": "rgba(17, 24, 39, 0.92)",
+            "borderColor": "#374151",
+            "textStyle": {"color": "#F9FAFB", "fontSize": 11},
+            "extraCssText": "box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); border-radius: 8px;",
+        },
     }
     if len(defs) > 1:
-        option["legend"] = {"top": 0, "textStyle": {"fontSize": 10}}
+        option["legend"] = {
+            "top": 0,
+            "textStyle": {"fontSize": 11, "color": "#4B5563"},
+            "itemWidth": 12, "itemHeight": 12, "itemGap": 14,
+        }
     ui.echart(option).classes("w-full").style("height:220px;")
 
 
 def _ranked_card(b: dict, key: str, title: str, icon: str, empty_title: str, empty_detail: str, color: str):
     m = _metric(b, key)
-    with _section_card(title, icon, f"{ANALYTICS_RANGES.get(b['days'], '')}" if m["ok"] and m["date_filtered"] else ""):
+    with _section_card(title, icon, f"{ANALYTICS_RANGES.get(b['days'], '')}" if m["ok"] and m["date_filtered"] else "", icon_color=color):
         if not m["ok"]:
             _unavailable_state(m["reason"])
         elif not m["data"]:
             _empty_state(empty_title, empty_detail)
         else:
-            _bar_chart(m["data"], color)
+            _bar_chart(m["data"], color, colorful=True)
             _unfiltered_note(m)
 
 
@@ -1498,36 +1678,36 @@ def _render_analytics(b: dict, grain: str):
 
     with ui.element("div").classes("w-full grid grid-cols-2 md:grid-cols-4 gap-3"):
         _kpi_card("receipt_long", "Number of orders", _fmt(k["orders"]) if k["orders"] is not None else None,
-                  period, _why("sales_daily", "Order data not connected"))
+                  period, _why("sales_daily", "Order data not connected"), accent_color="#3B82F6")
         _kpi_card("payments", "Revenue",
                   (f"{cur} " if cur else "") + _fmt(k["revenue"], 2) if k["revenue"] is not None else None,
-                  period, _why("sales_daily", "Sales data not connected"))
+                  period, _why("sales_daily", "Sales data not connected"), accent_color="#10B981")
         _kpi_card("search", "Most searched product", top_search[0] if top_search else None,
                   f"{_fmt(top_search[1])} searches" if top_search else "",
                   _why("product_searches", "No product searches yet") if not searched else "No product searches yet",
-                  compact=True)
+                  compact=True, accent_color="#8B5CF6")
         _kpi_card("emoji_events", "Most bought product", top_buy[0] if top_buy else None,
                   f"{_fmt(top_buy[1])} units sold" if top_buy else "",
                   _why("product_purchases", "No purchases yet") if not bought else "No purchases in this period",
-                  compact=True)
+                  compact=True, accent_color="#F59E0B")
         _kpi_card("groups", "Total visitors", _fmt(k["visitors"]) if k["visitors"] is not None else None,
-                  "Chat widget visitors", "Not tracked yet")
+                  "Chat widget visitors", "Not tracked yet", accent_color="#06B6D4")
         _kpi_card("forum", "Chat sessions", _fmt(k["sessions"]) if k["sessions"] is not None else None,
-                  "Conversations started", "Not tracked yet")
+                  "Conversations started", "Not tracked yet", accent_color="#6366F1")
         _kpi_card("swap_horiz", "Msgs / session",
                   _fmt(k["msgs_per_session"], 1) if k["msgs_per_session"] is not None else None,
-                  "Average depth of a chat", "Needs sessions + messages")
+                  "Average depth of a chat", "Needs sessions + messages", accent_color="#EC4899")
 
     # ---- Tips ----
     tips = generate_merchant_tips(b, b.get("features", {}))
     with _section_card("Tips for your store", "lightbulb",
-                       "Automatically generated from the data on this page — nothing is guessed."):
+                       "Automatically generated from the data on this page — nothing is guessed.", icon_color="#F59E0B"):
         if not tips:
             _empty_state("Not enough data for tips yet",
                          "As shoppers use your assistant, personalised recommendations will show up here.",
                          icon="lightbulb")
         for t in tips:
-            color = _TIP_COLORS.get(t["level"], "#6B7280")
+            color = _TIP_COLORS.get(t["level"], "#3B82F6")
             with ui.row().classes("w-full items-start gap-3 px-3 py-2.5 rounded-xl no-wrap").style("background:#F9FAFB;"):
                 ui.icon(t.get("icon", "info"), size="18px").style(f"color:{color};margin-top:2px;")
                 with ui.column().classes("gap-0"):
@@ -1536,7 +1716,7 @@ def _render_analytics(b: dict, grain: str):
 
     # ---- Chatbot usage trend ----
     usage = _metric(b, "chat_usage_daily")
-    with _section_card("Chatbot usage", "forum", f"{grain.title()} sessions and messages · {ANALYTICS_RANGES.get(b['days'], '')}"):
+    with _section_card("Chatbot usage", "forum", f"{grain.title()} sessions and messages · {ANALYTICS_RANGES.get(b['days'], '')}", icon_color="#3B82F6"):
         if not usage["ok"]:
             _unavailable_state(usage["reason"])
         else:
@@ -1548,14 +1728,17 @@ def _render_analytics(b: dict, grain: str):
                 _empty_state("No chat activity in this period",
                              "Once shoppers start chatting, usage trends will appear here.")
             else:
-                names = {"sessions": ("Sessions", "#4B5563"), "messages": ("Messages", "#9CA3AF"),
-                         "unique_users": ("Unique users", "#1F2937")}
+                names = {
+                    "sessions": ("Sessions", "#3B82F6"),
+                    "messages": ("Messages", "#8B5CF6"),
+                    "unique_users": ("Unique users", "#10B981"),
+                }
                 _trend_chart(_aggregate(series, fields, grain), [(f, *names[f]) for f in fields])
                 _unfiltered_note(usage)
 
     # ---- Sales trend ----
     sales = _metric(b, "sales_daily")
-    with _section_card("Sales trend", "show_chart", f"{grain.title()} · {ANALYTICS_RANGES.get(b['days'], '')}"):
+    with _section_card("Sales trend", "show_chart", f"{grain.title()} · {ANALYTICS_RANGES.get(b['days'], '')}", icon_color="#10B981"):
         if not sales["ok"]:
             _unavailable_state(sales["reason"])
         else:
@@ -1566,41 +1749,73 @@ def _render_analytics(b: dict, grain: str):
             else:
                 rows = _aggregate(series, fields, grain)
                 option = {
-                    "grid": {"left": 44, "right": 44 if len(fields) > 1 else 16, "top": 30, "bottom": 24},
-                    "legend": {"top": 0, "textStyle": {"fontSize": 10}},
-                    "xAxis": {"type": "category", "data": [r["label"] for r in rows], "axisLabel": {"fontSize": 10},
-                              "axisLine": {"lineStyle": {"color": "#E5E7EB"}}},
-                    "yAxis": [{"type": "value", "axisLabel": {"fontSize": 10}, "splitLine": {"lineStyle": {"color": "#F3F4F6"}}}],
+                    "grid": {"left": 44, "right": 44 if len(fields) > 1 else 16, "top": 32, "bottom": 24},
+                    "legend": {
+                        "top": 0,
+                        "textStyle": {"fontSize": 11, "color": "#4B5563"},
+                        "itemWidth": 12, "itemHeight": 12, "itemGap": 14,
+                    },
+                    "xAxis": {
+                        "type": "category", "data": [r["label"] for r in rows],
+                        "axisLabel": {"fontSize": 10, "color": "#6B7280"},
+                        "axisLine": {"lineStyle": {"color": "#E5E7EB"}},
+                        "axisTick": {"show": False},
+                    },
+                    "yAxis": [
+                        {
+                            "type": "value",
+                            "axisLabel": {"fontSize": 10, "color": "#6B7280"},
+                            "splitLine": {"lineStyle": {"color": "#F3F4F6", "type": "dashed"}},
+                        }
+                    ],
                     "series": [],
-                    "tooltip": {"trigger": "axis"},
+                    "tooltip": {
+                        "trigger": "axis",
+                        "backgroundColor": "rgba(17, 24, 39, 0.92)",
+                        "borderColor": "#374151",
+                        "textStyle": {"color": "#F9FAFB", "fontSize": 11},
+                        "extraCssText": "box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); border-radius: 8px;",
+                    },
                 }
                 if "revenue" in fields:
-                    option["series"].append(_line_series("Revenue" + (f" ({cur})" if cur else ""),
-                                                         [r["revenue"] for r in rows], "#4B5563", area=True))
+                    option["series"].append(
+                        _line_series("Revenue" + (f" ({cur})" if cur else ""),
+                                     [r["revenue"] for r in rows], "#10B981", area=True)
+                    )
                 if "orders" in fields:
                     if "revenue" in fields:
-                        option["yAxis"].append({"type": "value", "minInterval": 1, "axisLabel": {"fontSize": 10},
-                                                "splitLine": {"show": False}})
-                    option["series"].append({"name": "Orders", "type": "bar", "barMaxWidth": 18,
-                                             "yAxisIndex": 1 if "revenue" in fields else 0,
-                                             "data": [r["orders"] for r in rows],
-                                             "itemStyle": {"color": "#D1D5DB", "borderRadius": [4, 4, 0, 0]}})
+                        option["yAxis"].append({
+                            "type": "value", "minInterval": 1,
+                            "axisLabel": {"fontSize": 10, "color": "#6B7280"},
+                            "splitLine": {"show": False},
+                        })
+                    option["series"].append({
+                        "name": "Orders",
+                        "type": "bar",
+                        "barMaxWidth": 18,
+                        "yAxisIndex": 1 if "revenue" in fields else 0,
+                        "data": [r["orders"] for r in rows],
+                        "itemStyle": {
+                            "color": _vertical_bar_gradient("#3B82F6"),
+                            "borderRadius": [4, 4, 0, 0],
+                        },
+                    })
                 ui.echart(option).classes("w-full").style("height:240px;")
                 _unfiltered_note(sales)
 
     # ---- Products ----
     _ranked_card(b, "product_views", "Most-viewed products", "visibility",
-                 "No product views recorded in this period", "Views are counted when shoppers open a product.", "#4B5563")
+                 "No product views recorded in this period", "Views are counted when shoppers open a product.", "#3B82F6")
     _ranked_card(b, "product_searches", "Top product searches", "search",
-                 "No product searches recorded in this period", "Searches made through the assistant appear here.", "#6B7280")
+                 "No product searches recorded in this period", "Searches made through the assistant appear here.", "#8B5CF6")
     _ranked_card(b, "product_purchases", "Most-purchased products", "shopping_bag",
-                 "No purchases recorded in this period", "Purchased products will be ranked here.", "#374151")
+                 "No purchases recorded in this period", "Purchased products will be ranked here.", "#10B981")
     _ranked_card(b, "product_cart_adds", "Most added to cart via the assistant", "add_shopping_cart",
-                 "No assistant cart adds in this period", "Products shoppers add to cart in chat are ranked here.", "#1F2937")
+                 "No assistant cart adds in this period", "Products shoppers add to cart in chat are ranked here.", "#F59E0B")
 
     # ---- Category popularity ----
     cat = _metric(b, "category_popularity")
-    with _section_card("Product popularity by category", "category"):
+    with _section_card("Product popularity by category", "category", icon_color="#EC4899"):
         if not cat["ok"]:
             _unavailable_state(cat["reason"])
         elif not cat["data"]:
@@ -1608,12 +1823,36 @@ def _render_analytics(b: dict, grain: str):
                          "Category interest appears once products are viewed, searched or bought.")
         else:
             ui.echart({
-                "tooltip": {"trigger": "item"},
-                "legend": {"bottom": 0, "textStyle": {"fontSize": 10}},
-                "series": [{"type": "pie", "radius": ["35%", "70%"],
-                            "data": [{"value": c, "name": n} for n, c in cat["data"]],
-                            "label": {"fontSize": 10},
-                            "itemStyle": {"borderRadius": 4, "borderColor": "#fff", "borderWidth": 2}}],
+                "tooltip": {
+                    "trigger": "item",
+                    "formatter": "{b}: <b>{c}</b> ({d}%)",
+                    "backgroundColor": "rgba(17, 24, 39, 0.92)",
+                    "borderColor": "#374151",
+                    "textStyle": {"color": "#F9FAFB", "fontSize": 11},
+                    "extraCssText": "box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); border-radius: 8px;",
+                },
+                "legend": {
+                    "bottom": 0,
+                    "textStyle": {"fontSize": 11, "color": "#4B5563"},
+                    "itemWidth": 12, "itemHeight": 12, "itemGap": 12,
+                },
+                "series": [{
+                    "type": "pie",
+                    "radius": ["40%", "72%"],
+                    "center": ["50%", "45%"],
+                    "data": [{"value": c, "name": n} for n, c in cat["data"]],
+                    "label": {"show": False},
+                    "emphasis": {
+                        "scale": True,
+                        "scaleSize": 6,
+                        "itemStyle": {
+                            "shadowBlur": 10,
+                            "shadowOffsetX": 0,
+                            "shadowColor": "rgba(0, 0, 0, 0.2)",
+                        },
+                    },
+                    "itemStyle": {"borderRadius": 6, "borderColor": "#fff", "borderWidth": 2},
+                }],
                 "color": _CHART_COLORS,
             }).classes("w-full").style("height:280px;")
             _unfiltered_note(cat)
