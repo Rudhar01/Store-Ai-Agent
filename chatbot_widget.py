@@ -164,6 +164,7 @@ class ChatRequest(BaseModel):
     visitor_id: str | None = None
     otp_code: str | None = None
     payment_data: dict | None = None
+    cart_data: dict | None = None
 
 
 class ConfirmRequest(BaseModel):
@@ -197,6 +198,7 @@ class InitiatePaymentRequest(BaseModel):
     customer_id: str | None = None
     customer_email: str | None = None
     customer_name: str | None = None
+    cart_data: dict | None = None
 
 
 class VerifyOtpRequest(BaseModel):
@@ -367,7 +369,11 @@ _SEARCH_LEAD_IN = re.compile(
 )
 _SEARCH_FILLER = re.compile(r"\b(products?|items?|please|for me|any|around|got|add|remove|delete|to my cart|from my cart|my cart|cart|some|few|available|your|the|best|all)\b", re.IGNORECASE)
 _LEADING_ARTICLE = re.compile(r"^\s*(a|an|the)\s+", re.IGNORECASE)
-_CHECKOUT_RE = re.compile(r"\b(check ?out|place (my|the|an?) order|buy (it )?now|purchase now)\b", re.IGNORECASE)
+_CHECKOUT_RE = re.compile(r"\b(check ?out|perform checkout|checkout for me|place (my|the|an?) order|buy (it )?now|purchase now)\b", re.IGNORECASE)
+_VIEW_CART_RE = re.compile(
+    r"\b(view (my )?cart|show (me )?(my )?cart|what('s| is) in my cart|check (my )?cart|cart (items?|contents?)|my cart contains?|what do i have in my cart|see (my )?cart)\b",
+    re.IGNORECASE,
+)
 _ORDER_NO_RE = re.compile(r"#?\s*(\d{3,})")
 _MY_ORDERS_RE = re.compile(
     r"\b(my|all|past|previous|recent|active|current|pending|open)\b[^.?!]{0,30}\borders\b"
@@ -392,6 +398,59 @@ _WARRANTY_RE = re.compile(r"\b(warranty|guarantee|claim|replace|broken|damaged|d
 
 EMAIL_RE = re.compile(r"[\w.+\-]+@[\w\-]+\.[\w.\-]+")
 _VERIFY_ERRORS = {"verification_required", "verification_failed"}
+
+
+def _parse_storefront_cart(cart_data: dict | None) -> dict | None:
+    if not isinstance(cart_data, dict):
+        return None
+    raw_items = cart_data.get("items") or []
+    items = []
+    for it in raw_items:
+        if not isinstance(it, dict):
+            continue
+        title = it.get("product_title") or it.get("title") or it.get("name") or "Product"
+        qty = int(it.get("quantity") or 1)
+        raw_price = it.get("final_line_price") if "final_line_price" in it else it.get("price", 0)
+        if isinstance(raw_price, int):
+            price_str = f"{raw_price / 100:.2f}"
+        else:
+            try:
+                price_str = f"{float(raw_price):.2f}"
+            except Exception:
+                price_str = "0.00"
+        items.append({
+            "name": title,
+            "title": title,
+            "quantity": qty,
+            "price": price_str,
+            "variant_id": it.get("variant_id") or it.get("id"),
+        })
+
+    raw_total = cart_data.get("total_price") if "total_price" in cart_data else cart_data.get("total", 0)
+    if isinstance(raw_total, int):
+        total_str = f"{raw_total / 100:.2f}"
+    else:
+        try:
+            total_str = f"{float(raw_total):.2f}"
+        except Exception:
+            total_str = "0.00"
+
+    if (total_str == "0.00" or total_str == "0") and items:
+        try:
+            sum_val = sum(float(it.get("price", "0")) * it.get("quantity", 1) for it in items)
+            if sum_val > 0:
+                total_str = f"{sum_val:.2f}"
+        except Exception:
+            pass
+
+    currency = cart_data.get("currency") or "USD"
+    item_count = cart_data.get("item_count") if cart_data.get("item_count") is not None else sum(it["quantity"] for it in items)
+    return {
+        "items": items,
+        "item_count": item_count,
+        "total": total_str,
+        "currency": currency,
+    }
 
 
 def extract_search_term(message: str) -> str:
@@ -846,8 +905,13 @@ async def _chat_impl(req: ChatRequest):
         return result
 
     # 1. Fast-path pattern overrides (avoids LLM latency, outages, or token errors)
-    if _PAY_RE.search(message):
+    if _PAY_RE.search(message) or _CHECKOUT_RE.search(message):
         intent, action = "payment_checkout", "initiate_payment"
+        entities = {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif _VIEW_CART_RE.search(message):
+        intent, action = "cart_management", "view_cart"
         entities = {}
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
@@ -921,6 +985,16 @@ async def _chat_impl(req: ChatRequest):
             entities["customer_id"] = str(customer_id)
         if customer_name and not entities.get("customer_name"):
             entities["customer_name"] = str(customer_name)
+
+        parsed_cart = _parse_storefront_cart(req.cart_data)
+        if parsed_cart:
+            entities["cart_data"] = parsed_cart
+            if parsed_cart.get("items") and not entities.get("items"):
+                entities["items"] = parsed_cart["items"]
+            if parsed_cart.get("total") and (not entities.get("amount") or entities.get("amount") == "0.00"):
+                entities["amount"] = parsed_cart["total"]
+            if parsed_cart.get("currency") and not entities.get("currency"):
+                entities["currency"] = parsed_cart["currency"]
 
         # 1. Order History: Show all orders
         if (intent, action) in (("order_tracking", "list_recent_orders"), ("customer_account", "get_my_orders")):
@@ -1103,10 +1177,21 @@ async def initiate_payment_endpoint(req: InitiatePaymentRequest):
     customer_email = (req.customer_email or "").strip().lower() or _session_customer_email(req.shop, req.session_id)
     customer_name = (req.customer_name or "").strip() or _session_customer_name(req.shop, req.session_id)
     _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
-    result = await shopify_actions.initiate_payment(store, {}, req.session_id, customer_id=customer_id)
+    entities = {}
+    if req.cart_data:
+        parsed = _parse_storefront_cart(req.cart_data)
+        if parsed:
+            entities["cart_data"] = parsed
+            if parsed.get("items"):
+                entities["items"] = parsed["items"]
+            if parsed.get("total"):
+                entities["amount"] = parsed["total"]
+            if parsed.get("currency"):
+                entities["currency"] = parsed["currency"]
+    result = await shopify_actions.initiate_payment(store, entities, req.session_id, customer_id=customer_id)
     if result.get("status") == "otp_required":
         key = _pkey(req.shop, req.session_id)
-        _set_pending(key, type="await_payment_otp", intent="payment_checkout", action="confirm_payment_otp", entities={}, language="en", otp=result.get("otp"))
+        _set_pending(key, type="await_payment_otp", intent="payment_checkout", action="confirm_payment_otp", entities=entities, language="en", otp=result.get("otp"))
     return result
 
 
@@ -1995,12 +2080,20 @@ WIDGET_JS = r"""
     refreshCartBadge();
   }
 
+  var lastKnownCart = null;
+
+  function updateCartState(cart) {
+    if (!cart) return;
+    lastKnownCart = cart;
+    if (cartBadge) {
+      cartBadge.textContent = cart.item_count || 0;
+      cartBadge.classList.toggle("show", (cart.item_count || 0) > 0);
+    }
+  }
+
   function refreshCartBadge() {
     fetch("/cart.js").then(function (r) { return r.json(); }).then(function (cart) {
-      if (cartBadge) {
-        cartBadge.textContent = cart.item_count || 0;
-        cartBadge.classList.toggle("show", (cart.item_count || 0) > 0);
-      }
+      updateCartState(cart);
     }).catch(function () {});
   }
 
@@ -2052,6 +2145,7 @@ WIDGET_JS = r"""
 
   function cartView() {
     fetch("/cart.js").then(function (r) { return r.json(); }).then(function (cart) {
+      updateCartState(cart);
       if (!cart.items || !cart.items.length) {
         addBubble("Your cart is currently empty.", "bot");
         return;
@@ -2060,11 +2154,11 @@ WIDGET_JS = r"""
         return (it.quantity || 1) + "x " + it.product_title + " ($" + (it.final_line_price / 100).toFixed(2) + ")";
       });
       addBubble("🛒 Your Shopping Cart:\n" + lines.join("\n") + "\n\nTotal: $" + (cart.total_price / 100).toFixed(2), "bot");
-      refreshCartBadge();
     }).catch(function () {});
   }
 
   function cartClear() {
+    lastKnownCart = null;
     fetch("/cart/clear.js", { method: "POST" }).then(function () {
       refreshCartBadge();
     }).catch(function () {});
@@ -2135,10 +2229,27 @@ WIDGET_JS = r"""
     micBtn.classList.remove("has-text");
 
     var typingEl = addBubble("typing\u2026", "bot typing");
-    fetch(CFG.chatEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: SESSION_ID, shop: SHOP, customer_token: customerToken, customer_id: customerId, customer_email: customerEmail, customer_name: customerName, visitor_id: VISITOR_ID })
+    var getCart = fetch("/cart.js")
+      .then(function (r) { return r.json(); })
+      .then(function (c) { updateCartState(c); return c; })
+      .catch(function () { return lastKnownCart; });
+
+    getCart.then(function (cartPayload) {
+      return fetch(CFG.chatEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: text,
+          session_id: SESSION_ID,
+          shop: SHOP,
+          customer_token: customerToken,
+          customer_id: customerId,
+          customer_email: customerEmail,
+          customer_name: customerName,
+          visitor_id: VISITOR_ID,
+          cart_data: cartPayload || lastKnownCart
+        })
+      });
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
@@ -2233,6 +2344,7 @@ WIDGET_JS = r"""
 
   // Fetch widget config and activate
   syncCustomerSession();
+  refreshCartBadge();
   setTimeout(syncCustomerSession, 300);
   setTimeout(syncCustomerSession, 800);
   setTimeout(syncCustomerSession, 1800);

@@ -357,6 +357,8 @@
           ],
           "example_utterances": [
             "Pay for my cart",
+            "perform checkout for me",
+            "checkout",
             "I want to checkout and pay",
             "Proceed to payment with saved card",
             "Pay for the order",

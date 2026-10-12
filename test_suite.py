@@ -202,6 +202,53 @@ async def run_tests():
     assert valid_otp_res.get("widget_action", {}).get("type") == "cart_clear"
     print(f"PASS: OTP verified and order #{valid_otp_res.get('order_number')} created successfully!")
 
+    # Test browser storefront cart data sync for checkout (resolves 'cart is empty' conflict)
+    storefront_cart_raw = {
+        "items": [
+            {
+                "product_title": "The Collection Snowboard: Hydrogen",
+                "quantity": 1,
+                "price": 60000,
+                "final_line_price": 60000,
+                "variant_id": 11223344
+            }
+        ],
+        "total_price": 60000,
+        "currency": "USD",
+        "item_count": 1
+    }
+    parsed_cart = chatbot_widget._parse_storefront_cart(storefront_cart_raw)
+    assert parsed_cart["total"] == "600.00"
+    assert parsed_cart["items"][0]["name"] == "The Collection Snowboard: Hydrogen"
+
+    # View cart with storefront cart data
+    view_synced = await shopify_actions.dispatch(
+        "cart_management", "view_cart", store,
+        {"cart_data": parsed_cart},
+        session_id="session_storefront_test"
+    )
+    assert "The Collection Snowboard: Hydrogen" in view_synced.get("message", "")
+    assert "$600.00" in view_synced.get("message", "")
+    print("PASS: view_cart correctly displays storefront cart items ($600.00).")
+
+    # Initiate payment with storefront cart data
+    init_synced = await shopify_actions.dispatch(
+        "payment_checkout", "initiate_payment", store,
+        {"cart_data": parsed_cart},
+        session_id="session_storefront_test"
+    )
+    assert init_synced.get("status") == "otp_required"
+    assert init_synced.get("amount") == "600.00"
+    assert "The Collection Snowboard: Hydrogen" in init_synced.get("order_summary", "")
+    print(f"PASS: Checkout with storefront cart data succeeded! Total: ${init_synced.get('amount')}, OTP: {init_synced.get('otp')}.")
+
+    # Fast-path regex checks for checkout and view cart
+    assert chatbot_widget._CHECKOUT_RE.search("perform checkout for me")
+    assert chatbot_widget._CHECKOUT_RE.search("checkout")
+    assert chatbot_widget._VIEW_CART_RE.search("what's in my cart")
+    assert chatbot_widget._VIEW_CART_RE.search("but my cart conatins 1 product") or chatbot_widget._VIEW_CART_RE.search("my cart contains 1 product")
+    print("PASS: Fast-path patterns correctly match 'perform checkout for me' and cart inspection queries.")
+
     print("\n==================================================")
     print("  TEST 5: WARRANTY CLAIMS & TRACKING")
     print("==================================================")

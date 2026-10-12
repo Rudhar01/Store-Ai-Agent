@@ -867,11 +867,32 @@ async def edit_quantity(store, entities: dict, session_id: str) -> dict:
 
 async def view_cart(store, entities: dict, session_id: str) -> dict:
     cart_id = _SESSION_CARTS.get(session_id)
-    if not cart_id:
-        return {"cart": _summarize_cart(None), "widget_action": {"type": "cart_view"}}
-    cart = await _fetch_cart(store, cart_id)
-    summary = _summarize_cart(cart)
-    return {"cart": summary, "widget_action": {"type": "cart_view"}}
+    if cart_id:
+        cart = await _fetch_cart(store, cart_id)
+        summary = _summarize_cart(cart)
+        if summary.get("items"):
+            item_strs = [f"{it.get('quantity', 1)}x {it.get('name') or it.get('title')} (${it.get('price', '0.00')})" for it in summary["items"]]
+            msg = f"Your cart contains {len(summary['items'])} item(s): {', '.join(item_strs)}. Total: ${summary.get('total', '0.00')} {summary.get('currency', 'USD')}."
+            return {"cart": summary, "message": msg, "widget_action": {"type": "cart_view"}}
+
+    cart_data = entities.get("cart_data")
+    if isinstance(cart_data, dict) and cart_data.get("items"):
+        item_strs = [f"{it.get('quantity', 1)}x {it.get('name') or it.get('title')} (${it.get('price', '0.00')})" for it in cart_data["items"]]
+        msg = f"Your cart contains {len(cart_data['items'])} item(s): {', '.join(item_strs)}. Total: ${cart_data.get('total', '0.00')} {cart_data.get('currency', 'USD')}."
+        return {"cart": cart_data, "message": msg, "widget_action": {"type": "cart_view"}}
+
+    if entities.get("items"):
+        summary = {
+            "items": entities["items"],
+            "total": str(entities.get("amount") or entities.get("total") or "0.00"),
+            "currency": entities.get("currency") or "USD",
+            "item_count": len(entities["items"]),
+        }
+        item_strs = [f"{it.get('quantity', 1)}x {it.get('name') or it.get('title')} (${it.get('price', '0.00')})" for it in summary["items"]]
+        msg = f"Your cart contains {len(summary['items'])} item(s): {', '.join(item_strs)}. Total: ${summary.get('total', '0.00')} {summary.get('currency', 'USD')}."
+        return {"cart": summary, "message": msg, "widget_action": {"type": "cart_view"}}
+
+    return {"cart": _summarize_cart(None), "message": "Your cart is currently empty.", "widget_action": {"type": "cart_view"}}
 
 
 async def clear_cart(store, entities: dict, session_id: str) -> dict:
@@ -1247,7 +1268,21 @@ async def initiate_payment(store, entities: dict, session_id: str, customer_id: 
     if not items:
         if entities.get("items"):
             items = entities["items"]
-            summary = {"items": items, "total": str(entities.get("amount") or "39.98"), "currency": entities.get("currency") or "USD"}
+            summary = {
+                "items": items,
+                "total": str(entities.get("amount") or entities.get("total") or "0.00"),
+                "currency": entities.get("currency") or "USD",
+                "item_count": len(items),
+            }
+        elif entities.get("cart_data"):
+            cd = entities["cart_data"]
+            items = cd.get("items") or []
+            summary = {
+                "items": items,
+                "total": str(cd.get("total") or entities.get("amount") or "0.00"),
+                "currency": cd.get("currency") or entities.get("currency") or "USD",
+                "item_count": cd.get("item_count", len(items)),
+            }
         else:
             prod_query = entities.get("product_name_or_id")
             if prod_query:
@@ -1258,7 +1293,7 @@ async def initiate_payment(store, entities: dict, session_id: str, customer_id: 
 
     if not items:
         amount_val = entities.get("amount") or entities.get("total")
-        if amount_val:
+        if amount_val and float(amount_val or 0) > 0:
             items = [{"name": "Cart Items", "quantity": 1, "price": str(amount_val)}]
             summary = {"items": items, "total": str(amount_val), "currency": "USD"}
         else:
@@ -1268,6 +1303,13 @@ async def initiate_payment(store, entities: dict, session_id: str, customer_id: 
             }
 
     total = summary.get("total") or str(entities.get("amount") or "0.00")
+    if (not total or total == "0.00" or total == "0") and items:
+        try:
+            sum_val = sum(float(it.get("price", 0)) * int(it.get("quantity", 1)) for it in items)
+            if sum_val > 0:
+                total = f"{sum_val:.2f}"
+        except Exception:
+            pass
     currency = summary.get("currency") or entities.get("currency") or "USD"
 
     # If user provided card credentials directly in this payment message
