@@ -600,7 +600,7 @@ def login_page():
                     # Trigger on Enter key
                     email_input.on("keydown.enter", handle_email)
 
-                    ui.button("Continue", on_click=handle_email, icon_right="arrow_forward").props("no-caps").classes("w-full mt-2").style(
+                    ui.button("Continue", on_click=handle_email).props("no-caps icon-right=arrow_forward").classes("w-full mt-2").style(
                         f"background:{BRAND};color:white;border-radius:10px;font-weight:600;"
                     )
 
