@@ -216,7 +216,7 @@ def get_recent_logs(store_id: str, limit: int = 2000) -> list[dict]:
     return result["documents"]
 
 
-def get_agent_conversions_by_day(store_id: str, days: int = 14) -> list[dict]:
+def get_agent_conversions_by_day(store_id: str, days: int = 60) -> list[dict]:
     """Returns [{"date": "2026-08-20", "count": 3}, ...], one entry per day
     (oldest first, missing days filled with 0), counting successful
     agent-assisted 'add to cart' events as the best available proxy for
@@ -703,7 +703,7 @@ def _first_id(doc: dict, ents: dict, keys: tuple):
     return None
 
 
-def get_chat_usage_by_day(store_id: str, days: int = 14) -> list[dict]:
+def get_chat_usage_by_day(store_id: str, days: int = 60) -> list[dict]:
     """[{"date", "messages", ["sessions"], ["unique_users"]}, ...] oldest
     first. sessions/unique_users appear only if the logs carry ids."""
     msgs: dict = _defaultdict(int)
@@ -738,7 +738,7 @@ def get_chat_usage_by_day(store_id: str, days: int = 14) -> list[dict]:
     return out
 
 
-def get_chat_summary(store_id: str, days: int = 14) -> dict:
+def get_chat_summary(store_id: str, days: int = 60) -> dict:
     """Totals for the period. Keys with value None = not trackable yet."""
     all_s, all_u, total = set(), set(), 0
     for doc in _get_logs_since(store_id, days):
@@ -758,7 +758,7 @@ def get_chat_summary(store_id: str, days: int = 14) -> dict:
     }
 
 
-def get_top_cart_added_products(store_id: str, days: int = 14, limit: int = 8) -> list[tuple[str, int]]:
+def get_top_cart_added_products(store_id: str, days: int = 60, limit: int = 8) -> list[tuple[str, int]]:
     """Products shoppers successfully added to cart through the assistant."""
     counts: dict[str, int] = {}
     for doc in _get_logs_since(store_id, days):
@@ -771,7 +771,7 @@ def get_top_cart_added_products(store_id: str, days: int = 14, limit: int = 8) -
     return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
 
 
-def get_top_viewed_products(store_id: str, days: int = 14, limit: int = 8):
+def get_top_viewed_products(store_id: str, days: int = 60, limit: int = 8):
     raise AnalyticsUnavailable(
         "Storefront product views aren't tracked yet — the assistant only sees what shoppers ask in chat. "
         "See \"Top product searches\" and \"Most added to cart\" for product interest."
@@ -837,7 +837,7 @@ def _fetch_orders(store_id: str, days: int) -> list[dict]:
     return orders
 
 
-def get_sales_by_day(store_id: str, days: int = 14) -> list[dict]:
+def get_sales_by_day(store_id: str, days: int = 60) -> list[dict]:
     """[{"date", "orders", "revenue", "currency"}, ...] from real Shopify orders."""
     orders = _fetch_orders(store_id, days)
     buckets: dict = {}
@@ -861,7 +861,7 @@ def get_sales_by_day(store_id: str, days: int = 14) -> list[dict]:
     return out
 
 
-def get_top_purchased_products(store_id: str, days: int = 14, limit: int = 8) -> list[tuple[str, int]]:
+def get_top_purchased_products(store_id: str, days: int = 60, limit: int = 8) -> list[tuple[str, int]]:
     counts: dict[str, int] = {}
     for o in _fetch_orders(store_id, days):
         for li in o.get("line_items", []):
@@ -871,7 +871,7 @@ def get_top_purchased_products(store_id: str, days: int = 14, limit: int = 8) ->
     return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
 
 
-def get_category_popularity(store_id: str, days: int = 14, limit: int = 8) -> list[tuple[str, int]]:
+def get_category_popularity(store_id: str, days: int = 60, limit: int = 8) -> list[tuple[str, int]]:
     """Units sold per Shopify product type (needs read_orders + read_products)."""
     orders = _fetch_orders(store_id, days)
     store = _shopify_store(store_id, "read_products")
@@ -1091,23 +1091,23 @@ def _ev_ranked(store_id: str, days: int, limit: int, event_type: str, field: str
     return [(n, _ev_num(c)) for n, c in ranked]
 
 
-def events_top_searches(store_id: str, days: int = 14, limit: int = 8):
+def events_top_searches(store_id: str, days: int = 60, limit: int = 8):
     return _ev_ranked(store_id, days, limit, EVENT_SEARCH)
 
 
-def events_top_cart_adds(store_id: str, days: int = 14, limit: int = 8):
+def events_top_cart_adds(store_id: str, days: int = 60, limit: int = 8):
     return _ev_ranked(store_id, days, limit, EVENT_CART_ADD)
 
 
-def events_top_purchases(store_id: str, days: int = 14, limit: int = 8):
+def events_top_purchases(store_id: str, days: int = 60, limit: int = 8):
     return _ev_ranked(store_id, days, limit, EVENT_PURCHASE, weighted=True)
 
 
-def events_top_viewed(store_id: str, days: int = 14, limit: int = 8):
+def events_top_viewed(store_id: str, days: int = 60, limit: int = 8):
     return _ev_ranked(store_id, days, limit, EVENT_PRODUCT_VIEW)
 
 
-def events_category_popularity(store_id: str, days: int = 14, limit: int = 8):
+def events_category_popularity(store_id: str, days: int = 60, limit: int = 8):
     return _ev_ranked(store_id, days, limit, EVENT_PURCHASE, field="category", weighted=True)
 
 
@@ -1115,7 +1115,7 @@ def _ev_day_list(days: int) -> list[str]:
     return [(datetime.utcnow() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days - 1, -1, -1)]
 
 
-def events_chat_usage_by_day(store_id: str, days: int = 14) -> list[dict]:
+def events_chat_usage_by_day(store_id: str, days: int = 60) -> list[dict]:
     msgs: dict = _defaultdict(int)
     sess: dict = _defaultdict(set)
     users: dict = _defaultdict(set)
@@ -1143,7 +1143,7 @@ def events_chat_usage_by_day(store_id: str, days: int = 14) -> list[dict]:
     return out
 
 
-def events_chat_summary(store_id: str, days: int = 14) -> dict:
+def events_chat_summary(store_id: str, days: int = 60) -> dict:
     all_s, all_u, total = set(), set(), 0
     for doc in _events_since(store_id, days, (EVENT_CHAT,)):
         total += 1
@@ -1159,7 +1159,7 @@ def events_chat_summary(store_id: str, days: int = 14) -> dict:
     }
 
 
-def events_cart_adds_by_day(store_id: str, days: int = 14) -> list[dict]:
+def events_cart_adds_by_day(store_id: str, days: int = 60) -> list[dict]:
     buckets: dict = _defaultdict(int)
     for doc in _events_since(store_id, days, (EVENT_CART_ADD,)):
         dt = _parse_created(doc)
@@ -1168,7 +1168,7 @@ def events_cart_adds_by_day(store_id: str, days: int = 14) -> list[dict]:
     return [{"date": day, "count": buckets.get(day, 0)} for day in _ev_day_list(days)]
 
 
-def events_sales_by_day(store_id: str, days: int = 14) -> list[dict]:
+def events_sales_by_day(store_id: str, days: int = 60) -> list[dict]:
     """From "order" events: value = order total."""
     buckets: dict = {}
     currency = ""

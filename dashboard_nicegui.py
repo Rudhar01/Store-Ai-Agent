@@ -512,54 +512,185 @@ def signup_page(shop: str = ""):
     _goto(f"/dashboard/setup?shop={shop}")
 
 
+def _find_dashboard_user(ident: str) -> dict | None:
+    cleaned = (ident or "").strip().lower()
+    if not cleaned:
+        return None
+    # 1. Lookup by email
+    user = repo.get_dashboard_user_by_email(cleaned)
+    if user:
+        return user
+    # 2. Lookup by user_id
+    try:
+        user = repo.get_dashboard_user_by_id(ident.strip())
+        if user:
+            return user
+    except Exception:
+        pass
+    # 3. Lookup by shop domain or store ID
+    try:
+        store = repo.get_store(cleaned) or repo.get_store_by_id(ident.strip())
+        if store:
+            res = repo.databases.list_documents(
+                repo.DATABASE_ID, repo.DASHBOARD_USERS_COLLECTION,
+                queries=[repo.Query.equal("store", store["$id"])],
+            )
+            if res.get("documents"):
+                return res["documents"][0]
+    except Exception:
+        pass
+    return None
+
+
 @ui.page("/dashboard/login")
 def login_page():
     with _auth_shell():
-        with ui.column().classes("items-center gap-2 mb-2"):
-            with ui.element("div").classes("w-10 h-10 rounded-xl flex items-center justify-center").style(f"background:{BRAND};"):
-                ui.icon("forum", size="20px").style("color:white;")
-            ui.label("RenderLink").classes("text-xl font-bold text-gray-900")
+        with ui.column().classes("items-center gap-2 mb-3"):
+            with ui.element("div").classes("w-12 h-12 rounded-2xl flex items-center justify-center shadow-sm").style(f"background:{BRAND};"):
+                ui.icon("forum", size="24px").style("color:white;")
+            ui.label("RenderLink").classes("text-xl font-bold text-gray-900 tracking-tight")
 
-        with ui.card().classes("p-7 w-full max-w-sm gap-1"):
-            ui.label("Log in").classes("text-lg font-bold text-gray-900")
-            ui.label("Welcome back — manage your AI shopping assistant.").classes("text-sm text-gray-500 mb-3")
+        card = ui.card().classes("p-7 w-full max-w-sm gap-2 shadow-sm rounded-2xl border border-gray-100 bg-white")
 
-            email = ui.input("Email").classes("w-full")
-            password = ui.input("Password", password=True, password_toggle_button=True).classes("w-full")
-            error_label = ui.label("").classes("text-xs text-gray-500")
+        state = {
+            "step": 1,
+            "email": "",
+            "user": None,
+            "error": "",
+        }
 
-            def submit():
-                user = repo.get_dashboard_user_by_email(email.value.strip())
-                if not user or not bcrypt.checkpw(password.value.encode(), user["password_hash"].encode()):
-                    error_label.text = "Invalid email or password."
-                    return
-                # New accounts are saved by create_dashboard_user() with the
-                # field `store` (a plain id, or a nested document if it is an
-                # Appwrite relationship); older accounts use `store_id`.
-                store_field = user.get("store") or user.get("store_id")
-                store_id = store_field["$id"] if isinstance(store_field, dict) else store_field
-                if not store_id:
-                    error_label.text = "This account isn't linked to a store. Please contact support."
-                    return
-                app.storage.user["store_id"] = store_id
-                app.storage.user["user_id"] = user["$id"]
-                app.storage.user["email"] = user["email"]
+        def render_form():
+            card.clear()
+            with card:
+                if state["step"] == 1:
+                    # ---------------- STEP 1: EMAIL / GMAIL ----------------
+                    with ui.row().classes("w-full items-center justify-between mb-1"):
+                        ui.label("Log in").classes("text-lg font-bold text-gray-900")
+                        with ui.element("div").classes("px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-600"):
+                            ui.label("Step 1 of 2")
+                    ui.label("Enter your email or Gmail to manage your AI assistant.").classes("text-xs text-gray-500 mb-2")
 
-                # Login always goes straight to the dashboard — setup is
-                # only ever shown to someone creating a new account
-                # (via signup -> /dashboard/setup). A returning user who
-                # logs in never sees it, even if an earlier setup
-                # attempt was abandoned partway through.
-                _goto("/dashboard/Dashboard")
+                    email_input = ui.input(
+                        "Email or Gmail",
+                        value=state["email"],
+                        placeholder="you@gmail.com",
+                    ).classes("w-full").props("autofocus clearable")
 
-            ui.button("Log in", on_click=submit).props("no-caps").classes("w-full mt-3").style(
-                f"background:{BRAND};color:white;border-radius:10px;"
-            )
-            with ui.row().classes("w-full justify-center mt-1"):
-                ui.link("Forgot password?", "/dashboard/forgot-password").classes("text-xs text-gray-500")
-            with ui.row().classes("w-full justify-center mt-2"):
-                ui.label("New here?").classes("text-xs text-gray-500")
-                ui.link("Create an account", "/dashboard/signup").classes("text-xs font-semibold text-gray-800")
+                    error_label = ui.label(state["error"]).classes("text-xs text-red-500 min-h-[16px]")
+
+                    def handle_email():
+                        error_label.text = ""
+                        raw_email = (email_input.value or "").strip()
+                        if not raw_email:
+                            error_label.text = "Please enter your email or Gmail address."
+                            return
+
+                        user = _find_dashboard_user(raw_email)
+                        if not user:
+                            error_label.text = "No account found with this email in our database."
+                            return
+
+                        # Account found in database! Advance to Step 2
+                        state["email"] = user.get("email", raw_email)
+                        state["user"] = user
+                        state["error"] = ""
+                        state["step"] = 2
+                        render_form()
+
+                    # Trigger on Enter key
+                    email_input.on("keydown.enter", handle_email)
+
+                    ui.button("Continue", on_click=handle_email, icon_right="arrow_forward").props("no-caps").classes("w-full mt-2").style(
+                        f"background:{BRAND};color:white;border-radius:10px;font-weight:600;"
+                    )
+
+                    with ui.row().classes("w-full justify-center mt-2"):
+                        ui.link("Forgot password?", "/dashboard/forgot-password").classes("text-xs text-gray-500 hover:text-gray-800")
+                    with ui.row().classes("w-full justify-center mt-1"):
+                        ui.label("New here?").classes("text-xs text-gray-500")
+                        ui.link("Create an account", "/dashboard/signup").classes("text-xs font-semibold text-gray-800 ml-1")
+
+                else:
+                    # ---------------- STEP 2: PASSWORD ----------------
+                    with ui.row().classes("w-full items-center justify-between mb-1"):
+                        ui.label("Welcome back").classes("text-lg font-bold text-gray-900")
+                        with ui.element("div").classes("px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-600"):
+                            ui.label("Step 2 of 2")
+
+                    # Pill displaying confirmed email with Change button
+                    with ui.row().classes("w-full items-center justify-between px-3 py-2 rounded-xl bg-gray-50 border border-gray-200 mb-2"):
+                        with ui.row().classes("items-center gap-2 overflow-hidden"):
+                            ui.icon("account_circle", size="18px").style("color:#6B7280;")
+                            ui.label(state["email"]).classes("text-xs font-semibold text-gray-800 truncate max-w-[190px]")
+                        def change_email():
+                            state["step"] = 1
+                            state["error"] = ""
+                            render_form()
+                        ui.button("Change", on_click=change_email).props("flat dense no-caps text-color=grey-8").classes("text-[11px] font-semibold")
+
+                    ui.label("Enter your password to sign in.").classes("text-xs text-gray-500 mb-2")
+
+                    password_input = ui.input(
+                        "Password",
+                        password=True,
+                        password_toggle_button=True,
+                        placeholder="Enter your password",
+                    ).classes("w-full").props("autofocus")
+
+                    error_label = ui.label(state["error"]).classes("text-xs text-red-500 min-h-[16px]")
+
+                    def handle_login():
+                        error_label.text = ""
+                        pwd = password_input.value or ""
+                        if not pwd:
+                            error_label.text = "Please enter your password."
+                            return
+
+                        user = state["user"]
+                        if not user:
+                            state["step"] = 1
+                            render_form()
+                            return
+
+                        password_hash = user.get("password_hash", "")
+                        try:
+                            valid = bcrypt.checkpw(pwd.encode("utf-8"), password_hash.encode("utf-8"))
+                        except Exception:
+                            valid = False
+
+                        if not valid:
+                            error_label.text = "Incorrect password. Please try again."
+                            return
+
+                        store_field = user.get("store") or user.get("store_id")
+                        store_id = store_field["$id"] if isinstance(store_field, dict) else store_field
+                        if not store_id:
+                            error_label.text = "This account isn't linked to a store. Please contact support."
+                            return
+
+                        app.storage.user["store_id"] = store_id
+                        app.storage.user["user_id"] = user["$id"]
+                        app.storage.user["email"] = user.get("email", state["email"])
+
+                        ui.notify("Logged in successfully ✓", type="positive")
+                        _goto("/dashboard/Dashboard")
+
+                    # Trigger on Enter key
+                    password_input.on("keydown.enter", handle_login)
+
+                    ui.button("Log in", on_click=handle_login).props("no-caps").classes("w-full mt-2").style(
+                        f"background:{BRAND};color:white;border-radius:10px;font-weight:600;"
+                    )
+
+                    with ui.row().classes("w-full justify-between items-center mt-2"):
+                        def go_back():
+                            state["step"] = 1
+                            state["error"] = ""
+                            render_form()
+                        ui.button("← Back", on_click=go_back).props("flat dense no-caps text-color=grey-7").classes("text-xs")
+                        ui.link("Forgot password?", "/dashboard/forgot-password").classes("text-xs text-gray-500 hover:text-gray-800")
+
+        render_form()
 
 
 @ui.page("/dashboard/forgot-password")
@@ -856,9 +987,9 @@ def dashboard_page():
                             "The assistant hands checkout off to your store's own Shopify "
                             "cart, so this tracks successful 'add to cart' actions it "
                             "completed for shoppers — the closest signal to agent-driven "
-                            "sales available from chat activity. Last 14 days."
+                            "sales available from chat activity. Last 60 days."
                         ).classes("text-[11px] text-gray-400 mb-1")
-                        conversions = repo.get_agent_conversions_by_day(store["$id"], days=14)
+                        conversions = repo.get_agent_conversions_by_day(store["$id"], days=60)
                         total = sum(row["count"] for row in conversions)
                         if total == 0:
                             ui.label(
@@ -1088,7 +1219,7 @@ def _make_feature_toggle_handler(store_id: str, key: str, label: str, features: 
 # fields only, so personal data (emails, customer names...) can't leak
 # into the dashboard.
 # --------------------------------------------------------------------
-ANALYTICS_RANGES = {7: "Last 7 days", 14: "Last 14 days", 30: "Last 30 days", 90: "Last 90 days"}
+ANALYTICS_RANGES = {60: "Last 60 days"}
 
 _REPO_METRICS = {
     "chat_summary": "get_chat_summary",
@@ -1873,8 +2004,8 @@ async def analytics_page():
     cfg = repo.ensure_customization(store["$id"])
     client = ui.context.client
 
-    saved_days = app.storage.user.get("analytics_days", 14)
-    state = {"days": saved_days if saved_days in ANALYTICS_RANGES else 14, "grain": "daily", "bundle": None, "req": 0}
+    saved_days = app.storage.user.get("analytics_days", 60)
+    state = {"days": 60, "grain": "daily", "bundle": None, "req": 0}
 
     content = _layout("analytics", store, cfg)
     with content:
@@ -1921,7 +2052,7 @@ async def analytics_page():
         render()
 
     async def on_range(value):
-        state["days"] = int(value)
+        state["days"] = int(value or 60)
         app.storage.user["analytics_days"] = state["days"]
         await refresh()
 
