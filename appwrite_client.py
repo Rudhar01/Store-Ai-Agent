@@ -14,6 +14,107 @@ Required environment variables (from your Appwrite Project Settings):
 
 import os
 
+class NormalizedDocument(dict):
+    """Subclass of dict that allows both dict access (d['$id'], d['shop_domain'])
+    and attribute access (d.id, d.shop_domain), mapping $id <-> id seamlessly."""
+    def __getattr__(self, name):
+        if name in self:
+            return self[name]
+        if name == "id" and "$id" in self:
+            return self["$id"]
+        raise AttributeError(f"'NormalizedDocument' has no attribute '{name}'")
+
+
+class NormalizedDocumentList(dict):
+    """Subclass of dict that allows both dict access (res['documents'], res['total'])
+    and attribute access (res.documents, res.total)."""
+    @property
+    def documents(self):
+        return self.get("documents", [])
+
+    @property
+    def total(self):
+        return self.get("total", 0)
+
+
+def _normalize_doc(doc):
+    if doc is None:
+        return None
+    if isinstance(doc, NormalizedDocument):
+        return doc
+    if isinstance(doc, dict):
+        d = dict(doc)
+    elif hasattr(doc, "to_dict"):
+        d = doc.to_dict()
+    elif hasattr(doc, "model_dump"):
+        d = doc.model_dump()
+    elif hasattr(doc, "__dict__"):
+        d = getattr(doc, "__dict__", {})
+    else:
+        try:
+            d = dict(doc)
+        except Exception:
+            return doc
+
+    data_field = d.get("data")
+    if isinstance(data_field, dict):
+        d = {**data_field, **d}
+    return NormalizedDocument(d)
+
+
+def _normalize_list(res):
+    if res is None:
+        return NormalizedDocumentList({"total": 0, "documents": []})
+    if isinstance(res, NormalizedDocumentList):
+        return res
+    if isinstance(res, dict):
+        raw_docs = res.get("documents", [])
+        total = res.get("total", len(raw_docs))
+    elif hasattr(res, "documents"):
+        raw_docs = res.documents
+        total = getattr(res, "total", len(raw_docs))
+    elif hasattr(res, "to_dict"):
+        d = res.to_dict()
+        raw_docs = d.get("documents", [])
+        total = d.get("total", len(raw_docs))
+    else:
+        raw_docs = getattr(res, "documents", [])
+        total = getattr(res, "total", len(raw_docs))
+
+    norm_docs = [_normalize_doc(d) for d in raw_docs if d is not None]
+    return NormalizedDocumentList({
+        "total": total,
+        "documents": norm_docs,
+    })
+
+
+class DatabaseWrapper:
+    def __init__(self, target):
+        self._target = target
+
+    def list_documents(self, *args, **kwargs):
+        res = self._target.list_documents(*args, **kwargs)
+        return _normalize_list(res)
+
+    def get_document(self, *args, **kwargs):
+        res = self._target.get_document(*args, **kwargs)
+        return _normalize_doc(res)
+
+    def create_document(self, *args, **kwargs):
+        res = self._target.create_document(*args, **kwargs)
+        return _normalize_doc(res)
+
+    def update_document(self, *args, **kwargs):
+        res = self._target.update_document(*args, **kwargs)
+        return _normalize_doc(res)
+
+    def delete_document(self, *args, **kwargs):
+        return self._target.delete_document(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._target, name)
+
+
 try:
     from appwrite.client import Client
     from appwrite.services.databases import Databases
@@ -24,12 +125,12 @@ try:
     client.set_project(os.environ.get("APPWRITE_PROJECT_ID", ""))
     client.set_key(os.environ.get("APPWRITE_API_KEY", ""))
 
-    databases = Databases(client)
+    databases = DatabaseWrapper(Databases(client))
     storage = Storage(client)
 except ImportError:
     class MockAppwriteService:
         def __getattr__(self, name):
-            return lambda *args, **kwargs: {"documents": [], "total": 0}
+            return lambda *args, **kwargs: NormalizedDocumentList({"documents": [], "total": 0})
     client = None
     databases = MockAppwriteService()
     storage = MockAppwriteService()

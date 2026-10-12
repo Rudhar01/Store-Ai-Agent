@@ -244,7 +244,10 @@ def _get_store(shop: str) -> SimpleNamespace | None:
     doc = repo.get_store(shop)
     if not doc:
         return None
-    return SimpleNamespace(shop_domain=doc["shop_domain"], access_token=doc["access_token"], id=doc["$id"])
+    shop_domain = doc.get("shop_domain") if isinstance(doc, dict) else getattr(doc, "shop_domain", shop)
+    access_token = doc.get("access_token") if isinstance(doc, dict) else getattr(doc, "access_token", "")
+    store_id = doc.get("$id") if isinstance(doc, dict) else getattr(doc, "id", None)
+    return SimpleNamespace(shop_domain=shop_domain or shop, access_token=access_token, id=store_id)
 
 
 import contextvars

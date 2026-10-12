@@ -69,6 +69,7 @@ from appwrite_client import (
     REQUEST_LOGS_COLLECTION, CUSTOMIZATIONS_COLLECTION, DASHBOARD_USERS_COLLECTION,
     FEATURES_COLLECTION, STORE_INFO_COLLECTION, FAQS_COLLECTION, FEEDBACK_COLLECTION,
     APPWRITE_ENDPOINT, APPWRITE_PROJECT_ID, WIDGET_ICONS_BUCKET,
+    NormalizedDocument, NormalizedDocumentList, _normalize_doc, _normalize_list,
 )
 
 
@@ -77,7 +78,7 @@ def _find_store_doc(shop_domain: str):
         DATABASE_ID, STORES_COLLECTION,
         queries=[Query.equal("shop_domain", shop_domain)],
     )
-    docs = result["documents"]
+    docs = _normalize_list(result)["documents"]
     return docs[0] if docs else None
 
 
