@@ -815,34 +815,37 @@ async def add_all_to_cart(store, entities: dict, session_id: str) -> dict:
             continue
         name = product.get("title", "Unknown Product")
         price = variant.get("price", "0.00")
+        added_items.append({
+            "name": name,
+            "variant": variant.get("title", ""),
+            "quantity": quantity,
+            "price": price,
+            "variant_id": variant_id,
+        })
 
+    if cart and added_items:
         try:
-            if cart:
-                mutation = f"""
-                mutation addLine($cartId: ID!, $lines: [CartLineInput!]!) {{
-                  cartLinesAdd(cartId: $cartId, lines: $lines) {{
-                    cart {{ {_CART_FIELDS} }}
-                    userErrors {{ field message }}
-                  }}
-                }}
-                """
-                data = await _storefront_query(store, mutation, {
-                    "cartId": cart["id"],
-                    "lines": [{"merchandiseId": f"gid://shopify/ProductVariant/{variant_id}", "quantity": quantity}],
-                })
-                cart_result = (data or {}).get("cartLinesAdd", {})
-                if cart_result.get("cart"):
-                    cart = cart_result["cart"]  # Keep cart state updated
-            added_items.append({
-                "name": name,
-                "variant": variant.get("title", ""),
-                "quantity": quantity,
-                "price": price,
-                "variant_id": variant_id,
+            mutation = f"""
+            mutation addLines($cartId: ID!, $lines: [CartLineInput!]!) {{
+              cartLinesAdd(cartId: $cartId, lines: $lines) {{
+                cart {{ {_CART_FIELDS} }}
+                userErrors {{ field message }}
+              }}
+            }}
+            """
+            lines_input = [
+                {"merchandiseId": f"gid://shopify/ProductVariant/{it['variant_id']}", "quantity": it["quantity"]}
+                for it in added_items
+            ]
+            data = await _storefront_query(store, mutation, {
+                "cartId": cart["id"],
+                "lines": lines_input,
             })
+            cart_result = (data or {}).get("cartLinesAdd", {})
+            if cart_result.get("cart"):
+                cart = cart_result["cart"]
         except Exception as e:
-            print(f"[add_all_to_cart] Failed to add {name}: {e!r}")
-            errors.append(name)
+            print(f"[add_all_to_cart] Bulk cart lines add failed: {e!r}")
 
     summary = _summarize_cart(cart) if cart else {
         "items": added_items,

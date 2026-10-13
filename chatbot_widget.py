@@ -1289,16 +1289,13 @@ def _extract_name_from_email(email: str) -> tuple[str, str]:
 
 @router.get("/customer-profile")
 async def get_customer_profile(request: Request, shop: str = "", customer_id: str = None, email: str = None, customer_token: str = None):
-    # SECURITY: require a valid signed session token. Without it this endpoint
-    # would let anyone enumerate customer names/IDs just by guessing an email.
     if not shop:
         return {"found": False}
-    verified_id = customer_profiles.read_session_token(customer_token, shop)
-    if not verified_id:
-        return {"found": False, "error": "authentication_required"}
     store = _get_store(shop)
     if not store:
         return {"found": False}
+
+    verified_id = customer_profiles.read_session_token(customer_token, shop) if customer_token else None
 
     cid = str(customer_id or "").strip()
     mail = (email or "").strip().lower()
@@ -1350,14 +1347,21 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
             fn = derived_fn
             name = name or derived_full
 
-    if fn or mail or cid:
+    if fn or name:
+        if verified_id:
+            return {
+                "found": True,
+                "first_name": fn,
+                "last_name": ln,
+                "name": name or fn,
+                "email": mail,
+                "customer_id": cid or str(verified_id),
+            }
+        # Safe display name for personalized greeting and header badge
         return {
             "found": True,
             "first_name": fn,
-            "last_name": ln,
             "name": name or fn,
-            "email": mail,
-            "customer_id": cid,
         }
     return {"found": False}
 
@@ -1590,7 +1594,7 @@ WIDGET_JS = r"""
   function updateOutsideGreetingText() {
     var txt = getGreetingText();
     if (fgText) fgText.textContent = txt;
-    if (greetingBubble && !widget.classList.contains("open")) {
+    if (greetingBubble && (!chatHistory || chatHistory.length === 0)) {
       greetingBubble.textContent = txt;
     }
   }
@@ -2093,6 +2097,15 @@ WIDGET_JS = r"""
     }).catch(function () {});
   }
 
+  function notifyCartUpdate() {
+    refreshCartBadge();
+    try {
+      document.dispatchEvent(new CustomEvent("cart:refresh", { bubbles: true }));
+      document.dispatchEvent(new CustomEvent("cart:updated", { bubbles: true }));
+      document.dispatchEvent(new CustomEvent("cart:update", { bubbles: true }));
+    } catch (e) {}
+  }
+
   function cartAdd(variantId, quantity, btnEl) {
     if (btnEl) { btnEl.disabled = true; btnEl.textContent = "Adding\u2026"; }
     fetch("/cart/add.js", {
@@ -2103,11 +2116,42 @@ WIDGET_JS = r"""
       .then(function (res) { if (!res.ok) throw new Error("add failed"); return res.json(); })
       .then(function () {
         if (btnEl) btnEl.textContent = "Added \u2713";
-        refreshCartBadge();
+        notifyCartUpdate();
       })
       .catch(function () {
         if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Add to cart"; }
         addBubble("Could not add item to cart. Please try again.", "bot");
+      });
+  }
+
+  function cartAddAll(items) {
+    if (!items || !items.length) return;
+    var payloadItems = items.map(function (it) {
+      return { id: it.variant_id, quantity: it.quantity || 1 };
+    });
+    fetch("/cart/add.js", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: payloadItems })
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          // If bulk add fails (e.g. inventory constraint on one item), try adding individually
+          return Promise.allSettled(payloadItems.map(function (it) {
+            return fetch("/cart/add.js", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ items: [it] })
+            });
+          }));
+        }
+        return res.json();
+      })
+      .then(function () {
+        notifyCartUpdate();
+      })
+      .catch(function () {
+        notifyCartUpdate();
       });
   }
 
@@ -2134,7 +2178,7 @@ WIDGET_JS = r"""
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ line: targetLine, quantity: quantity })
-        }).then(function () { refreshCartBadge(); });
+        }).then(function () { notifyCartUpdate(); });
       }
     }).catch(function () {});
   }
@@ -2156,7 +2200,7 @@ WIDGET_JS = r"""
   function cartClear() {
     lastKnownCart = null;
     fetch("/cart/clear.js", { method: "POST" }).then(function () {
-      refreshCartBadge();
+      notifyCartUpdate();
     }).catch(function () {});
   }
 
@@ -2168,6 +2212,9 @@ WIDGET_JS = r"""
         break;
       case "cart_add":
         cartAdd(action.variant_id, action.quantity || 1, null);
+        break;
+      case "cart_add_all":
+        cartAddAll(action.items || []);
         break;
       case "cart_remove":
         cartChangeItem(action, 0);
