@@ -707,6 +707,7 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
         email_match = EMAIL_RE.search(message)
         if email_match:
             email = email_match.group(0).lower()
+            _remember_customer(shop, session_id, customer_id, email)
             result = await _execute_and_reply(store, "order_tracking", "list_recent_orders", {"email": email}, language, message, session_id, customer_id=customer_id)
             _log(shop, message, "done", "order_tracking", "list_recent_orders", {"email": email}, result["reply"])
             return result
@@ -1830,7 +1831,8 @@ WIDGET_JS = r"""
 
       if (customerId || customerEmail) {
         fetchRemoteProfile();
-      } else {
+      }
+      if (!customerEmail) {
         fetch("/account", { credentials: "same-origin", headers: { Accept: "text/html" } })
           .then(function (res) {
             if (res.ok && res.url && res.url.indexOf("/account/login") === -1) {
@@ -1851,7 +1853,7 @@ WIDGET_JS = r"""
               customerId = cidMatch[1];
               sessionStorage.setItem("ai_cust_id_" + SHOP, customerId);
             }
-            if (customerId || customerEmail) fetchRemoteProfile();
+            updateHeaderProfileBadge();
           })
           .catch(function () {});
       }
