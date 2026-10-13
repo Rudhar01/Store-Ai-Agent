@@ -411,11 +411,14 @@ def _summarize_cart(cart: dict | None) -> dict:
 
 
 def _find_line(cart_summary: dict, product_query: str) -> dict | None:
+    if not isinstance(cart_summary, dict):
+        return None
     needle = (product_query or "").strip().lower()
     if not needle:
         return None
-    for item in cart_summary["items"]:
-        if needle in item["name"].lower():
+    for item in cart_summary.get("items", []):
+        name = (item.get("name") or item.get("title") or item.get("product_title") or "").lower()
+        if needle in name or name in needle:
             return item
     return None
 
@@ -875,27 +878,76 @@ async def remove_item(store, entities: dict, session_id: str) -> dict:
     variant_id = match.get("variant_id") if match else None
     product_name = match.get("name") if match else query
 
+    qty_to_remove = int(entities.get("quantity")) if entities.get("quantity") else None
+
     cart_id = _SESSION_CARTS.get(session_id)
     summary = None
+    current_summary = None
     if cart_id:
         cart = await _fetch_cart(store, cart_id)
         current_summary = _summarize_cart(cart)
-        line = _find_line(current_summary, query)
-        if line:
-            product_name = line["name"]
+    if not current_summary and isinstance(entities.get("cart_data"), dict):
+        current_summary = entities["cart_data"]
+
+    line = _find_line(current_summary, query) if current_summary else None
+    if not line and current_summary and variant_id:
+        for it in current_summary.get("items", []):
+            if str(it.get("variant_id") or it.get("id")) == str(variant_id):
+                line = it
+                break
+
+    current_qty = int(line.get("quantity") or 1) if line else None
+    if line and (line.get("name") or line.get("product_title")):
+        product_name = line.get("name") or line.get("product_title")
+
+    # Partial quantity removal: e.g. "remove 1 unit of liquid" from 10 units -> new_qty = 9
+    if current_qty and qty_to_remove is not None and 0 < qty_to_remove < current_qty:
+        new_qty = current_qty - qty_to_remove
+        if cart_id and line.get("line_id"):
             mutation = f"""
-            mutation removeLine($cartId: ID!, $lineIds: [ID!]!) {{
-              cartLinesRemove(cartId: $cartId, lineIds: $lineIds) {{
+            mutation updateLine($cartId: ID!, $lines: [CartLineUpdateInput!]!) {{
+              cartLinesUpdate(cartId: $cartId, lines: $lines) {{
                 cart {{ {_CART_FIELDS} }}
                 userErrors {{ field message }}
               }}
             }}
             """
-            data = await _storefront_query(store, mutation, {"cartId": cart_id, "lineIds": [line["line_id"]]})
-            summary = _summarize_cart((data or {}).get("cartLinesRemove", {}).get("cart"))
+            data = await _storefront_query(store, mutation, {
+                "cartId": cart_id,
+                "lines": [{"id": line["line_id"], "quantity": new_qty}],
+            })
+            summary = _summarize_cart((data or {}).get("cartLinesUpdate", {}).get("cart"))
+
+        return {
+            "removed": product_name,
+            "quantity_removed": qty_to_remove,
+            "remaining_quantity": new_qty,
+            "cart": summary or {"items": [{"name": product_name, "quantity": new_qty}], "item_count": new_qty, "total": "0.00"},
+            "widget_action": {
+                "type": "cart_set_quantity",
+                "variant_id": variant_id,
+                "product_name": product_name,
+                "quantity": new_qty,
+            },
+        }
+
+    # Full line removal: no quantity specified, or qty_to_remove >= current_qty
+    if cart_id and line and line.get("line_id"):
+        mutation = f"""
+        mutation removeLine($cartId: ID!, $lineIds: [ID!]!) {{
+          cartLinesRemove(cartId: $cartId, lineIds: $lineIds) {{
+            cart {{ {_CART_FIELDS} }}
+            userErrors {{ field message }}
+          }}
+        }}
+        """
+        data = await _storefront_query(store, mutation, {"cartId": cart_id, "lineIds": [line["line_id"]]})
+        summary = _summarize_cart((data or {}).get("cartLinesRemove", {}).get("cart"))
 
     return {
         "removed": product_name,
+        "quantity_removed": qty_to_remove or current_qty or 1,
+        "remaining_quantity": 0,
         "cart": summary or {"items": [], "item_count": 0, "total": "0.00"},
         "widget_action": {
             "type": "cart_remove",

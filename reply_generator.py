@@ -185,6 +185,16 @@ def generate_reply(
             " Enthusiastically recommend the products provided in the data, highlighting their names and prices, "
             "and offer to add any item to their cart."
         )
+    elif action_name == "add_item":
+        extra_clause = (
+            " Confirm clearly that the requested product and exact quantity (quantity) have been added to the cart."
+        )
+    elif action_name == "remove_item":
+        extra_clause = (
+            " When removing an item, if a specific quantity was removed (quantity_removed) and units still remain in the cart (remaining_quantity > 0), "
+            "explicitly confirm that you removed that specific quantity and state how many units remain. "
+            "Only claim the item was completely removed or that the cart is empty if remaining_quantity is 0."
+        )
     elif action_name == "clarify":
         extra_clause = (
             " Keep the shopper engaged and interested! Warmly ask how you can assist them today with browsing items, "

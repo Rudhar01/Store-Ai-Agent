@@ -838,7 +838,11 @@ async def _chat_impl(req: ChatRequest):
     if not store:
         return {"reply": "Sorry, I couldn't verify this store. Please reload the page and try again."}
 
-    cfg = repo.ensure_customization(store.id)
+    store_id = getattr(store, "id", None) or getattr(store, "$id", None) or (store.get("$id") if isinstance(store, dict) else str(getattr(store, "shop_domain", "")))
+    try:
+        cfg = repo.ensure_customization(store_id)
+    except Exception:
+        cfg = {"status": "active"}
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
@@ -1010,6 +1014,20 @@ async def _chat_impl(req: ChatRequest):
             term = entities.get("product_name_or_id")
             if not term:
                 term = extract_search_term(message)
+            if term:
+                m_qty = re.match(r"^(\d+)\s*(?:x|units?|pieces?|items?|pcs?|of)?\s+(.+)$", str(term).strip(), re.IGNORECASE)
+                if m_qty:
+                    entities["quantity"] = int(m_qty.group(1))
+                    term = m_qty.group(2).strip()
+            if not entities.get("quantity") or int(entities.get("quantity") or 1) == 1:
+                m_msg = re.search(r"\b(?:add|put|buy|get)\s+(\d+)\b", message, re.IGNORECASE)
+                if not m_msg:
+                    m_msg = re.search(r"\b(\d+)\s*(?:units?|pieces?|items?|pcs?|qty)\b", message, re.IGNORECASE)
+                if m_msg:
+                    entities["quantity"] = int(m_msg.group(1))
+                    if term:
+                        term = re.sub(r"^\b" + m_msg.group(1) + r"\b\s*", "", str(term)).strip()
+
             if not term:
                 out = _ask(key, "await_item", "Ask the shopper which item they would like to add to their cart.",
                            language, message, "Sure — which item would you like to add to your cart?", asked=1)
@@ -1019,7 +1037,7 @@ async def _chat_impl(req: ChatRequest):
             quantity = int(entities.get("quantity") or 1)
             if product:
                 result = _add_to_cart_result(product, quantity, language, message)
-                _log(req.shop, message, "done", intent, action, {**entities, "product_name_or_id": product["name"]}, result["reply"])
+                _log(req.shop, message, "done", intent, action, {**entities, "product_name_or_id": product["name"], "quantity": quantity}, result["reply"])
                 return result
             if options:
                 names = [p["name"] for p in options]
@@ -1028,8 +1046,24 @@ async def _chat_impl(req: ChatRequest):
                 _log(req.shop, message, "ambiguous", intent, action, entities, out["reply"])
                 return out
 
-        if (intent, action) == ("cart_management", "remove_item") and not entities.get("product_name_or_id"):
-            term = extract_search_term(message)
+        if (intent, action) == ("cart_management", "remove_item"):
+            term = entities.get("product_name_or_id")
+            if not term:
+                term = extract_search_term(message)
+            if term:
+                m_qty = re.match(r"^(\d+)\s*(?:x|units?|pieces?|items?|pcs?|of)?\s+(.+)$", str(term).strip(), re.IGNORECASE)
+                if m_qty:
+                    entities["quantity"] = int(m_qty.group(1))
+                    term = m_qty.group(2).strip()
+            if not entities.get("quantity"):
+                m_msg = re.search(r"\b(?:remove|delete|take\s+out|take\s+off|drop)\s+(\d+)\b", message, re.IGNORECASE)
+                if not m_msg:
+                    m_msg = re.search(r"\b(\d+)\s*(?:units?|pieces?|items?|pcs?|qty)\b", message, re.IGNORECASE)
+                if m_msg:
+                    entities["quantity"] = int(m_msg.group(1))
+                    if term:
+                        term = re.sub(r"^\b" + m_msg.group(1) + r"\b\s*", "", str(term)).strip()
+
             if not term:
                 out = _ask(key, "await_remove_item", "Ask the shopper which item they would like to remove from their cart.",
                            language, message, "Sure — which item would you like to remove from your cart?", asked=1)

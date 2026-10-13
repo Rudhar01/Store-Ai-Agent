@@ -241,6 +241,15 @@ def _clean_entities(raw, intent: dict, action: dict) -> dict:
                 val_str,
                 flags=re.IGNORECASE,
             ).strip()
+            qty_match = re.match(r"^(\d+)\s*(?:x|units?|pieces?|items?|pcs?|of)?\s+(.+)$", val_cleaned, re.IGNORECASE)
+            if qty_match and "quantity" in allowed and not out.get("quantity") and not raw.get("quantity"):
+                try:
+                    num = int(qty_match.group(1))
+                    if num > 0:
+                        out["quantity"] = num
+                        val_cleaned = qty_match.group(2).strip()
+                except (ValueError, TypeError):
+                    pass
             value = val_cleaned or val_str
         if value is None:
             continue

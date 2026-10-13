@@ -22,6 +22,7 @@ import reply_generator
 
 async def run_tests():
     store = SimpleNamespace(
+        id="mock_store_id",
         shop_domain="demo-store.myshopify.com",
         access_token="shpat_mock_token_for_testing"
     )
@@ -375,10 +376,61 @@ async def run_tests():
     assert chatbot_widget._session_customer_email("demo-store.myshopify.com", "auth_session_3") == logged_in_email
     assert chatbot_widget._session_customer_name("demo-store.myshopify.com", "auth_session_3") == "Alex VIP"
     assert chatbot_widget._session_customer("demo-store.myshopify.com", "auth_session_3") == logged_in_cust_id
-    print("PASS: Customer email, name, and ID seamlessly remembered across session turns.")
+    print("\n==================================================")
+    print("  TEST 9: CART QUANTITY HANDLING (ADD & PARTIAL REMOVE)")
+    print("==================================================")
+    # Test add_item quantity parsing
+    add_req = chatbot_widget.ChatRequest(
+        message="add 10 liquid to my cart",
+        session_id="test_qty_session",
+        shop="demo-store.myshopify.com"
+    )
+    # Mock _resolve_product to return a product
+    async def mock_resolve(store, term):
+        return {"id": "12345", "name": "The Collection Snowboard: Liquid", "price": "100.00"}, None
+    orig_resolve = chatbot_widget._resolve_product
+    orig_get_store = chatbot_widget._get_store
+    orig_classify = chatbot_widget.classify_intent
+    chatbot_widget._resolve_product = mock_resolve
+    chatbot_widget._get_store = lambda s: store
+    chatbot_widget.classify_intent = lambda msg, schema=None, history=None: {
+        "intent": "cart_management",
+        "action": "add_item",
+        "entities": {"product_name_or_id": "10 liquid"},
+        "language": "en",
+        "confidence": 0.95
+    }
+    try:
+        add_res = await chatbot_widget.chat(add_req)
+        assert add_res.get("widget_action", {}).get("quantity") == 10, f"Expected quantity 10, got {add_res.get('widget_action')}"
+        print("PASS: 'add 10 liquid to my cart' correctly parsed quantity = 10.")
+    finally:
+        chatbot_widget._resolve_product = orig_resolve
+        chatbot_widget._get_store = orig_get_store
+        chatbot_widget.classify_intent = orig_classify
+
+    # Test remove_item partial quantity removal
+    cart_with_10 = {
+        "items": [
+            {"name": "The Collection Snowboard: Liquid", "quantity": 10, "variant_id": "12345", "price": "100.00"}
+        ],
+        "item_count": 10,
+        "total": "1000.00"
+    }
+    rem_entities = {
+        "product_name_or_id": "liquid",
+        "quantity": 1,
+        "cart_data": cart_with_10
+    }
+    rem_res = await shopify_actions.remove_item(SimpleNamespace(shop_domain="demo-store.myshopify.com"), rem_entities, "test_qty_session")
+    assert rem_res.get("quantity_removed") == 1, f"Expected quantity_removed 1, got {rem_res}"
+    assert rem_res.get("remaining_quantity") == 9, f"Expected remaining_quantity 9, got {rem_res}"
+    assert rem_res.get("widget_action", {}).get("type") == "cart_set_quantity", f"Expected cart_set_quantity, got {rem_res.get('widget_action')}"
+    assert rem_res.get("widget_action", {}).get("quantity") == 9, f"Expected quantity 9, got {rem_res.get('widget_action')}"
+    print("PASS: Removing 1 unit of item with 10 units leaves 9 units with 'cart_set_quantity'.")
 
     print("\n==================================================")
-    print("  ALL 8 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
+    print("  ALL 9 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
     print("==================================================")
 
 if __name__ == "__main__":

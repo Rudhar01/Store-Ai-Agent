@@ -185,18 +185,20 @@
         },
         {
           "name": "remove_item",
-          "description": "Remove one product directly from the cart.",
+          "description": "Remove a product or a specific quantity of a product directly from the cart. If quantity is specified (e.g. 'remove 1 unit of liquid'), remove that many units. If no quantity is specified, remove all units of that product.",
           "requires_confirmation": false,
           "required_entities": [
             "product_name_or_id"
           ],
           "optional_entities": [
-            "variant"
+            "variant",
+            "quantity"
           ],
           "example_utterances": [
             "Remove the blue shirt from my cart",
-            "Delete the mug from my cart",
-            "Take the shoes out of my cart",
+            "Remove 1 unit of liquid from my cart",
+            "Delete 2 mugs from my cart",
+            "Take 1 hoodie out of my cart",
             "Remove hoodie from cart",
             "cart se hatao"
           ]
