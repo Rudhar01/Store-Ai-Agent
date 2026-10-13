@@ -97,6 +97,7 @@ def create_all_collections(databases, db_id):
         (FLOWS_COLLECTION, "Flows"),
         (REQUEST_LOGS_COLLECTION, "Request Logs"),
         (ANALYTICS_EVENTS_COLLECTION, "Analytics Events"),
+        ("customer_profiles", "Customer Profiles"),
     ]
     for cid, name in collections:
         _run(f"Collection '{cid}'", databases.create_collection, db_id, cid, name)
@@ -181,6 +182,23 @@ def create_all_collections(databases, db_id):
     _run("events.visitor_id", databases.create_string_attribute, db_id, ANALYTICS_EVENTS_COLLECTION, "visitor_id", 100, False)
     _run("events.external_id", databases.create_string_attribute, db_id, ANALYTICS_EVENTS_COLLECTION, "external_id", 100, False)
 
+    # 11. customer_profiles
+    _run("cp.shop",          databases.create_string_attribute,  db_id, "customer_profiles", "shop",          255,  True)
+    _run("cp.customer_id",  databases.create_string_attribute,  db_id, "customer_profiles", "customer_id",  128,  True)
+    _run("cp.first_name",   databases.create_string_attribute,  db_id, "customer_profiles", "first_name",   100,  False)
+    _run("cp.last_name",    databases.create_string_attribute,  db_id, "customer_profiles", "last_name",    100,  False)
+    _run("cp.email",        databases.create_string_attribute,  db_id, "customer_profiles", "email",        255,  False)
+    _run("cp.order_count",  databases.create_integer_attribute, db_id, "customer_profiles", "order_count",  False, 0)
+    _run("cp.synced_at",    databases.create_integer_attribute, db_id, "customer_profiles", "synced_at",    False, 0)
+    _run("cp.last_seen",    databases.create_integer_attribute, db_id, "customer_profiles", "last_seen",    False, 0)
+    _run("cp.budget_min",   databases.create_integer_attribute, db_id, "customer_profiles", "budget_min",   False, 0)
+    _run("cp.budget_max",   databases.create_integer_attribute, db_id, "customer_profiles", "budget_max",   False, 0)
+    _run("cp.purchased_product_ids", databases.create_string_attribute, db_id, "customer_profiles", "purchased_product_ids", 65535, False)
+    _run("cp.top_types",      databases.create_string_attribute, db_id, "customer_profiles", "top_types",      4096, False)
+    _run("cp.top_tags",       databases.create_string_attribute, db_id, "customer_profiles", "top_tags",       4096, False)
+    _run("cp.recent_searches",databases.create_string_attribute, db_id, "customer_profiles", "recent_searches",4096, False)
+    _run("cp.favorite_colors",databases.create_string_attribute, db_id, "customer_profiles", "favorite_colors",1024, False)
+
     print("\n[3/3] Creating indexes...")
     _run("idx_stores_domain", databases.create_index, db_id, STORES_COLLECTION, "idx_shop_domain", INDEX_TYPE_KEY, ["shop_domain"])
     _run("idx_customizations_store", databases.create_index, db_id, CUSTOMIZATIONS_COLLECTION, "idx_store", INDEX_TYPE_KEY, ["store"])
@@ -193,9 +211,11 @@ def create_all_collections(databases, db_id):
     _run("idx_flows_store", databases.create_index, db_id, FLOWS_COLLECTION, "idx_store", INDEX_TYPE_KEY, ["store"])
     _run("idx_events_store", databases.create_index, db_id, ANALYTICS_EVENTS_COLLECTION, "idx_store", INDEX_TYPE_KEY, ["store"])
     _run("idx_events_type", databases.create_index, db_id, ANALYTICS_EVENTS_COLLECTION, "idx_event_type", INDEX_TYPE_KEY, ["event_type"])
+    _run("idx_cust_profiles_shop", databases.create_index, db_id, "customer_profiles", "idx_shop", INDEX_TYPE_KEY, ["shop"])
+    _run("idx_cust_profiles_cid", databases.create_index, db_id, "customer_profiles", "idx_customer_id", INDEX_TYPE_KEY, ["customer_id"])
 
     print("\n=======================================================")
-    print(" ALL 10 COLLECTIONS, ATTRIBUTES, & INDEXES INITIALIZED!")
+    print(" ALL 11 COLLECTIONS, ATTRIBUTES, & INDEXES INITIALIZED!")
     print("=======================================================")
 
 

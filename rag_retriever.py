@@ -30,7 +30,16 @@ import os
 import time
 import hashlib
 import requests
-from langfuse import observe,get_client
+
+try:
+    from langfuse import observe, get_client
+except ImportError:
+    def observe(*args, **kwargs):
+        def decorator(f):
+            return f
+        return decorator
+    def get_client(*args, **kwargs):
+        return None
 
 DIFY_BASE_URL = os.environ.get("DIFY_BASE_URL", "").rstrip("/")
 DIFY_DATASET_API_KEY = os.environ.get("DIFY_DATASET_API_KEY", "")
@@ -45,14 +54,10 @@ CACHE_TTL_SECONDS = 300
 # Store -> Dify dataset_id resolution
 # ---------------------------------------------------------------------------
 
-# PSEUDO DATA — replace/remove once Appwrite is wired up. Keys here should be
-# whatever unique store attribute you'll actually have at request time (a
-# store_id, a shop domain, an API key prefix — pick one canonical identifier
-# and use it consistently across your backend).
+# Fallback map used only when Appwrite has no entry for a store.
+# Only keep your known production / dev stores here.
 STORE_DATASET_MAP: dict[str, str] = {
     "nhtcnc-hs.myshopify.com": "a4d60f13-ff14-4e91-a19f-621cf2e41bb2",
-    "store_demo_1": "f8a2b1c3-0000-0000-0000-000000000002",
-    "store_demo_2": "f8a2b1c3-0000-0000-0000-000000000003",
 }
 
 # Short-lived cache for store -> dataset_id lookups too, separate from the
@@ -64,38 +69,30 @@ DATASET_ID_CACHE_TTL_SECONDS = 3600
 
 def _lookup_dataset_id_from_appwrite(store_identifier: str) -> str | None:
     """
-    TODO: replace this stub with a real Appwrite query once the collection
-    exists. Expected shape: a "stores" (or "store_datasets") collection with
-    a document per store, containing at least:
-        { "store_identifier": "<unique attribute>", "dify_dataset_id": "<uuid>" }
-
-    Example of what the real implementation will look like, using the
-    Appwrite Python SDK:
-
-        from appwrite.client import Client
-        from appwrite.services.databases import Databases
-        from appwrite.query import Query
-
-        client = (
-            Client()
-            .set_endpoint(os.environ["APPWRITE_ENDPOINT"])
-            .set_project(os.environ["APPWRITE_PROJECT_ID"])
-            .set_key(os.environ["APPWRITE_API_KEY"])
-        )
-        databases = Databases(client)
-
-        result = databases.list_documents(
-            database_id=os.environ["APPWRITE_DATABASE_ID"],
-            collection_id=os.environ["APPWRITE_STORES_COLLECTION_ID"],
-            queries=[Query.equal("store_identifier", store_identifier)],
-        )
-        if result["total"] == 0:
-            return None
-        return result["documents"][0]["dify_dataset_id"]
-
-    Returning None here (as this stub does) means "not found in Appwrite",
-    which causes get_dataset_id() to fall back to STORE_DATASET_MAP below.
+    Query the Appwrite store_info collection for a dify_dataset_id field.
+    Returns None when Appwrite is unconfigured or the store has no entry.
     """
+    try:
+        aw_endpoint  = os.environ.get("APPWRITE_ENDPOINT", "").rstrip("/")
+        aw_project   = os.environ.get("APPWRITE_PROJECT_ID", "")
+        aw_api_key   = os.environ.get("APPWRITE_API_KEY", "")
+        aw_db_id     = os.environ.get("APPWRITE_DATABASE_ID", "")
+        aw_col       = os.environ.get("APPWRITE_STORE_INFO_COLLECTION_ID", "store_info")
+        if not all([aw_endpoint, aw_project, aw_api_key, aw_db_id]):
+            return None
+        import httpx
+        with httpx.Client(timeout=5) as client:
+            resp = client.get(
+                f"{aw_endpoint}/databases/{aw_db_id}/collections/{aw_col}/documents",
+                headers={"X-Appwrite-Project": aw_project, "X-Appwrite-Key": aw_api_key},
+                params={"queries[]": f'equal("store","{store_identifier}")', "limit": "1"},
+            )
+        if resp.status_code == 200:
+            docs = resp.json().get("documents", [])
+            if docs and docs[0].get("dify_dataset_id"):
+                return str(docs[0]["dify_dataset_id"])
+    except Exception as e:
+        print(f"rag_retriever: Appwrite lookup failed ({e!r}), falling back to STORE_DATASET_MAP")
     return None
 
 
@@ -221,7 +218,13 @@ def retrieve_context(
         for r in records
         if r.get("segment", {}).get("content")
     ]
-    get_client().update_current_span(metadata={...})
+    # Update Langfuse span with retrieval metadata (guard against missing client)
+    try:
+        cli = get_client()
+        if cli and hasattr(cli, "update_current_span"):
+            cli.update_current_span(metadata={"store": store_identifier, "chunks": len(chunks)})
+    except Exception:
+        pass
 
     if use_cache:
         _retrieval_cache[key] = {"timestamp": time.time(), "chunks": chunks}

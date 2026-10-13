@@ -60,6 +60,19 @@ _SESSION_SHOWN_EXPIRY: dict[str, float] = {}
 _SESSION_SHOWN_TTL_SECONDS = 7200  # 2 hours
 
 # ---------------------------------------------------------------------------
+# Rate limiting for /track-activity (per visitor_id)
+# ---------------------------------------------------------------------------
+_RATE_LIMIT_WINDOW = 60        # seconds
+_RATE_LIMIT_MAX    = 60        # max events per visitor per window
+_RATE_LIMIT_STORE: dict[str, list[float]] = defaultdict(list)
+
+# ---------------------------------------------------------------------------
+# Visitor eviction: prune entries older than 24 h to cap memory usage
+# ---------------------------------------------------------------------------
+_VISITOR_LAST_SEEN: dict[str, float] = {}
+_VISITOR_EVICTION_TTL = 86400   # 24 hours
+
+# ---------------------------------------------------------------------------
 # Store-level Order & Browsing Co-Occurrence Matrix ("Frequently Bought Together")
 # Keyed by shop_domain -> { product_id: Counter({ co_product_id: weight }) }
 # ---------------------------------------------------------------------------
@@ -329,6 +342,32 @@ def clear_cache_for_testing() -> None:
 @router.post("/track-activity")
 async def track_activity_endpoint(req: TrackActivityRequest):
     import customer_profiles
+    import repository_appwrite as repo
+
+    # 1. Validate shop exists to prevent tracking for phantom stores.
+    if not repo._find_store_doc(req.shop):
+        return {"status": "ignored", "reason": "unknown_shop"}
+
+    # 2. Rate-limit per visitor_id: max 60 events / 60 s to prevent click-flooding.
+    now = time.time()
+    visitor_key = f"{req.shop}::{req.visitor_id or 'anon'}"
+    timestamps = _RATE_LIMIT_STORE[visitor_key]
+    # Slide the window
+    while timestamps and timestamps[0] < now - _RATE_LIMIT_WINDOW:
+        timestamps.pop(0)
+    if len(timestamps) >= _RATE_LIMIT_MAX:
+        return {"status": "rate_limited"}
+    timestamps.append(now)
+
+    # 3. Evict stale visitor entries every N calls to prevent unbounded growth.
+    _VISITOR_LAST_SEEN[visitor_key] = now
+    if len(_VISITOR_LAST_SEEN) % 500 == 0:  # check every 500 new events
+        stale = [k for k, ts in _VISITOR_LAST_SEEN.items() if now - ts > _VISITOR_EVICTION_TTL]
+        for k in stale:
+            _ACTIVITY_STORE.pop(k, None)
+            _VISITOR_LAST_SEEN.pop(k, None)
+            _RATE_LIMIT_STORE.pop(k, None)
+
     customer_id = None
     if req.customer_token:
         customer_id = customer_profiles.read_session_token(req.customer_token, req.shop)

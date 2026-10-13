@@ -842,19 +842,17 @@ async def _chat_impl(req: ChatRequest):
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
+    # SECURITY: only the signed token issued by /customer-session (via Shopify
+    # App Proxy) is trusted for identity. Browser-supplied customer_id / email /
+    # name fields are accepted only when NO token is present AND for cosmetic use
+    # (name/email displayed in the UI) — they never grant order-history access.
     customer_id = (
         customer_profiles.read_session_token(req.customer_token, req.shop)
-        or req.customer_id
         or _session_customer(req.shop, req.session_id)
     )
-    customer_email = (
-        (req.customer_email or "").strip().lower()
-        or _session_customer_email(req.shop, req.session_id)
-    )
-    customer_name = (
-        (req.customer_name or "").strip()
-        or _session_customer_name(req.shop, req.session_id)
-    )
+    # Cosmetic / display-only fields — cannot be used to look up orders.
+    customer_email = _session_customer_email(req.shop, req.session_id) or (req.customer_email or "").strip().lower()
+    customer_name  = _session_customer_name(req.shop, req.session_id)  or (req.customer_name  or "").strip()
 
     if req.customer_token and not customer_id:
         return {"reply": "", "session_expired": True}
@@ -908,39 +906,25 @@ async def _chat_impl(req: ChatRequest):
         _log(req.shop, message, result.get("status", "done"), "payment_checkout", "confirm_payment_otp", {"otp_code": otp_to_verify}, result.get("reply", ""))
         return result
 
-    # 1. Fast-path pattern overrides (avoids LLM latency, outages, or token errors)
-    if _PAY_RE.search(message) or _CHECKOUT_RE.search(message):
-        intent, action = "payment_checkout", "initiate_payment"
-        entities = {}
-        language = "en"
-        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
-    elif _VIEW_CART_RE.search(message):
-        intent, action = "cart_management", "view_cart"
-        entities = {}
-        language = "en"
-        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
-    elif _MY_ORDERS_RE.search(message):
-        intent, action = "order_tracking", "list_recent_orders"
-        entities = {}
-        language = "en"
-        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
-    elif _SEARCH_LEAD_IN.search(message):
-        intent, action = "product_search", "search_products"
-        entities = {"query": extract_search_term(message)}
-        language = "en"
-        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
-    elif re.search(r"\b(snowboard|snowboards|ski|skis|board|boards|boot|boots|jacket|hoodie|shirt|tee)\b", message, re.IGNORECASE) and not _MY_ORDERS_RE.search(message):
-        intent, action = "product_search", "search_products"
-        entities = {"query": extract_search_term(message)}
-        language = "en"
-        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
-    elif _GREETING_RE.search(message.strip()):
+    # Fast-path for exact short phrases only — avoids mis-routing longer
+    # messages that happen to contain a matching keyword.
+    # The LLM handles every other message so complex phrasing is not penalised.
+    _msg_lower = message.strip().lower()
+    _EXACT_GREETINGS = {"hi", "hello", "hey", "hey there", "howdy", "hola", "namaste"}
+    _EXACT_CART_VIEW = {"view cart", "show cart", "my cart", "view my cart", "show my cart", "check cart", "check my cart"}
+    _EXACT_PAY = {"pay now", "checkout", "pay", "pay for my cart", "proceed to payment", "complete payment"}
+    if _msg_lower in _EXACT_GREETINGS:
         intent, action = "general_chat", "assistant_help"
         entities = {}
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
-    elif _POPULAR_RE.search(message.strip()):
-        intent, action = "general_chat", "recommend_products"
+    elif _msg_lower in _EXACT_CART_VIEW:
+        intent, action = "cart_management", "view_cart"
+        entities = {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif _msg_lower in _EXACT_PAY:
+        intent, action = "payment_checkout", "initiate_payment"
         entities = {}
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
@@ -1126,9 +1110,9 @@ async def confirm(req: ConfirmRequest):
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or req.customer_id or _session_customer(req.shop, req.session_id)
-    customer_email = (req.customer_email or "").strip().lower() or _session_customer_email(req.shop, req.session_id)
-    customer_name = (req.customer_name or "").strip() or _session_customer_name(req.shop, req.session_id)
+    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or _session_customer(req.shop, req.session_id)
+    customer_email = _session_customer_email(req.shop, req.session_id) or (req.customer_email or "").strip().lower()
+    customer_name  = _session_customer_name(req.shop, req.session_id)  or (req.customer_name  or "").strip()
     _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
 
     _prune_pending()
@@ -1159,9 +1143,9 @@ async def save_payment_credentials_endpoint(req: PaymentCredentialsRequest):
     store = _get_store(req.shop)
     if not store:
         return {"error": "unknown_store"}
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or req.customer_id or _session_customer(req.shop, req.session_id)
-    customer_email = (req.customer_email or "").strip().lower() or _session_customer_email(req.shop, req.session_id)
-    customer_name = (req.customer_name or "").strip() or _session_customer_name(req.shop, req.session_id)
+    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or _session_customer(req.shop, req.session_id)
+    customer_email = _session_customer_email(req.shop, req.session_id) or (req.customer_email or "").strip().lower()
+    customer_name  = _session_customer_name(req.shop, req.session_id)  or (req.customer_name  or "").strip()
     _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
     entities = {
         "cardholder_name": req.cardholder_name,
@@ -1177,9 +1161,9 @@ async def initiate_payment_endpoint(req: InitiatePaymentRequest):
     store = _get_store(req.shop)
     if not store:
         return {"error": "unknown_store"}
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or req.customer_id or _session_customer(req.shop, req.session_id)
-    customer_email = (req.customer_email or "").strip().lower() or _session_customer_email(req.shop, req.session_id)
-    customer_name = (req.customer_name or "").strip() or _session_customer_name(req.shop, req.session_id)
+    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or _session_customer(req.shop, req.session_id)
+    customer_email = _session_customer_email(req.shop, req.session_id) or (req.customer_email or "").strip().lower()
+    customer_name  = _session_customer_name(req.shop, req.session_id)  or (req.customer_name  or "").strip()
     _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
     entities = {}
     if req.cart_data:
@@ -1195,8 +1179,11 @@ async def initiate_payment_endpoint(req: InitiatePaymentRequest):
     result = await shopify_actions.initiate_payment(store, entities, req.session_id, customer_id=customer_id)
     if result.get("status") == "otp_required":
         key = _pkey(req.shop, req.session_id)
+        # Store OTP server-side only; NEVER return it in the response to the browser.
         _set_pending(key, type="await_payment_otp", intent="payment_checkout", action="confirm_payment_otp", entities=entities, language="en", otp=result.get("otp"))
-    return result
+    # Strip the OTP from the outgoing payload so it never reaches the browser.
+    safe_result = {k: v for k, v in result.items() if k != "otp"}
+    return safe_result
 
 
 @router.post("/verify-otp")
@@ -1204,9 +1191,9 @@ async def verify_otp_endpoint(req: VerifyOtpRequest):
     store = _get_store(req.shop)
     if not store:
         return {"error": "unknown_store"}
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or req.customer_id or _session_customer(req.shop, req.session_id)
-    customer_email = (req.customer_email or "").strip().lower() or _session_customer_email(req.shop, req.session_id)
-    customer_name = (req.customer_name or "").strip() or _session_customer_name(req.shop, req.session_id)
+    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or _session_customer(req.shop, req.session_id)
+    customer_email = _session_customer_email(req.shop, req.session_id) or (req.customer_email or "").strip().lower()
+    customer_name  = _session_customer_name(req.shop, req.session_id)  or (req.customer_name  or "").strip()
     _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
     result = await shopify_actions.confirm_payment_otp(store, {"otp_code": req.otp_code}, req.session_id, customer_id=customer_id)
     if result.get("status") == "payment_success":
@@ -1301,9 +1288,14 @@ def _extract_name_from_email(email: str) -> tuple[str, str]:
 
 
 @router.get("/customer-profile")
-async def get_customer_profile(shop: str = "", customer_id: str = None, email: str = None):
+async def get_customer_profile(request: Request, shop: str = "", customer_id: str = None, email: str = None, customer_token: str = None):
+    # SECURITY: require a valid signed session token. Without it this endpoint
+    # would let anyone enumerate customer names/IDs just by guessing an email.
     if not shop:
         return {"found": False}
+    verified_id = customer_profiles.read_session_token(customer_token, shop)
+    if not verified_id:
+        return {"found": False, "error": "authentication_required"}
     store = _get_store(shop)
     if not store:
         return {"found": False}

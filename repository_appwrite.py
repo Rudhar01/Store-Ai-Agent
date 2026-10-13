@@ -177,17 +177,34 @@ def get_flow(shop_domain: str, intent: str, action: str) -> dict | None:
 
 # --- Request logs ---
 
+def _scrub_card_data(entities: dict) -> dict:
+    """Return a copy of entities with card_number and cvv redacted."""
+    if not entities:
+        return {}
+    safe = dict(entities)
+    if safe.get("card_number"):
+        raw = re.sub(r"\D", "", str(safe["card_number"]))
+        safe["card_number"] = f"****-****-****-{raw[-4:]}" if len(raw) >= 4 else "****"
+    if safe.get("cvv"):
+        safe["cvv"] = "***"
+    return safe
+
+_PAN_RE = re.compile(r"\b(?:\d[ -]?){13,19}\b")
+
 def log_request(shop_domain: str, message: str, status: str, detected_intent=None, detected_action=None, reply: str = "", entities: dict | None = None) -> None:
     store = _find_store_doc(shop_domain)
+    # Scrub any card numbers that appear in the raw message text.
+    safe_message = _PAN_RE.sub("[card-redacted]", message) if message else message
+    safe_entities = _scrub_card_data(entities or {})
     databases.create_document(
         DATABASE_ID, REQUEST_LOGS_COLLECTION, ID.unique(),
         data={
-            "message": message,
+            "message": safe_message,
             "status": status,
             "detected_intent": detected_intent,
             "detected_action": detected_action,
             "reply": reply,
-            "entities": json.dumps(entities or {}, ensure_ascii=False),
+            "entities": json.dumps(safe_entities, ensure_ascii=False),
             "store": store["$id"] if store else None,
         },
     )

@@ -84,12 +84,15 @@ def add_store_id_field(collection_id: str):
 
 def backfill_collection(collection_id: str):
     print(f"Backfilling {collection_id}...")
-    offset = 0
     page_size = 100
     updated, skipped = 0, 0
+    last_id = None
     while True:
-        result = databases.list_documents(DATABASE_ID, collection_id, queries=[])
-        docs = result["documents"][offset:offset + page_size]
+        queries = [f"limit({page_size})"]
+        if last_id:
+            queries.append(f"cursorAfter({last_id})")
+        result = databases.list_documents(DATABASE_ID, collection_id, queries=queries)
+        docs = result.get("documents", [])
         if not docs:
             break
         for doc in docs:
@@ -102,8 +105,8 @@ def backfill_collection(collection_id: str):
                 continue
             databases.update_document(DATABASE_ID, collection_id, doc["$id"], data={"store_id": resolved})
             updated += 1
-        offset += page_size
-        if offset >= result["total"]:
+        last_id = docs[-1]["$id"]
+        if len(docs) < page_size:
             break
     print(f"  -> {updated} updated, {skipped} already had store_id")
 
