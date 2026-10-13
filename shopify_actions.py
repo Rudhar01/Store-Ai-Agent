@@ -787,6 +787,85 @@ async def add_item(store, entities: dict, session_id: str) -> dict:
     }
 
 
+async def add_all_to_cart(store, entities: dict, session_id: str) -> dict:
+    """Fetch every active product from the store and add all of them to the cart."""
+    quantity = int(entities.get("quantity") or 1)
+    added_items = []
+    errors = []
+
+    try:
+        # Fetch all active products (up to 250)
+        resp = await _get(store, "products.json", {"status": "active", "limit": 250})
+        if resp.status_code != 200:
+            return {"error": "fetch_failed", "message": "Could not retrieve the product catalog."}
+        products = resp.json().get("products", [])
+    except Exception as e:
+        print(f"[add_all_to_cart] API error fetching products: {e!r}")
+        return {"error": "fetch_failed", "message": "Could not retrieve the product catalog."}
+
+    if not products:
+        return {"error": "no_products", "message": "No active products were found in the store."}
+
+    cart = await _get_or_create_cart(store, session_id)
+
+    for product in products:
+        variant = (product.get("variants") or [{}])[0]
+        variant_id = variant.get("id")
+        if not variant_id:
+            continue
+        name = product.get("title", "Unknown Product")
+        price = variant.get("price", "0.00")
+
+        try:
+            if cart:
+                mutation = f"""
+                mutation addLine($cartId: ID!, $lines: [CartLineInput!]!) {{
+                  cartLinesAdd(cartId: $cartId, lines: $lines) {{
+                    cart {{ {_CART_FIELDS} }}
+                    userErrors {{ field message }}
+                  }}
+                }}
+                """
+                data = await _storefront_query(store, mutation, {
+                    "cartId": cart["id"],
+                    "lines": [{"merchandiseId": f"gid://shopify/ProductVariant/{variant_id}", "quantity": quantity}],
+                })
+                cart_result = (data or {}).get("cartLinesAdd", {})
+                if cart_result.get("cart"):
+                    cart = cart_result["cart"]  # Keep cart state updated
+            added_items.append({
+                "name": name,
+                "variant": variant.get("title", ""),
+                "quantity": quantity,
+                "price": price,
+                "variant_id": variant_id,
+            })
+        except Exception as e:
+            print(f"[add_all_to_cart] Failed to add {name}: {e!r}")
+            errors.append(name)
+
+    summary = _summarize_cart(cart) if cart else {
+        "items": added_items,
+        "item_count": sum(it["quantity"] for it in added_items),
+        "total": str(sum(float(it.get("price", 0)) * it["quantity"] for it in added_items)),
+        "currency": "USD",
+    }
+
+    return {
+        "added_count": len(added_items),
+        "added_items": added_items,
+        "failed_items": errors,
+        "cart": summary,
+        "widget_action": {
+            "type": "cart_add_all",
+            "items": [
+                {"variant_id": it["variant_id"], "quantity": it["quantity"], "product_name": it["name"]}
+                for it in added_items
+            ],
+        },
+    }
+
+
 async def remove_item(store, entities: dict, session_id: str) -> dict:
     query = entities.get("product_name_or_id", "")
     match = await _resolve_variant(store, query)
@@ -1648,6 +1727,7 @@ ACTION_MAP = {
     "order_tracking.track_order": track_order,
     "order_tracking.list_recent_orders": list_recent_orders,
     "cart_management.add_item": add_item,
+    "cart_management.add_all_to_cart": add_all_to_cart,
     "cart_management.remove_item": remove_item,
     "cart_management.edit_quantity": edit_quantity,
     "cart_management.view_cart": view_cart,

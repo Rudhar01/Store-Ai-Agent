@@ -167,6 +167,23 @@
           ]
         },
         {
+          "name": "add_all_to_cart",
+          "description": "Add ALL products from the store to the cart at once. Use this when the shopper explicitly asks to add every product, all items, or the entire catalog to their cart. Do NOT use this for adding a single named product.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "quantity"
+          ],
+          "example_utterances": [
+            "Add all products to my cart",
+            "Add everything in the store to my cart",
+            "Put all items in my cart",
+            "Add the whole catalog to my cart",
+            "I want to buy everything",
+            "saare products cart mein daalo"
+          ]
+        },
+        {
           "name": "remove_item",
           "description": "Remove one product directly from the cart.",
           "requires_confirmation": false,

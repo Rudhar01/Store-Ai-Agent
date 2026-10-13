@@ -787,7 +787,8 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
 
     product, options = await _resolve_product(store, message)
     if product:
-        result = _add_to_cart_result(product, 1, language, message)
+        quantity = int((pending.get("entities") or {}).get("quantity") or 1)
+        result = _add_to_cart_result(product, quantity, language, message)
         _log(shop, message, "done", intent, action, {"product_name_or_id": product["name"]}, result["reply"])
         return result
     if options:
