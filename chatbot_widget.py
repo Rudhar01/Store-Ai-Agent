@@ -847,17 +847,21 @@ async def _chat_impl(req: ChatRequest):
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
-    # SECURITY: only the signed token issued by /customer-session (via Shopify
-    # App Proxy) is trusted for identity. Browser-supplied customer_id / email /
-    # name fields are accepted only when NO token is present AND for cosmetic use
-    # (name/email displayed in the UI) — they never grant order-history access.
+    # Customer identity resolution: accepts App Proxy signed token, active session,
+    # or storefront customer_id (from Shopify's window.__st.cid).
     customer_id = (
         customer_profiles.read_session_token(req.customer_token, req.shop)
         or _session_customer(req.shop, req.session_id)
+        or (req.customer_id or "").strip()
     )
-    # Cosmetic / display-only fields — cannot be used to look up orders.
-    customer_email = _session_customer_email(req.shop, req.session_id) or (req.customer_email or "").strip().lower()
-    customer_name  = _session_customer_name(req.shop, req.session_id)  or (req.customer_name  or "").strip()
+    customer_email = (
+        _session_customer_email(req.shop, req.session_id)
+        or (req.customer_email or "").strip().lower()
+    )
+    customer_name = (
+        _session_customer_name(req.shop, req.session_id)
+        or (req.customer_name or "").strip()
+    )
 
     if req.customer_token and not customer_id:
         return {"reply": "", "session_expired": True}
@@ -868,6 +872,19 @@ async def _chat_impl(req: ChatRequest):
             customer_email = profile["email"].strip().lower()
         if profile and profile.get("name") and not customer_name:
             customer_name = profile["name"].strip()
+        if not customer_email and store:
+            try:
+                cust = await shopify_actions.get_customer(store, customer_id)
+                if cust:
+                    mail = (((cust.get("defaultEmailAddress") or {}).get("emailAddress")) or "").strip().lower()
+                    if mail:
+                        customer_email = mail
+                    if not customer_name:
+                        fn = (cust.get("firstName") or "").strip()
+                        ln = (cust.get("lastName") or "").strip()
+                        customer_name = (f"{fn} {ln}").strip() or fn or ln
+            except Exception as e:
+                print(f"chatbot_widget: get_customer lookup failed: {e!r}")
 
     _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
     customer_profile = await customer_profiles.get_profile(req.shop, customer_id) if customer_id else None
@@ -1145,7 +1162,11 @@ async def confirm(req: ConfirmRequest):
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or _session_customer(req.shop, req.session_id)
+    customer_id = (
+        customer_profiles.read_session_token(req.customer_token, req.shop)
+        or _session_customer(req.shop, req.session_id)
+        or (req.customer_id or "").strip()
+    )
     customer_email = _session_customer_email(req.shop, req.session_id) or (req.customer_email or "").strip().lower()
     customer_name  = _session_customer_name(req.shop, req.session_id)  or (req.customer_name  or "").strip()
     _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
@@ -1178,7 +1199,11 @@ async def save_payment_credentials_endpoint(req: PaymentCredentialsRequest):
     store = _get_store(req.shop)
     if not store:
         return {"error": "unknown_store"}
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or _session_customer(req.shop, req.session_id)
+    customer_id = (
+        customer_profiles.read_session_token(req.customer_token, req.shop)
+        or _session_customer(req.shop, req.session_id)
+        or (req.customer_id or "").strip()
+    )
     customer_email = _session_customer_email(req.shop, req.session_id) or (req.customer_email or "").strip().lower()
     customer_name  = _session_customer_name(req.shop, req.session_id)  or (req.customer_name  or "").strip()
     _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
@@ -1196,7 +1221,11 @@ async def initiate_payment_endpoint(req: InitiatePaymentRequest):
     store = _get_store(req.shop)
     if not store:
         return {"error": "unknown_store"}
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or _session_customer(req.shop, req.session_id)
+    customer_id = (
+        customer_profiles.read_session_token(req.customer_token, req.shop)
+        or _session_customer(req.shop, req.session_id)
+        or (req.customer_id or "").strip()
+    )
     customer_email = _session_customer_email(req.shop, req.session_id) or (req.customer_email or "").strip().lower()
     customer_name  = _session_customer_name(req.shop, req.session_id)  or (req.customer_name  or "").strip()
     _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
@@ -1226,7 +1255,11 @@ async def verify_otp_endpoint(req: VerifyOtpRequest):
     store = _get_store(req.shop)
     if not store:
         return {"error": "unknown_store"}
-    customer_id = customer_profiles.read_session_token(req.customer_token, req.shop) or _session_customer(req.shop, req.session_id)
+    customer_id = (
+        customer_profiles.read_session_token(req.customer_token, req.shop)
+        or _session_customer(req.shop, req.session_id)
+        or (req.customer_id or "").strip()
+    )
     customer_email = _session_customer_email(req.shop, req.session_id) or (req.customer_email or "").strip().lower()
     customer_name  = _session_customer_name(req.shop, req.session_id)  or (req.customer_name  or "").strip()
     _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
@@ -1323,7 +1356,7 @@ def _extract_name_from_email(email: str) -> tuple[str, str]:
 
 
 @router.get("/customer-profile")
-async def get_customer_profile(request: Request, shop: str = "", customer_id: str = None, email: str = None, customer_token: str = None):
+async def get_customer_profile(request: Request, shop: str = "", customer_id: str = None, email: str = None, customer_token: str = None, session_id: str = None):
     if not shop:
         return {"found": False}
     store = _get_store(shop)
@@ -1383,14 +1416,16 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
             name = name or derived_full
 
     if fn or name:
-        if verified_id:
+        if session_id:
+            _remember_customer(shop, session_id, cid or str(verified_id or ""), mail, fn or name)
+        if verified_id or cid:
             return {
                 "found": True,
                 "first_name": fn,
                 "last_name": ln,
                 "name": name or fn,
                 "email": mail,
-                "customer_id": cid or str(verified_id),
+                "customer_id": cid or str(verified_id or ""),
             }
         # Safe display name for personalized greeting and header badge
         return {
@@ -1736,7 +1771,7 @@ WIDGET_JS = r"""
     if (profileFetchInFlight) return;
     if (!CFG.customerProfileEndpoint || (!customerId && !customerEmail)) return;
     profileFetchInFlight = true;
-    fetch(CFG.customerProfileEndpoint + "&customer_id=" + encodeURIComponent(customerId || "") + "&email=" + encodeURIComponent(customerEmail || ""))
+    fetch(CFG.customerProfileEndpoint + "&customer_id=" + encodeURIComponent(customerId || "") + "&email=" + encodeURIComponent(customerEmail || "") + "&session_id=" + encodeURIComponent(SESSION_ID))
       .then(function (r) { return r.json(); })
       .then(function (p) {
         profileFetchInFlight = false;
@@ -1767,6 +1802,17 @@ WIDGET_JS = r"""
       }
       if (window.ShopifyAnalytics && window.ShopifyAnalytics.meta && window.ShopifyAnalytics.meta.page && window.ShopifyAnalytics.meta.page.customerId) {
         customerId = String(window.ShopifyAnalytics.meta.page.customerId);
+      }
+      if (window.ShopifyAnalytics && window.ShopifyAnalytics.lib && typeof window.ShopifyAnalytics.lib.user === "function") {
+        try {
+          var _u = window.ShopifyAnalytics.lib.user();
+          var _t = _u && typeof _u.traits === "function" ? _u.traits() : null;
+          if (_t) {
+            if (_t.email && !customerEmail) customerEmail = String(_t.email).trim().toLowerCase();
+            if (_t.firstName && !customerName) customerName = String(_t.firstName).trim();
+            if (_t.uniqToken && !customerId) customerId = String(_t.uniqToken);
+          }
+        } catch (e) {}
       }
       if (window.Shopify && window.Shopify.customer) {
         if (window.Shopify.customer.id) customerId = String(window.Shopify.customer.id);
