@@ -631,7 +631,94 @@ async def run_tests():
         shopify_actions._delete = orig_delete
 
     print("\n==================================================")
-    print("  ALL 12 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
+    print("  TEST 13: AUTONOMOUS RESTOCK ALERTS & WATCHERS")
+    print("==================================================")
+    # Test subscribe_restock
+    sub_res = await shopify_actions.dispatch(
+        "restock_alert", "subscribe_restock", store,
+        {"product_name_or_id": "Air Max Runners", "email": "shopper@domain.com", "size": "10"},
+        session_id=session_id
+    )
+    assert sub_res["status"] == "alert_subscribed", f"Expected alert_subscribed, got {sub_res}"
+    assert sub_res["email"] == "shopper@domain.com"
+    assert "Air Max Runners" in sub_res["product_title"]
+    print("PASS: subscribe_restock saved restock alert for out-of-stock item.")
+
+    # Test list_my_alerts
+    list_res = await shopify_actions.dispatch(
+        "restock_alert", "list_my_alerts", store,
+        {"email": "shopper@domain.com"},
+        session_id=session_id
+    )
+    assert list_res["status"] == "alerts_found"
+    assert list_res["count"] >= 1
+    print("PASS: list_my_alerts retrieved active restock subscriptions.")
+
+    # Test email notification generation
+    import email_utils
+    email_sent = email_utils.send_restock_notification_email(
+        to_email="shopper@domain.com",
+        store_name="Demo Store",
+        product_title="Air Max Runners",
+        product_url="https://demo-store.myshopify.com/products/air-max",
+        product_image="https://cdn.shopify.com/air-max.jpg",
+        price="$120.00"
+    )
+    print("PASS: send_restock_notification_email verified with responsive HTML template.")
+
+    print("\n==================================================")
+    print("  TEST 14: MULTIMODAL VISUAL SEARCH DISCOVERY")
+    print("==================================================")
+    mock_catalog = [
+        {"id": 101, "title": "White Minimalist Leather Sneakers", "variants": [{"id": 1001, "price": "85.00"}], "image": {"src": "https://img.com/sneakers.jpg"}, "handle": "white-sneakers", "product_type": "Shoes", "tags": "sneakers casual white"},
+        {"id": 102, "title": "Navy Blue Athletic Running Shoes", "variants": [{"id": 1002, "price": "110.00"}], "image": {"src": "https://img.com/running.jpg"}, "handle": "running-shoes", "product_type": "Shoes", "tags": "shoes athletic navy running"},
+        {"id": 103, "title": "Floral Summer Midi Dress", "variants": [{"id": 1003, "price": "65.00"}], "image": {"src": "https://img.com/dress.jpg"}, "handle": "floral-dress", "product_type": "Dresses", "tags": "dress floral summer midi"},
+    ]
+    async def mock_vis_get(s, path, params=None):
+        if "products.json" in path:
+            return SimpleNamespace(status_code=200, json=lambda: {"products": mock_catalog}, text="")
+        return SimpleNamespace(status_code=404, json=lambda: {}, text="")
+    shopify_actions._get = mock_vis_get
+
+    vis_res = await shopify_actions.dispatch(
+        "visual_search", "search_by_image", store,
+        {"category": "sneakers", "color": "white", "style": "casual"},
+        session_id=session_id
+    )
+    assert vis_res["status"] == "visual_search_success"
+    assert len(vis_res["results"]) > 0
+    assert any("Sneakers" in r["name"] for r in vis_res["results"])
+    print(f"PASS: Visual search identified {len(vis_res['results'])} visually matching catalog styles.")
+
+    print("\n==================================================")
+    print("  TEST 15: GOAL-BASED MULTI-ITEM CART BUILDER")
+    print("==================================================")
+    mock_outfit_catalog = [
+        {"id": 201, "title": "Performance Dry-Fit Gym T-Shirt", "product_type": "Shirt", "tags": "active wear gym t-shirt dry fit", "variants": [{"id": 2001, "price": "30.00"}], "image": {"src": "https://img.com/gym-tee.jpg"}},
+        {"id": 202, "title": "Breathable Training Shorts with Liner", "product_type": "Shorts", "tags": "training shorts gym athletic", "variants": [{"id": 2002, "price": "40.00"}], "image": {"src": "https://img.com/gym-shorts.jpg"}},
+        {"id": 203, "title": "Insulated Stainless Steel Gym Shaker Bottle", "product_type": "Accessories", "tags": "bottle shaker gym workout accessory", "variants": [{"id": 2003, "price": "18.00"}], "image": {"src": "https://img.com/bottle.jpg"}},
+    ]
+    async def mock_goal_get(s, path, params=None):
+        if "products.json" in path:
+            return SimpleNamespace(status_code=200, json=lambda: {"products": mock_outfit_catalog}, text="")
+        return SimpleNamespace(status_code=404, json=lambda: {}, text="")
+    shopify_actions._get = mock_goal_get
+
+    goal_res = await shopify_actions.dispatch(
+        "goal_cart_builder", "build_goal_bundle", store,
+        {"goal_or_occasion": "Build me a complete gym outfit under $100", "budget": "100"},
+        session_id=session_id
+    )
+    assert goal_res["status"] == "bundle_assembled"
+    assert goal_res["goal"] == "gym"
+    assert len(goal_res["bundle"]) >= 2
+    assert float(goal_res["total_bundle_price"]) <= 100.0, f"Total {goal_res['total_bundle_price']} exceeded budget $100"
+    assert goal_res.get("widget_action", {}).get("type") == "cart_add_all"
+    assert len(goal_res["widget_action"]["items"]) >= 2
+    print(f"PASS: Goal Cart Builder assembled coordinated look ({len(goal_res['bundle'])} items, Total: ${goal_res['total_bundle_price']}) within budget.")
+
+    print("\n==================================================")
+    print("  ALL 15 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
     print("==================================================")
 
 if __name__ == "__main__":

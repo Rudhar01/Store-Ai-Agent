@@ -589,6 +589,124 @@
       ]
     },
     {
+      "name": "restock_alert",
+      "description": "User wants to be notified via email when an out-of-stock product, size, or variant becomes available again, or when a price drops, or check their active restock alerts.",
+      "actions": [
+        {
+          "name": "subscribe_restock",
+          "description": "Subscribe to back-in-stock or price-drop notifications for a product.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "product_name_or_id",
+            "variant_id",
+            "size",
+            "email",
+            "target_price"
+          ],
+          "example_utterances": [
+            "Notify me when this is back in stock",
+            "Alert me when size M restocks",
+            "Email me when blue sneakers are available again",
+            "Tell me if the price drops",
+            "Notify me when restocked",
+            "Back in stock alert"
+          ]
+        },
+        {
+          "name": "list_my_alerts",
+          "description": "Show the shopper's active restock and price alert subscriptions.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "email"
+          ],
+          "example_utterances": [
+            "What restock alerts do I have?",
+            "Show my back in stock notifications",
+            "List my restock alerts"
+          ]
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": ["product_name_or_id", "email", "variant_id", "size"],
+      "example_utterances": [
+        "Notify me when this is back in stock",
+        "Alert me when size M restocks",
+        "Email me when blue sneakers are available again",
+        "Tell me if the price drops",
+        "What restock alerts do I have?"
+      ]
+    },
+    {
+      "name": "visual_search",
+      "description": "User wants to search for products using an uploaded image, screenshot, or visual photo reference.",
+      "actions": [
+        {
+          "name": "search_by_image",
+          "description": "Search the product catalog for visually matching styles or similar items based on an image.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "image_query",
+            "category",
+            "color",
+            "style"
+          ],
+          "example_utterances": [
+            "Find products that look like this photo",
+            "Do you have something similar to this picture?",
+            "Visual search for this outfit",
+            "Find this style",
+            "Show me items like this image"
+          ]
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": ["image_query", "category", "color", "style"],
+      "example_utterances": [
+        "Find products that look like this photo",
+        "Do you have something similar to this picture?",
+        "Visual search for this outfit"
+      ]
+    },
+    {
+      "name": "goal_cart_builder",
+      "description": "User wants the assistant to assemble a coordinated bundle, complete look, outfit, routine, or set for an occasion, event, or goal within a specified budget.",
+      "actions": [
+        {
+          "name": "build_goal_bundle",
+          "description": "Assemble a complete outfit, look, or product routine within a specified budget and occasion.",
+          "requires_confirmation": false,
+          "required_entities": [
+            "goal_or_occasion"
+          ],
+          "optional_entities": [
+            "budget",
+            "gender",
+            "style_preference",
+            "size"
+          ],
+          "example_utterances": [
+            "I need a wedding outfit under ₹5000",
+            "Build a complete gym outfit under $100",
+            "Build a skincare routine for glowing skin under 2000",
+            "I want a casual beach look under $80",
+            "Complete formal attire under ₹10000",
+            "Assemble an outfit for a party under $150",
+            "Build me a look for an interview under 4000"
+          ]
+        }
+      ],
+      "required_entities": ["goal_or_occasion"],
+      "optional_entities": ["budget", "gender", "style_preference", "size"],
+      "example_utterances": [
+        "I need a wedding outfit under ₹5000",
+        "Build a complete gym outfit under $100",
+        "Build a skincare routine under 2000"
+      ]
+    },
+    {
       "name": "fallback",
       "description": "Message doesn't clearly match any defined intent, or confidence is too low to act on. Agent should ask a clarifying question rather than guess.",
       "actions": [

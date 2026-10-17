@@ -200,6 +200,21 @@ def generate_reply(
             " Keep the shopper engaged and interested! Warmly ask how you can assist them today with browsing items, "
             "tracking an order, managing their cart, or checking store policies."
         )
+    elif action_name == "subscribe_restock":
+        extra_clause = (
+            " Confirm cheerfully that the shopper is subscribed to restock / price alerts for the product, "
+            "mentioning their email and that they'll be notified the moment it's available."
+        )
+    elif action_name == "search_by_image":
+        extra_clause = (
+            " Enthusiastically introduce the matching products found for the shopper's uploaded photo, "
+            "highlighting their styles, colors, and prices."
+        )
+    elif action_name == "build_goal_bundle":
+        extra_clause = (
+            " Present the curated multi-item look/bundle breakdown with items, total price, and budget comparison clearly, "
+            "and invite them to add the complete look to their cart with 1 click."
+        )
 
     system_prompt = (
         f"You are a friendly Shopify store assistant. Reply ONLY in {language_name} "

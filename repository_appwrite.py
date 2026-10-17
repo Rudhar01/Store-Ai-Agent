@@ -39,7 +39,8 @@ attributes on your existing CUSTOMIZATIONS_COLLECTION.
 
 import json
 import re
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timedelta, timezone
 try:
     from appwrite.query import Query
     from appwrite.id import ID
@@ -1278,3 +1279,84 @@ def register_event_providers(register_fn, platform: str = "generic", metrics=Non
     for metric, fn in EVENT_PROVIDERS.items():
         if metrics is None or metric in metrics:
             register_fn(platform, metric, fn)
+
+
+# ==========================================================================
+# RESTOCK & PRICE-DROP ALERTS (Autonomous Shopper Watchers)
+# ==========================================================================
+_RESTOCK_ALERTS: list[dict] = []
+
+def save_restock_alert(
+    store_id: str,
+    shop_domain: str,
+    customer_email: str,
+    product_id: str,
+    product_title: str,
+    variant_id: str = "",
+    size: str = "",
+    target_price: str = "",
+    alert_type: str = "restock",
+) -> dict:
+    """Stores a back-in-stock or price-drop subscription for a shopper."""
+    clean_email = (customer_email or "").strip().lower()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    alert_id = f"alert_{int(time.time()*1000)}" if 'time' in globals() else f"alert_{len(_RESTOCK_ALERTS)+1}"
+
+    # Deduplicate: if same email already subscribed for this product & variant, update it
+    for existing in _RESTOCK_ALERTS:
+        if (
+            existing.get("store_id") == str(store_id)
+            and existing.get("customer_email") == clean_email
+            and str(existing.get("product_id")) == str(product_id)
+            and (not variant_id or str(existing.get("variant_id")) == str(variant_id))
+            and existing.get("status") == "active"
+        ):
+            existing["product_title"] = product_title
+            existing["size"] = size or existing.get("size", "")
+            existing["target_price"] = target_price or existing.get("target_price", "")
+            existing["updated_at"] = now_iso
+            return existing
+
+    record = {
+        "$id": alert_id,
+        "id": alert_id,
+        "store_id": str(store_id),
+        "shop_domain": str(shop_domain),
+        "customer_email": clean_email,
+        "product_id": str(product_id),
+        "product_title": str(product_title),
+        "variant_id": str(variant_id or ""),
+        "size": str(size or ""),
+        "target_price": str(target_price or ""),
+        "alert_type": alert_type,
+        "status": "active",
+        "created_at": now_iso,
+    }
+    _RESTOCK_ALERTS.append(record)
+    return record
+
+
+def list_restock_alerts(store_id: str, customer_email: str | None = None, status: str = "active") -> list[dict]:
+    """Retrieves restock alerts filtered by store and optionally customer email or status."""
+    clean_email = (customer_email or "").strip().lower() if customer_email else None
+    results = []
+    for a in _RESTOCK_ALERTS:
+        if store_id and a.get("store_id") != str(store_id):
+            continue
+        if clean_email and a.get("customer_email") != clean_email:
+            continue
+        if status and a.get("status") != status:
+            continue
+        results.append(dict(a))
+    return results
+
+
+def mark_restock_alert_notified(alert_id: str) -> bool:
+    """Marks an alert as notified so duplicate emails are never sent."""
+    for a in _RESTOCK_ALERTS:
+        if a.get("$id") == str(alert_id) or a.get("id") == str(alert_id):
+            a["status"] = "notified"
+            a["notified_at"] = datetime.now(timezone.utc).isoformat()
+            return True
+    return False
+

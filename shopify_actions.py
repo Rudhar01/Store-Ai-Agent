@@ -1973,6 +1973,366 @@ async def clarify(store, entities: dict, session_id: str) -> dict:
     }
 
 
+# ==========================================================================
+# RESTOCK & PRICE-DROP ALERTS (Autonomous Shopper Watchers)
+# ==========================================================================
+async def subscribe_restock(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    import repository_appwrite as _repo
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
+    store_id = getattr(store, "id", None) or getattr(store, "$id", None) or shop
+    email = (entities.get("email") or "").strip().lower()
+    product_query = entities.get("product_name_or_id") or entities.get("query") or entities.get("product_title") or ""
+    size = (entities.get("size") or "").strip()
+    target_price = (str(entities.get("target_price") or "")).strip()
+    alert_type = "price_drop" if target_price else "restock"
+
+    if not email:
+        return {
+            "status": "email_required",
+            "message": "Please provide your email address so I can notify you the moment this item is back in stock.",
+        }
+
+    # Resolve product title & variant ID if available
+    product_title = product_query or "Product"
+    product_id = ""
+    variant_id = entities.get("variant_id") or ""
+
+    if product_query:
+        try:
+            prod, _ = await _resolve_product(store, str(product_query))
+            if prod:
+                product_title = prod.get("name") or product_title
+                variant_id = str(prod.get("id") or variant_id)
+                product_id = str(prod.get("product_id") or "")
+        except Exception:
+            pass
+
+    record = _repo.save_restock_alert(
+        store_id=store_id,
+        shop_domain=shop,
+        customer_email=email,
+        product_id=product_id or variant_id or product_title,
+        product_title=product_title,
+        variant_id=str(variant_id),
+        size=size,
+        target_price=target_price,
+        alert_type=alert_type,
+    )
+
+    size_text = f" (Size {size})" if size else ""
+    return {
+        "status": "alert_subscribed",
+        "product_title": product_title,
+        "email": email,
+        "size": size,
+        "alert_type": alert_type,
+        "subscription_id": record.get("$id") or record.get("id"),
+        "message": (
+            f"You're all set! We'll email you at {email} the moment {product_title}{size_text} is back in stock. "
+            f"You won't miss it!"
+        ),
+    }
+
+
+async def list_my_alerts(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    import repository_appwrite as _repo
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
+    store_id = getattr(store, "id", None) or getattr(store, "$id", None) or shop
+    email = (entities.get("email") or "").strip().lower()
+
+    if not email:
+        return {
+            "status": "email_required",
+            "message": "Please share your email address so I can look up your active restock alerts.",
+        }
+
+    alerts = _repo.list_restock_alerts(store_id, customer_email=email, status="active")
+    if not alerts:
+        return {
+            "status": "no_alerts",
+            "alerts": [],
+            "message": f"You don't have any active restock alerts under {email}. Ask me to notify you about any product anytime!",
+        }
+
+    formatted = []
+    for a in alerts:
+        size_str = f" [Size: {a['size']}]" if a.get("size") else ""
+        formatted.append(f"• {a.get('product_title')}{size_str} ({a.get('alert_type', 'restock').replace('_', ' ').title()})")
+
+    return {
+        "status": "alerts_found",
+        "alerts": alerts,
+        "count": len(alerts),
+        "message": f"Here are your active alerts for {email}:\n" + "\n".join(formatted),
+    }
+
+
+# ==========================================================================
+# VISUAL SEARCH (Multimodal Product Discovery)
+# ==========================================================================
+async def search_by_image(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    """Finds visually matching catalog products based on an uploaded image or visual style query."""
+    image_data = entities.get("image_data") or ""
+    image_query = (entities.get("image_query") or entities.get("query") or "").strip()
+    category = (entities.get("category") or "").strip()
+    color = (entities.get("color") or "").strip()
+    style = (entities.get("style") or "").strip()
+
+    search_keywords = []
+    detected_attributes = {}
+
+    if image_data and image_data.startswith("data:image"):
+        # Visual analysis with vision LLM if available
+        try:
+            prompt = (
+                "Analyze this fashion / product image for an eCommerce search. "
+                "Respond ONLY with a JSON object: "
+                '{"category": "category name (e.g. sneakers, maxi dress, hoodie, watch)", '
+                '"color": "main colors (e.g. navy blue, white, emerald)", '
+                '"style": "style attributes (e.g. casual, athletic, floral, streetwear)", '
+                '"search_query": "3-5 word concise search query for product catalog"}'
+            )
+            llm_res = llm_selector.create_chat_completion(
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": "You are a multimodal product recognition system. Output strictly JSON."},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_data}}
+                    ]}
+                ]
+            )
+            text_content = llm_res.choices[0].message.content
+            m = re.search(r"\{.*?\}", text_content, re.DOTALL)
+            if m:
+                detected_attributes = json.loads(m.group(0))
+                if detected_attributes.get("search_query"):
+                    search_keywords.append(detected_attributes["search_query"])
+                if detected_attributes.get("category"):
+                    category = detected_attributes["category"]
+                if detected_attributes.get("color"):
+                    color = detected_attributes["color"]
+                if detected_attributes.get("style"):
+                    style = detected_attributes["style"]
+        except Exception as e:
+            print(f"[visual search] vision LLM analysis skipped/failed: {e!r}")
+
+    if not search_keywords:
+        parts = [p for p in [color, style, category, image_query] if p]
+        if parts:
+            search_keywords.append(" ".join(parts))
+        else:
+            search_keywords.append("featured")
+
+    query_str = search_keywords[0] if search_keywords else "featured"
+    search_res = await search_products(store, {"query": query_str, "color": color}, session_id)
+    matched = search_res.get("results") or []
+
+    # If specific query produced no results, fallback to general catalog search
+    if not matched:
+        fallback_res = await search_products(store, {"query": category or "all"}, session_id)
+        matched = fallback_res.get("results") or []
+
+    description_text = f"{color} {style} {category}".strip() or query_str
+
+    return {
+        "status": "visual_search_success",
+        "query_description": description_text,
+        "results": matched,
+        "matched_count": len(matched),
+        "message": f"I analyzed your photo! Here are the closest matching styles from our store:" if matched else "I analyzed your photo, but couldn't find an exact match in our store right now. Here are some popular alternatives:",
+    }
+
+
+# ==========================================================================
+# GOAL-BASED CART BUILDER (Autonomous Look / Bundle Assembler)
+# ==========================================================================
+_GOAL_SLOT_DEFINITIONS = {
+    "wedding": [
+        {"slot": "Ethnic Top", "keywords": ["kurta", "sherwani", "ethnic", "tunic", "suit", "blazer"], "ratio": 0.55},
+        {"slot": "Coordinated Bottom", "keywords": ["pajama", "trousers", "churidar", "pants", "dhoti", "chinos"], "ratio": 0.30},
+        {"slot": "Festive Accessory", "keywords": ["dupatta", "stole", "shawl", "footwear", "juti", "pocket square", "watch", "shoes"], "ratio": 0.15},
+    ],
+    "gym": [
+        {"slot": "Active Top", "keywords": ["t-shirt", "tank", "tee", "dry fit", "active wear", "gym"], "ratio": 0.35},
+        {"slot": "Performance Bottom", "keywords": ["shorts", "joggers", "track pant", "leggings", "pants"], "ratio": 0.45},
+        {"slot": "Workout Accessory", "keywords": ["bottle", "socks", "cap", "shaker", "gym bag", "towel", "shoes"], "ratio": 0.20},
+    ],
+    "skincare": [
+        {"slot": "Cleanser", "keywords": ["cleanser", "face wash", "wash", "scrub", "cleansing"], "ratio": 0.30},
+        {"slot": "Treatment Serum", "keywords": ["serum", "toner", "essence", "treatment"], "ratio": 0.35},
+        {"slot": "Moisturizer / SPF", "keywords": ["moisturizer", "sunscreen", "cream", "lotion", "gel"], "ratio": 0.35},
+    ],
+    "beach": [
+        {"slot": "Resort Top", "keywords": ["linen shirt", "beach", "floral shirt", "tank", "swim top", "t-shirt"], "ratio": 0.40},
+        {"slot": "Swim / Casual Shorts", "keywords": ["swim trunks", "shorts", "board shorts", "linen shorts"], "ratio": 0.40},
+        {"slot": "Sun Accessory", "keywords": ["sunglasses", "hat", "cap", "flip flops", "tote", "sandals"], "ratio": 0.20},
+    ],
+    "formal": [
+        {"slot": "Formal Shirt / Blazer", "keywords": ["blazer", "formal shirt", "dress shirt", "suit jacket", "jacket"], "ratio": 0.55},
+        {"slot": "Formal Trousers", "keywords": ["trousers", "formal pants", "chinos", "dress pants"], "ratio": 0.35},
+        {"slot": "Classic Accessory", "keywords": ["tie", "belt", "cufflinks", "wallet", "socks", "shoes"], "ratio": 0.10},
+    ],
+    "casual": [
+        {"slot": "Casual Top", "keywords": ["t-shirt", "shirt", "hoodie", "polo", "sweater", "jacket"], "ratio": 0.45},
+        {"slot": "Casual Bottoms", "keywords": ["jeans", "denim", "chinos", "pants", "cargo", "shorts"], "ratio": 0.45},
+        {"slot": "Daily Accessory", "keywords": ["cap", "belt", "wallet", "sunglasses", "socks", "shoes"], "ratio": 0.10},
+    ],
+}
+
+def _detect_goal_type(text: str) -> str:
+    t = text.lower()
+    if any(w in t for w in ["wedding", "shaadi", "ethnic", "sherwani", "festive", "traditional", "party"]):
+        return "wedding"
+    if any(w in t for w in ["gym", "workout", "fitness", "training", "exercise", "athletic", "sports"]):
+        return "gym"
+    if any(w in t for w in ["skincare", "skin", "acne", "routine", "glow", "face", "beauty"]):
+        return "skincare"
+    if any(w in t for w in ["beach", "vacation", "resort", "summer", "swim", "pool"]):
+        return "beach"
+    if any(w in t for w in ["formal", "office", "interview", "business", "meeting", "suit"]):
+        return "formal"
+    return "casual"
+
+
+async def build_goal_bundle(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    """Assembles a coordinated multi-item bundle/look for an occasion within the specified budget."""
+    raw_goal = entities.get("goal_or_occasion") or entities.get("occasion") or entities.get("query") or "complete look"
+    budget_raw = entities.get("budget") or entities.get("price_max")
+    budget = None
+    if budget_raw is not None:
+        try:
+            m = re.search(r"(\d+(?:\.\d+)?)", str(budget_raw).replace(",", ""))
+            if m:
+                budget = float(m.group(1))
+        except Exception:
+            pass
+
+    goal_key = _detect_goal_type(str(raw_goal))
+    slot_defs = _GOAL_SLOT_DEFINITIONS.get(goal_key, _GOAL_SLOT_DEFINITIONS["casual"])
+
+    resp = await _get(store, "products.json", {"status": "active", "limit": 100})
+    catalog = resp.json().get("products", []) if resp.status_code == 200 else []
+
+    selected_bundle = []
+    total_price = 0.0
+    used_product_ids = set()
+
+    for slot_info in slot_defs:
+        slot_name = slot_info["slot"]
+        slot_keywords = slot_info["keywords"]
+        slot_target_budget = (budget * slot_info["ratio"]) if budget else None
+
+        best_candidate = None
+        best_score = -1
+
+        for p in catalog:
+            p_id = str(p.get("id"))
+            if p_id in used_product_ids:
+                continue
+
+            title = (p.get("title") or "").lower()
+            p_type = (p.get("product_type") or "").lower()
+            tags = " ".join(p.get("tags") if isinstance(p.get("tags"), list) else [str(p.get("tags") or "")]).lower()
+            text_corpus = f"{title} {p_type} {tags}"
+
+            # Check keyword match
+            match_count = sum(1 for kw in slot_keywords if kw in text_corpus)
+            if match_count == 0:
+                continue
+
+            var = (p.get("variants") or [{}])[0]
+            price = float(var.get("price", 0) or 0)
+            if slot_target_budget and price > (slot_target_budget * 1.5):
+                continue  # exceeds slot budget
+
+            score = match_count * 10 - (abs(price - slot_target_budget) if slot_target_budget else 0)
+            if score > best_score:
+                best_score = score
+                best_candidate = {
+                    "slot": slot_name,
+                    "product_id": p_id,
+                    "variant_id": int(var.get("id") or 0) if str(var.get("id") or "").isdigit() else var.get("id"),
+                    "name": p.get("title", slot_name),
+                    "price": price,
+                    "image": (p.get("image") or {}).get("src", ""),
+                    "handle": p.get("handle", ""),
+                    "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
+                }
+
+        if best_candidate:
+            selected_bundle.append(best_candidate)
+            total_price += best_candidate["price"]
+            used_product_ids.add(best_candidate["product_id"])
+
+    # Fallback: if catalog didn't have enough matching slots, pick top active products
+    if len(selected_bundle) < 2 and catalog:
+        for p in catalog[:3]:
+            p_id = str(p.get("id"))
+            if p_id in used_product_ids:
+                continue
+            var = (p.get("variants") or [{}])[0]
+            price = float(var.get("price", 0) or 0)
+            selected_bundle.append({
+                "slot": f"Coordinated Item {len(selected_bundle)+1}",
+                "product_id": p_id,
+                "variant_id": int(var.get("id") or 0) if str(var.get("id") or "").isdigit() else var.get("id"),
+                "name": p.get("title", "Store Product"),
+                "price": price,
+                "image": (p.get("image") or {}).get("src", ""),
+                "handle": p.get("handle", ""),
+                "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
+            })
+            total_price += price
+            used_product_ids.add(p_id)
+            if len(selected_bundle) >= 3:
+                break
+
+    # Build widget action for 1-click batch cart injection
+    action_items = [
+        {"variant_id": it["variant_id"], "quantity": 1, "title": it["name"]}
+        for it in selected_bundle if it.get("variant_id")
+    ]
+    bundle_action = {
+        "type": "cart_add_all",
+        "items": action_items,
+        "bundle_name": f"{goal_key.title()} Look",
+        "total": f"{total_price:.2f}",
+    }
+
+    # Format natural language breakdown
+    lines = [f"• **{it['slot']}**: {it['name']} — ${it['price']:.2f}" for it in selected_bundle]
+    budget_comparison = ""
+    if budget:
+        if total_price <= budget:
+            diff = budget - total_price
+            budget_comparison = f"\n\n**Total Bundle:** ${total_price:.2f} (🎉 **${diff:.2f} under** your ${budget:.2f} budget!)"
+        else:
+            diff = total_price - budget
+            budget_comparison = f"\n\n**Total Bundle:** ${total_price:.2f} (Slightly above your ${budget:.2f} budget by ${diff:.2f})"
+    else:
+        budget_comparison = f"\n\n**Total Bundle:** ${total_price:.2f}"
+
+    msg = (
+        f"I curated a complete **{goal_key.title()} look** for you:\n\n"
+        + "\n".join(lines)
+        + budget_comparison
+        + "\n\nYou can add the entire coordinated bundle to your cart in 1 click below! 🛍️"
+    )
+
+    return {
+        "status": "bundle_assembled",
+        "goal": goal_key,
+        "budget": budget,
+        "bundle": selected_bundle,
+        "results": selected_bundle,
+        "total_bundle_price": f"{total_price:.2f}",
+        "item_count": len(selected_bundle),
+        "widget_action": bundle_action,
+        "message": msg,
+    }
+
+
 # Maps "intent.action" -> async function, built directly from the names
 # used in intent_schema.json so the router and the schema can never drift.
 ACTION_MAP = {
@@ -2001,6 +2361,10 @@ ACTION_MAP = {
     "recommendations.recommend_products": get_recommendations,
     "general_chat.assistant_help": assistant_help,
     "general_chat.recommend_products": recommend_products,
+    "restock_alert.subscribe_restock": subscribe_restock,
+    "restock_alert.list_my_alerts": list_my_alerts,
+    "visual_search.search_by_image": search_by_image,
+    "goal_cart_builder.build_goal_bundle": build_goal_bundle,
     "fallback.clarify": clarify,
 }
 
