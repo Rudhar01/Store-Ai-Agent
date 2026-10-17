@@ -550,7 +550,88 @@ async def run_tests():
         chatbot_widget._get_store = orig_get_store
 
     print("\n==================================================")
-    print("  ALL 11 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
+    print("  TEST 12: WIDGET SCRIPT AUTO-INSTALL & STATUS")
+    print("==================================================")
+    # Mock Shopify REST endpoints for ScriptTags and Themes
+    mock_db = {
+        "script_tags": [],
+        "theme_liquid": "<!DOCTYPE html><html><head><title>Test Store</title></head><body><h1>Welcome</h1></body></html>"
+    }
+
+    async def mock_widget_get(s, path, params=None):
+        if path == "script_tags.json":
+            return SimpleNamespace(status_code=200, json=lambda: {"script_tags": mock_db["script_tags"]}, text="")
+        elif path == "themes.json":
+            return SimpleNamespace(status_code=200, json=lambda: {"themes": [{"id": 112233, "role": "main", "name": "Dawn"}]}, text="")
+        elif path == "themes/112233/assets.json":
+            return SimpleNamespace(status_code=200, json=lambda: {"asset": {"key": "layout/theme.liquid", "value": mock_db["theme_liquid"]}}, text="")
+        return SimpleNamespace(status_code=404, json=lambda: {}, text="Not Found")
+
+    async def mock_widget_post(s, path, json=None):
+        if path == "script_tags.json":
+            new_tag = {"id": 99901, "src": json.get("script_tag", {}).get("src"), "event": "onload"}
+            mock_db["script_tags"].append(new_tag)
+            return SimpleNamespace(status_code=201, json=lambda: {"script_tag": new_tag}, text="")
+        return SimpleNamespace(status_code=400, json=lambda: {}, text="Bad Request")
+
+    async def mock_widget_put(s, path, json=None):
+        if path == "themes/112233/assets.json":
+            mock_db["theme_liquid"] = json.get("asset", {}).get("value", "")
+            return SimpleNamespace(status_code=200, json=lambda: {"asset": {"key": "layout/theme.liquid"}}, text="")
+        return SimpleNamespace(status_code=400, json=lambda: {}, text="Bad Request")
+
+    async def mock_widget_delete(s, path):
+        if "script_tags/99901.json" in path:
+            mock_db["script_tags"] = [t for t in mock_db["script_tags"] if t["id"] != 99901]
+            return SimpleNamespace(status_code=200, json=lambda: {}, text="")
+        return SimpleNamespace(status_code=404, json=lambda: {}, text="Not Found")
+
+    orig_get = shopify_actions._get
+    orig_post = shopify_actions._post
+    orig_put = shopify_actions._put
+    orig_delete = shopify_actions._delete
+    shopify_actions._get = mock_widget_get
+    shopify_actions._post = mock_widget_post
+    shopify_actions._put = mock_widget_put
+    shopify_actions._delete = mock_widget_delete
+
+    try:
+        # 1. First install
+        install_res = await shopify_actions.install_widget_script(store, app_url="https://app.renderlink.io")
+        assert install_res["success"] is True, "install_widget_script failed"
+        assert any("script_tag_created" in m for m in install_res["methods"]), "script_tag_created missing from methods"
+        assert any("theme_asset_injected" in m for m in install_res["methods"]), "theme_asset_injected missing from methods"
+        assert "/widget.js" in mock_db["theme_liquid"], "widget script tag missing from theme.liquid"
+        assert len(mock_db["script_tags"]) == 1, "ScriptTag not created in mock_db"
+        print("PASS: install_widget_script created ScriptTag and injected into layout/theme.liquid.")
+
+        # 2. Idempotency test (second run should detect existing tags without duplicates)
+        repeat_res = await shopify_actions.install_widget_script(store, app_url="https://app.renderlink.io")
+        assert repeat_res["success"] is True, "repeat install should be successful"
+        assert "script_tag_existing" in repeat_res["methods"], "expected script_tag_existing"
+        assert "theme_asset_existing" in repeat_res["methods"], "expected theme_asset_existing"
+        assert len(mock_db["script_tags"]) == 1, "ScriptTag was duplicated!"
+        print("PASS: install_widget_script is idempotent and avoids duplicate tags.")
+
+        # 3. Status check
+        status_res = await shopify_actions.get_widget_script_status(store, app_url="https://app.renderlink.io")
+        assert status_res.get("installed") is True, "get_widget_script_status failed to detect installed widget"
+        print("PASS: get_widget_script_status verified installed widget.")
+
+        # 4. Remove widget
+        remove_res = await shopify_actions.remove_widget_script(store, app_url="https://app.renderlink.io")
+        assert len(remove_res["removed"]) >= 2, f"Failed to remove script and theme tags: {remove_res}"
+        assert len(mock_db["script_tags"]) == 0, "ScriptTag was not removed"
+        assert "/widget.js" not in mock_db["theme_liquid"], "widget script was not removed from theme.liquid"
+        print("PASS: remove_widget_script cleanly uninstalls ScriptTag and theme asset.")
+    finally:
+        shopify_actions._get = orig_get
+        shopify_actions._post = orig_post
+        shopify_actions._put = orig_put
+        shopify_actions._delete = orig_delete
+
+    print("\n==================================================")
+    print("  ALL 12 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
     print("==================================================")
 
 if __name__ == "__main__":

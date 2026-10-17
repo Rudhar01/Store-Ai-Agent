@@ -136,6 +136,200 @@ async def _post(store, path: str, json: dict) -> httpx.Response:
         return await client.post(_url(store, path), headers=_headers(store), json=json)
 
 
+async def _delete(store, path: str) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        return await client.delete(_url(store, path), headers=_headers(store))
+
+
+def _normalize_app_url(app_url: str = "") -> str:
+    base = (app_url or os.environ.get("APP_URL") or os.environ.get("HOST") or "").strip().rstrip("/")
+    if not base:
+        base = "http://localhost:8000"
+    if not base.startswith("http://") and not base.startswith("https://"):
+        base = f"https://{base}"
+    return base
+
+
+async def get_widget_script_status(store, app_url: str = "") -> dict:
+    """Checks whether the AI Agent widget script is installed on the store.
+    Checks both Shopify ScriptTag and layout/theme.liquid injection.
+    """
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", None) or (store.get("shop_domain") if isinstance(store, dict) else "")
+    if not shop:
+        return {"installed": False, "reason": "no_shop"}
+
+    base_url = _normalize_app_url(app_url)
+    widget_url = f"{base_url}/widget.js"
+
+    # 1. Check ScriptTags
+    try:
+        st_resp = await _get(store, "script_tags.json")
+        if st_resp.status_code == 200:
+            existing_tags = st_resp.json().get("script_tags", [])
+            for tag in existing_tags:
+                src = tag.get("src") or ""
+                if widget_url in src or "/widget.js" in src:
+                    return {"installed": True, "method": "script_tag", "tag_id": tag.get("id"), "src": src}
+    except Exception as e:
+        print(f"[widget status] script_tags check failed: {e!r}")
+
+    # 2. Check layout/theme.liquid
+    try:
+        themes_resp = await _get(store, "themes.json")
+        if themes_resp.status_code == 200:
+            themes = themes_resp.json().get("themes", [])
+            main_theme = next((t for t in themes if t.get("role") == "main"), None)
+            if main_theme:
+                theme_id = main_theme["id"]
+                asset_resp = await _get(store, f"themes/{theme_id}/assets.json", params={"asset[key]": "layout/theme.liquid"})
+                if asset_resp.status_code == 200:
+                    liquid = asset_resp.json().get("asset", {}).get("value") or ""
+                    if widget_url in liquid or "/widget.js" in liquid:
+                        return {"installed": True, "method": "theme_liquid", "theme_id": theme_id}
+    except Exception as e:
+        print(f"[widget status] theme asset check failed: {e!r}")
+
+    return {"installed": False}
+
+
+async def install_widget_script(store, app_url: str = "") -> dict:
+    """Directly adds the AI Agent chatbot widget script to the merchant's store.
+    
+    Tries:
+    1. Shopify ScriptTag REST API:
+       Automatically loads the script asynchronously on storefront page load
+       without modifying theme files.
+    2. Theme Asset API (layout/theme.liquid injection):
+       Fallback for themes/stores that prefer direct theme injection or restrict script tags.
+       Injects defer script tag right before </body>.
+    """
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", None) or (store.get("shop_domain") if isinstance(store, dict) else "")
+    access_token = getattr(store, "access_token", None) or (store.get("access_token") if isinstance(store, dict) else "")
+    if not shop or not access_token:
+        return {"success": False, "error": "missing_credentials", "message": "Store domain or access token missing"}
+
+    base_url = _normalize_app_url(app_url)
+    widget_url = f"{base_url}/widget.js"
+    methods_applied = []
+
+    # 1. ScriptTag REST API
+    try:
+        st_resp = await _get(store, "script_tags.json")
+        if st_resp.status_code == 200:
+            existing_tags = st_resp.json().get("script_tags", [])
+            already_has_tag = any(
+                widget_url in (tag.get("src") or "") or "/widget.js" in (tag.get("src") or "")
+                for tag in existing_tags
+            )
+            if already_has_tag:
+                methods_applied.append("script_tag_existing")
+                print(f"[widget install] ScriptTag already active on {shop}")
+            else:
+                create_resp = await _post(
+                    store,
+                    "script_tags.json",
+                    json={
+                        "script_tag": {
+                            "event": "onload",
+                            "src": widget_url,
+                            "display_scope": "all",
+                        }
+                    },
+                )
+                if create_resp.status_code in (200, 201):
+                    tag_id = create_resp.json().get("script_tag", {}).get("id")
+                    methods_applied.append(f"script_tag_created:{tag_id}")
+                    print(f"[widget install] ScriptTag created successfully on {shop} (id={tag_id})")
+                else:
+                    print(f"[widget install] ScriptTag create returned {create_resp.status_code}: {create_resp.text[:200]}")
+    except Exception as e:
+        print(f"[widget install] ScriptTag error on {shop}: {e!r}")
+
+    # 2. Theme Asset API (layout/theme.liquid injection)
+    try:
+        themes_resp = await _get(store, "themes.json")
+        if themes_resp.status_code == 200:
+            themes = themes_resp.json().get("themes", [])
+            main_theme = next((t for t in themes if t.get("role") == "main"), None)
+            if main_theme:
+                theme_id = main_theme["id"]
+                asset_resp = await _get(store, f"themes/{theme_id}/assets.json", params={"asset[key]": "layout/theme.liquid"})
+                if asset_resp.status_code == 200:
+                    asset_data = asset_resp.json().get("asset", {})
+                    liquid = asset_data.get("value") or ""
+                    snippet = f'<!-- Shopify AI Agent Chatbot Widget -->\n<script src="{widget_url}" data-shop="{shop}" defer></script>\n<!-- /Shopify AI Agent Chatbot Widget -->'
+                    if widget_url not in liquid and "/widget.js" not in liquid:
+                        if "</body>" in liquid:
+                            new_liquid = liquid.replace("</body>", f"{snippet}\n</body>")
+                        elif "</head>" in liquid:
+                            new_liquid = liquid.replace("</head>", f"{snippet}\n</head>")
+                        else:
+                            new_liquid = liquid + f"\n{snippet}"
+
+                        put_resp = await _put(
+                            store,
+                            f"themes/{theme_id}/assets.json",
+                            json={"asset": {"key": "layout/theme.liquid", "value": new_liquid}},
+                        )
+                        if put_resp.status_code in (200, 201):
+                            methods_applied.append(f"theme_asset_injected:{theme_id}")
+                            print(f"[widget install] Injected widget script tag into theme {theme_id} on {shop}")
+                    else:
+                        methods_applied.append("theme_asset_existing")
+                        print(f"[widget install] Widget script tag already in theme {theme_id} on {shop}")
+    except Exception as e:
+        print(f"[widget install] Theme asset injection error on {shop}: {e!r}")
+
+    success = len(methods_applied) > 0
+    return {
+        "success": success,
+        "shop": shop,
+        "methods": methods_applied,
+        "widget_url": widget_url,
+    }
+
+
+async def remove_widget_script(store, app_url: str = "") -> dict:
+    """Removes the AI Agent chatbot widget script from the merchant's store."""
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", None) or (store.get("shop_domain") if isinstance(store, dict) else "")
+    base_url = _normalize_app_url(app_url)
+    widget_url = f"{base_url}/widget.js"
+    removed = []
+
+    # 1. Remove ScriptTags
+    try:
+        st_resp = await _get(store, "script_tags.json")
+        if st_resp.status_code == 200:
+            for tag in st_resp.json().get("script_tags", []):
+                src = tag.get("src") or ""
+                if widget_url in src or "/widget.js" in src:
+                    tag_id = tag.get("id")
+                    del_resp = await _delete(store, f"script_tags/{tag_id}.json")
+                    if del_resp.status_code in (200, 204):
+                        removed.append(f"script_tag_deleted:{tag_id}")
+    except Exception as e:
+        print(f"[widget remove] ScriptTag deletion error: {e!r}")
+
+    # 2. Clean theme.liquid
+    try:
+        themes_resp = await _get(store, "themes.json")
+        if themes_resp.status_code == 200:
+            for t in themes_resp.json().get("themes", []):
+                if t.get("role") == "main":
+                    theme_id = t["id"]
+                    asset_resp = await _get(store, f"themes/{theme_id}/assets.json", params={"asset[key]": "layout/theme.liquid"})
+                    if asset_resp.status_code == 200:
+                        liquid = asset_resp.json().get("asset", {}).get("value") or ""
+                        cleaned = re.sub(r"<!--\s*Shopify AI Agent Chatbot Widget\s*-->.*?<!--\s*/Shopify AI Agent Chatbot Widget\s*-->\s*", "", liquid, flags=re.DOTALL)
+                        if cleaned != liquid:
+                            await _put(store, f"themes/{theme_id}/assets.json", json={"asset": {"key": "layout/theme.liquid", "value": cleaned}})
+                            removed.append(f"theme_asset_cleaned:{theme_id}")
+    except Exception as e:
+        print(f"[widget remove] Theme clean error: {e!r}")
+
+    return {"removed": removed}
+
+
 
 
 # ==========================================================================

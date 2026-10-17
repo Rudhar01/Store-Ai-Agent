@@ -25,11 +25,13 @@ import os
 import time
 import urllib.parse
 
+from types import SimpleNamespace
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse, PlainTextResponse
 
 import repository_appwrite as repo
+import shopify_actions
 
 router = APIRouter(tags=["shopify-auth"])
 
@@ -41,10 +43,9 @@ SHOPIFY_SCOPES = (
     or "read_products,read_orders,write_orders,read_customers"
 ).strip()
 
-# >>> ADDED (analytics): always ask Shopify for the permissions the
-# dashboard's Analytics page needs (orders + products), even if the
-# SHOPIFY_SCOPES / SCOPES environment variable on Render lists fewer.
-for _needed_scope in ("read_products", "read_orders"):
+# >>> ADDED (analytics & widget installation): always ask Shopify for the permissions the
+# dashboard's Analytics page needs (orders + products) and widget script installation (script_tags + themes).
+for _needed_scope in ("read_products", "read_orders", "write_script_tags", "read_script_tags", "write_themes", "read_themes"):
     if _needed_scope not in [_s.strip() for _s in SHOPIFY_SCOPES.split(",")]:
         SHOPIFY_SCOPES = f"{SHOPIFY_SCOPES},{_needed_scope}" if SHOPIFY_SCOPES else _needed_scope
 # <<< END ADDED
@@ -195,6 +196,14 @@ async def auth_callback(request: Request):
     store = repo.upsert_shop(shop, access_token, granted_scopes)
     repo.ensure_customization(store["$id"])
     is_new_store = not repo.has_dashboard_user(store["$id"])
+
+    # Directly add widget script to the store upon app install
+    try:
+        store_obj = SimpleNamespace(shop_domain=shop, access_token=access_token, id=store["$id"])
+        install_res = await shopify_actions.install_widget_script(store_obj, app_url=APP_URL)
+        print(f"[install callback] Auto-installed widget script on {shop}: {install_res}")
+    except Exception as e:
+        print(f"[install callback] Widget script auto-install failed on {shop}: {e!r}")
 
     destination = (
         f"/dashboard/signup?shop={urllib.parse.quote(shop)}"

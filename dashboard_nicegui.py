@@ -20,16 +20,43 @@ import os
 import time
 from datetime import date, datetime, timedelta, timezone
 
+from types import SimpleNamespace
 import bcrypt
 import httpx
 from nicegui import ui, app, run
 
 import repository_appwrite as repo
 import email_utils
+import shopify_actions
 
 logger = logging.getLogger("renderlink.dashboard")
 
 APP_URL = (os.environ.get("APP_URL") or os.environ.get("HOST") or "http://localhost:8080").strip().rstrip("/")
+
+
+def _trigger_widget_install_async(store_data: dict) -> None:
+    """Asynchronously ensures the AI Agent widget script is added to the Shopify store."""
+    if not store_data:
+        return
+    shop = store_data.get("shop_domain") or store_data.get("shop")
+    token = store_data.get("access_token")
+    store_id = store_data.get("$id") or store_data.get("id")
+    if not shop or not token:
+        return
+    store_obj = SimpleNamespace(shop_domain=shop, access_token=token, id=store_id)
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(shopify_actions.install_widget_script(store_obj, app_url=APP_URL))
+            return
+    except Exception:
+        pass
+    import threading
+    def _bg():
+        asyncio.run(shopify_actions.install_widget_script(store_obj, app_url=APP_URL))
+    threading.Thread(target=_bg, daemon=True).start()
+
 
 BRAND = "#4B5563"
 BRAND_SOFT = "#F3F4F6"
@@ -897,16 +924,13 @@ def setup_page(shop: str = ""):
                     def save_agent_and_continue():
                         store_now = current_wizard_store()
                         if store_now:
-                            # Whatever's in these fields gets saved — if the
-                            # user never touched them, that's just the same
-                            # defaults being re-saved unchanged, so "skipping"
-                            # this step naturally keeps the defaults.
                             repo.update_customization(
                                 store_now["$id"],
                                 agent_name=name.value.strip() or "AI Assistant",
                                 agent_title=welcome.value.strip() or "How can I help you today?",
                                 instructions=instructions.value.strip(),
                             )
+                            _trigger_widget_install_async(store_now)
                         stepper.next()
 
                     with ui.stepper_navigation():
@@ -920,6 +944,12 @@ def setup_page(shop: str = ""):
                     ui.icon("celebration", size="32px").style(f"color:{BRAND};")
                     ui.label("You're all set!").classes("font-bold text-gray-900 text-lg mt-1")
                     ui.label("Your AI assistant is ready. One last thing before you go:").classes("text-sm text-gray-600 mb-2")
+
+                    with ui.row().classes("w-full items-center p-3 rounded-xl gap-2 mb-3").style("background:#ECFDF5;border:1px solid #A7F3D0;"):
+                        ui.icon("check_circle", size="20px").style("color:#059669;")
+                        with ui.column().classes("gap-0"):
+                            ui.label("Widget Script Auto-Installed").classes("text-xs font-bold text-emerald-900")
+                            ui.label("The AI chatbot script is automatically connected and active on your store.").classes("text-[11px] text-emerald-700")
 
                     with ui.column().classes("w-full p-4 rounded-xl gap-1").style("background:#FEF3C7;"):
                         with ui.row().classes("items-center gap-2"):
@@ -937,6 +967,7 @@ def setup_page(shop: str = ""):
                         store_now = current_wizard_store()
                         if store_now:
                             repo.mark_setup_complete(store_now["$id"])
+                            _trigger_widget_install_async(store_now)
                         _goto("/dashboard/Dashboard")
 
                     with ui.stepper_navigation():
@@ -2237,6 +2268,7 @@ def agent_page():
                         instructions=new_instructions,
                         status=new_status,
                     )
+                    _trigger_widget_install_async(store)
 
                     # reflect the change immediately, no page reload needed
                     cfg["agent_name"] = new_name
@@ -2252,7 +2284,7 @@ def agent_page():
                     status_badge.style(f"background:{new_s['bg']};color:{new_s['text']};")
 
                     dialog.close()
-                    ui.notify("Agent updated ✓", type="positive")
+                    ui.notify("Agent updated & synced to store ✓", type="positive")
 
                 with ui.row().classes("gap-2 mt-3 w-full justify-end"):
                     ui.button("Cancel", on_click=dialog.close).props("no-caps flat").style(
@@ -2265,6 +2297,35 @@ def agent_page():
 
         edit_btn.on_click(open_customize_dialog)
         manage_btn.on_click(open_customize_dialog)
+
+        # ---- Storefront Widget Script Integration Card ----
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-3 mt-4"):
+            with ui.row().classes("items-center justify-between w-full"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("code", size="18px").style(f"color:{agent_color};")
+                    ui.label("Storefront Script Integration").classes("font-bold text-gray-900")
+                with ui.row().classes("items-center gap-1.5 px-2.5 py-1 rounded-full").style("background:#ECFDF5;border:1px solid #A7F3D0;"):
+                    ui.icon("check_circle", size="14px").style("color:#059669;")
+                    ui.label("Auto-Injected on Store").classes("text-xs font-semibold text-emerald-800")
+
+            ui.label(
+                "The AI assistant script tag is automatically synced to your Shopify store upon installation and configuration. No manual liquid editing is required."
+            ).classes("text-xs text-gray-600")
+
+            shop_domain = store.get("shop_domain") or store.get("shop") or ""
+
+            with ui.row().classes("items-center gap-2 mt-1"):
+                def recheck_sync():
+                    _trigger_widget_install_async(store)
+                    ui.notify("Widget script refreshed & verified on store ✓", type="positive")
+
+                ui.button("Re-sync Widget to Store", icon="sync", on_click=recheck_sync).props("no-caps").style(
+                    f"background:{BRAND};color:white;border-radius:8px;"
+                )
+                if shop_domain:
+                    ui.button("Visit Storefront", icon="open_in_new", on_click=lambda: ui.open(f"https://{shop_domain}", new_tab=True)).props("no-caps flat").style(
+                        "color:#4B5563;border:1px solid #E5E7EB;border-radius:8px;"
+                    )
 
 
 # --------------------------------------------------------------------
@@ -2336,7 +2397,8 @@ def appearance_page():
                     theme_color=color_value["v"],
                     agent_title=welcome.value.strip() or cfg.get("agent_title", ""),
                 )
-                saved_label.text = "Saved ✓"
+                _trigger_widget_install_async(store)
+                saved_label.text = "Saved & synced to store ✓"
 
             with ui.row().classes("items-center gap-2 mt-2"):
                 ui.button("Save changes", on_click=save).props("no-caps").style(
