@@ -1440,11 +1440,13 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
     fn = ""
     ln = ""
     name = ""
+    target_node = None
 
     if cid:
         try:
             cust = await shopify_actions.get_customer(store, cid)
             if cust:
+                target_node = cust
                 fn = (cust.get("firstName") or "").strip()
                 ln = (cust.get("lastName") or "").strip()
                 name = (f"{fn} {ln}").strip() or fn or ln
@@ -1462,6 +1464,13 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
                 nodes {
                   id firstName lastName displayName
                   defaultEmailAddress { emailAddress }
+                  numberOfOrders
+                  orders(first: 5, sortKey: CREATED_AT, reverse: true) {
+                    nodes {
+                      id name createdAt displayFinancialStatus displayFulfillmentStatus cancelledAt
+                      fulfillments { trackingInfo { number url company } }
+                    }
+                  }
                 }
               }
             }
@@ -1470,6 +1479,7 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
             nodes = ((data or {}).get("customers") or {}).get("nodes") or []
             if nodes:
                 c = nodes[0]
+                target_node = c
                 if not cid:
                     cid = str(c.get("id") or "").split("/")[-1]
                 fn = (c.get("firstName") or "").strip()
@@ -1477,6 +1487,42 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
                 name = (f"{fn} {ln}").strip() or fn or (c.get("displayName") or "").strip()
         except Exception as e:
             print(f"customer-profile by email failed: {e!r}")
+
+    orders_count = 0
+    active_order = None
+    if target_node:
+        try:
+            orders_count = int(target_node.get("numberOfOrders") or 0)
+        except Exception:
+            orders_count = 0
+        ord_nodes = ((target_node.get("orders") or {}).get("nodes")) or []
+        if not orders_count and ord_nodes:
+            orders_count = len(ord_nodes)
+        for o in ord_nodes:
+            if o.get("cancelledAt"):
+                continue
+            f_status = (o.get("displayFulfillmentStatus") or "").lower()
+            if f_status != "delivered":
+                ord_name = str(o.get("name") or "").lstrip("#")
+                progress = 40
+                stage = "ordered"
+                stage_label = "Confirmed"
+                if f_status in {"in_transit", "fulfilled", "partially_fulfilled", "shipped"}:
+                    progress = 70
+                    stage = "shipped"
+                    stage_label = "On the way"
+                elif f_status in {"out_for_delivery"}:
+                    progress = 90
+                    stage = "out_for_delivery"
+                    stage_label = "Out for delivery"
+                active_order = {
+                    "order_number": ord_name,
+                    "fulfillment_status": f_status,
+                    "stage": stage,
+                    "stage_label": stage_label,
+                    "progress": progress,
+                }
+                break
 
     # Fallback name derivation from email handle if customer record in Shopify lacks firstName
     if not fn and mail:
@@ -1496,12 +1542,27 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
                 "name": name or fn,
                 "email": mail,
                 "customer_id": cid or str(verified_id or ""),
+                "orders_count": orders_count,
+                "is_returning": orders_count > 0,
+                "active_order": active_order,
             }
         # Safe display name for personalized greeting and header badge
         return {
             "found": True,
             "first_name": fn,
             "name": name or fn,
+            "orders_count": orders_count,
+            "is_returning": orders_count > 0,
+            "active_order": active_order,
+        }
+    if orders_count > 0 or active_order:
+        return {
+            "found": True,
+            "first_name": "",
+            "name": "",
+            "orders_count": orders_count,
+            "is_returning": orders_count > 0,
+            "active_order": active_order,
         }
     return {"found": False}
 
@@ -1557,9 +1618,19 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .fab-greeting:hover { transform:translateY(-1px) scale(1.01); box-shadow:0 10px 28px rgba(0,0,0,.14); }",
     "#ai-chat-widget-root .fab-greeting.show { opacity:1; transform:translateY(0) scale(1); pointer-events:auto; display:flex !important; }",
     "#ai-chat-widget-root .fab-greeting::after { content:''; position:absolute; bottom:11px; right:-6px; width:0; height:0; border-top:5px solid transparent; border-bottom:5px solid transparent; border-left:6px solid #ffffff; filter:drop-shadow(2px 0 1px rgba(0,0,0,.04)); }",
+    "#ai-chat-widget-root .fab-greeting.has-order { max-width:min(285px, calc(100vw - 86px)); padding:10px 24px 10px 12px; flex-direction:column; align-items:stretch; gap:4px; }",
     "#ai-chat-widget-root .fg-close { position:absolute; top:4px; right:5px; width:16px; height:16px; display:flex; align-items:center; justify-content:center; background:transparent; border:none; color:#9ca3af; font-size:13px; line-height:1; cursor:pointer; padding:0; border-radius:50%; transition:color .15s ease, background .15s ease; }",
     "#ai-chat-widget-root .fg-close:hover { color:#111827; background:rgba(0,0,0,.06); }",
+    "#ai-chat-widget-root .fg-content { width:100%; display:flex; flex-direction:column; }",
     "#ai-chat-widget-root .fg-text { font-size:11.5px; font-weight:500; color:#1f2937; line-height:1.35; word-break:break-word; }",
+    "#ai-chat-widget-root .fg-order-badge { display:inline-flex; align-items:center; gap:4px; font-size:9.5px; font-weight:700; color:#065f46; background:#d1fae5; border:1px solid #a7f3d0; padding:2px 7px; border-radius:999px; width:fit-content; margin-bottom:2px; }",
+    "#ai-chat-widget-root .fg-order-text { font-size:11.5px; font-weight:600; color:#111827; line-height:1.35; }",
+    "#ai-chat-widget-root .fg-progress-track { position:relative; width:100%; height:5px; background:#e5e7eb; border-radius:999px; overflow:hidden; margin-top:4px; }",
+    "#ai-chat-widget-root .fg-progress-fill { height:100%; background:linear-gradient(90deg, #10b981, #059669); border-radius:999px; transition:width .4s ease; }",
+    "#ai-chat-widget-root .fg-progress-steps { display:flex; justify-content:space-between; align-items:center; font-size:8.5px; font-weight:600; color:#9ca3af; margin-top:3px; text-transform:uppercase; letter-spacing:.03em; }",
+    "#ai-chat-widget-root .fg-step.done { color:#059669; }",
+    "#ai-chat-widget-root .fg-step.active { color:#047857; font-weight:700; }",
+    "#ai-chat-widget-root .fg-order-cta { font-size:9.5px; font-weight:600; color:#2563eb; margin-top:3px; display:flex; align-items:center; gap:2px; }",
     "#ai-chat-widget-root .widget { position:fixed; bottom:max(72px, env(safe-area-inset-bottom) + 60px); right:18px; width:min(340px, calc(100vw - 24px)); max-height:min(540px, calc(100vh - 90px)); background:rgba(255,255,255,.88); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); border:1.5px solid rgba(0,0,0,.12); border-radius:18px; padding:12px; box-shadow:0 14px 34px rgba(0,0,0,.16); transform-origin:bottom right; transform:scale(.9) translateY(10px); opacity:0; pointer-events:none; transition:transform .2s cubic-bezier(.2,.9,.3,1.2), opacity .15s ease, width .25s ease, max-height .25s ease; z-index:2147483000; display:flex; flex-direction:column; }",
     "#ai-chat-widget-root .widget.open { transform:scale(1) translateY(0); opacity:1; pointer-events:auto; }",
     "#ai-chat-widget-root .widget.expanded { width:min(420px, calc(100vw - 24px)); max-height:min(640px, calc(100vh - 40px)); }",
@@ -1656,7 +1727,9 @@ WIDGET_JS = r"""
     "</button>" +
     '<div class="fab-greeting" id="fabGreeting" style="display:none;">' +
       '<button class="fg-close" id="fgClose" aria-label="Close" title="Dismiss">&times;</button>' +
-      '<div class="fg-text" id="fgText">Hi there! How can I help you today?</div>' +
+      '<div class="fg-content" id="fgContent">' +
+        '<div class="fg-text" id="fgText">Hi there! How can I help you today?</div>' +
+      '</div>' +
     '</div>' +
     '<div class="widget" id="chatWidget">' +
       '<div class="header">' +
@@ -1706,10 +1779,38 @@ WIDGET_JS = r"""
   var greetingBubble = document.getElementById("greetingBubble");
   var fabGreeting = document.getElementById("fabGreeting");
   var fgClose = document.getElementById("fgClose");
+  var fgContent = document.getElementById("fgContent");
   var fgText = document.getElementById("fgText");
   var greetingDismissed = false;
   try {
     greetingDismissed = sessionStorage.getItem("aiChatGreetingDismissed_" + SHOP) === "1";
+  } catch (e) {}
+
+  var VISIT_KEY = "ai_visit_count_" + SHOP;
+  var rawVisits = 0;
+  try {
+    rawVisits = parseInt(localStorage.getItem(VISIT_KEY) || "0", 10);
+    var sessionMarked = sessionStorage.getItem("ai_session_counted_" + SHOP);
+    if (!sessionMarked) {
+      rawVisits += 1;
+      localStorage.setItem(VISIT_KEY, String(rawVisits));
+      sessionStorage.setItem("ai_session_counted_" + SHOP, "1");
+    }
+  } catch (e) {
+    rawVisits = 1;
+  }
+  var isReturningVisitor = rawVisits > 1;
+  var isReturningCustomer = isReturningVisitor;
+  try {
+    if (sessionStorage.getItem("ai_is_returning_" + SHOP) === "1") {
+      isReturningCustomer = true;
+    }
+  } catch (e) {}
+
+  var activeOrder = null;
+  try {
+    var storedOrd = sessionStorage.getItem("ai_active_order_" + SHOP);
+    if (storedOrd) activeOrder = JSON.parse(storedOrd);
   } catch (e) {}
 
   var lastCustomGreeting = "";
@@ -1724,6 +1825,21 @@ WIDGET_JS = r"""
       if (mNick && mNick[1]) nick = mNick[1];
       if (nick.length >= 2) name = nick.charAt(0).toUpperCase() + nick.slice(1);
     }
+
+    // 1. If any active order exists
+    if (activeOrder) {
+      return "Your order is on the way! Want to know where it reached?";
+    }
+
+    // 2. If returning customer, welcome with name to make him feel familiar
+    if (isReturningCustomer) {
+      if (name) {
+        return "Welcome back, " + name + "! Great to see you again. How can I help you today?";
+      }
+      return "Welcome back! How can I help you today?";
+    }
+
+    // 3. First-time logged-in customer or first-time visitor
     if (name) {
       return "Hi " + name + "! How can I help you today?";
     }
@@ -1731,9 +1847,47 @@ WIDGET_JS = r"""
     return "Hi there! How can I help you today?";
   }
 
-  function updateOutsideGreetingText() {
-    var txt = getGreetingText();
-    if (fgText) fgText.textContent = txt;
+  function updateOutsideGreetingText(customMsg) {
+    if (!fabGreeting) return;
+    var txt = getGreetingText(customMsg);
+
+    if (activeOrder) {
+      fabGreeting.classList.add("has-order");
+      var pct = Math.min(Math.max(activeOrder.progress || 70, 10), 100);
+      var ordNum = activeOrder.order_number ? " #" + activeOrder.order_number : "";
+      var isDoneOrdered = pct >= 30;
+      var isActiveTransit = pct >= 60 && pct < 95;
+      var isDoneTransit = pct >= 95;
+      var isActiveDelivered = pct >= 95;
+
+      var orderHtml =
+        '<div class="fg-order-badge">\uD83D\uDE9A Order' + ordNum + ' on the way</div>' +
+        '<div class="fg-order-text">Your order is on the way! Want to know where it reached?</div>' +
+        '<div class="fg-progress-track">' +
+          '<div class="fg-progress-fill" style="width:' + pct + '%;"></div>' +
+        '</div>' +
+        '<div class="fg-progress-steps">' +
+          '<span class="fg-step ' + (isDoneOrdered ? "done" : "") + '">Ordered</span>' +
+          '<span class="fg-step ' + (isActiveTransit ? "active" : (isDoneTransit ? "done" : "")) + '">On the way</span>' +
+          '<span class="fg-step ' + (isActiveDelivered ? "active" : "") + '">Delivered</span>' +
+        '</div>' +
+        '<div class="fg-order-cta">Tap to track live \u2192</div>';
+
+      if (fgContent) {
+        fgContent.innerHTML = orderHtml;
+      } else if (fgText) {
+        fgText.innerHTML = orderHtml;
+      }
+    } else {
+      fabGreeting.classList.remove("has-order");
+      if (fgContent) {
+        fgContent.innerHTML = '<div class="fg-text" id="fgText">' + txt + '</div>';
+        fgText = document.getElementById("fgText");
+      } else if (fgText) {
+        fgText.textContent = txt;
+      }
+    }
+
     if (greetingBubble && (!chatHistory || chatHistory.length === 0)) {
       greetingBubble.textContent = txt;
     }
@@ -1744,7 +1898,7 @@ WIDGET_JS = r"""
     if (widget.classList.contains("open")) return;
     if (!fabGreeting) return;
 
-    if (fgText) fgText.textContent = getGreetingText(message);
+    updateOutsideGreetingText(message);
 
     fabGreeting.style.display = "flex";
     setTimeout(function () {
@@ -1780,6 +1934,12 @@ WIDGET_JS = r"""
       fab.classList.toggle("open", true);
       renderQuickActions();
       persistState();
+      if (activeOrder) {
+        var ordQuery = activeOrder.order_number ? "Where is my order #" + activeOrder.order_number : "Where is my order?";
+        setTimeout(function () {
+          sendMessage(ordQuery);
+        }, 350);
+      }
     });
   }
 
@@ -1853,6 +2013,17 @@ WIDGET_JS = r"""
           if (customerName) sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
           if (customerEmail) sessionStorage.setItem("ai_cust_email_" + SHOP, customerEmail);
           if (customerId) sessionStorage.setItem("ai_cust_id_" + SHOP, customerId);
+          if (p.orders_count > 0 || p.is_returning) {
+            isReturningCustomer = true;
+            try { sessionStorage.setItem("ai_is_returning_" + SHOP, "1"); } catch (e) {}
+          }
+          if (p.active_order) {
+            activeOrder = p.active_order;
+            try { sessionStorage.setItem("ai_active_order_" + SHOP, JSON.stringify(activeOrder)); } catch (e) {}
+          } else {
+            activeOrder = null;
+            try { sessionStorage.removeItem("ai_active_order_" + SHOP); } catch (e) {}
+          }
           updateHeaderProfileBadge();
           updateOutsideGreetingText();
         }
@@ -2063,6 +2234,21 @@ WIDGET_JS = r"""
     conversation.appendChild(heading);
 
     orders.forEach(function (o) {
+      var stLower = String(o.status || o.fulfillment_status || "").toLowerCase();
+      if (!activeOrder && stLower !== "delivered" && stLower !== "cancelled") {
+        var pct = 40;
+        if (stLower.indexOf("transit") !== -1 || stLower.indexOf("ship") !== -1 || stLower.indexOf("fulfill") !== -1) pct = 70;
+        else if (stLower.indexOf("out") !== -1) pct = 90;
+        activeOrder = {
+          order_number: o.order_number || o.id || "",
+          fulfillment_status: stLower,
+          stage: pct >= 70 ? "shipped" : "ordered",
+          stage_label: pct >= 70 ? "On the way" : "Confirmed",
+          progress: pct
+        };
+        try { sessionStorage.setItem("ai_active_order_" + SHOP, JSON.stringify(activeOrder)); } catch (e) {}
+        updateOutsideGreetingText();
+      }
       var card = document.createElement("div");
       card.className = "order-card";
       var top = document.createElement("div");
@@ -2192,6 +2378,14 @@ WIDGET_JS = r"""
       '<div class="receipt-line"><strong>Delivery:</strong> 3-5 business days</div>';
     conversation.appendChild(box);
     autoResizeConversation();
+    activeOrder = {
+      order_number: data.order_number || "1055",
+      stage: "ordered",
+      stage_label: "Confirmed",
+      progress: 40
+    };
+    try { sessionStorage.setItem("ai_active_order_" + SHOP, JSON.stringify(activeOrder)); } catch (e) {}
+    updateOutsideGreetingText();
   }
 
   function addConfirmationButtons() {

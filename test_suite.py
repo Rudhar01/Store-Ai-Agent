@@ -331,7 +331,11 @@ async def run_tests():
     assert "getGreetingText" in chatbot_widget.WIDGET_JS, "getGreetingText missing from WIDGET_JS"
     assert "customer_email: customerEmail" in chatbot_widget.WIDGET_JS, "customer_email missing from WIDGET_JS payload"
     assert "customer_id: customerId" in chatbot_widget.WIDGET_JS, "customer_id missing from WIDGET_JS payload"
-    print("PASS: Widget JS contains complete UI, compact personalized greeting bubble, cart AJAX handlers, payment modals, and logged-in customer session sync.")
+    assert "fg-progress-track" in chatbot_widget.WIDGET_JS, "fg-progress-track missing from WIDGET_JS"
+    assert "fg-progress-fill" in chatbot_widget.WIDGET_JS, "fg-progress-fill missing from WIDGET_JS"
+    assert "Your order is on the way! Want to know where it reached?" in chatbot_widget.WIDGET_JS
+    assert "Welcome back" in chatbot_widget.WIDGET_JS
+    print("PASS: Widget JS contains complete UI, customer-type aware greetings, active order linear progress bar, cart AJAX handlers, payment modals, and logged-in customer session sync.")
 
     print("\n==================================================")
     print("  TEST 8: LOGGED-IN CUSTOMER EMAIL VERIFICATION BYPASS")
@@ -496,7 +500,57 @@ async def run_tests():
         chatbot_widget._get_store = orig_get_store
 
     print("\n==================================================")
-    print("  ALL 10 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
+    print("  TEST 11: CUSTOMER GREETING VARIANTS & ACTIVE ORDER PROGRESS")
+    print("==================================================")
+    # Mock customer with active order
+    mock_cust_active = {
+        "id": "gid://shopify/Customer/12345",
+        "firstName": "Rohan",
+        "lastName": "Sharma",
+        "displayName": "Rohan Sharma",
+        "defaultEmailAddress": {"emailAddress": "rohan@example.com"},
+        "numberOfOrders": 3,
+        "orders": {
+            "nodes": [
+                {
+                    "id": "gid://shopify/Order/9901",
+                    "name": "#1099",
+                    "createdAt": "2026-10-15T08:00:00Z",
+                    "displayFinancialStatus": "PAID",
+                    "displayFulfillmentStatus": "IN_TRANSIT",
+                    "cancelledAt": None,
+                    "fulfillments": [{"trackingInfo": [{"number": "TRK9876", "company": "Delhivery"}]}]
+                }
+            ]
+        }
+    }
+    async def mock_get_cust(s, cid):
+        return mock_cust_active
+
+    orig_cust_func = shopify_actions.get_customer
+    shopify_actions.get_customer = mock_get_cust
+    orig_get_store = chatbot_widget._get_store
+    chatbot_widget._get_store = lambda s: store
+    try:
+        req_mock = SimpleNamespace(headers={})
+        profile_res = await chatbot_widget.get_customer_profile(
+            req_mock, shop="demo-store.myshopify.com", customer_id="12345"
+        )
+        assert profile_res.get("found") is True
+        assert profile_res.get("first_name") == "Rohan"
+        assert profile_res.get("orders_count") == 3
+        assert profile_res.get("is_returning") is True
+        assert profile_res.get("active_order") is not None
+        assert profile_res["active_order"]["order_number"] == "1099"
+        assert profile_res["active_order"]["stage"] == "shipped"
+        assert profile_res["active_order"]["progress"] >= 60
+        print("PASS: get_customer_profile accurately identifies returning customer and active order tracking status.")
+    finally:
+        shopify_actions.get_customer = orig_cust_func
+        chatbot_widget._get_store = orig_get_store
+
+    print("\n==================================================")
+    print("  ALL 11 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
     print("==================================================")
 
 if __name__ == "__main__":

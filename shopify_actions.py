@@ -169,7 +169,7 @@ async def get_customer(store, customer_id: str) -> dict | None:
         numberOfOrders
         orders(first: 20, sortKey: CREATED_AT, reverse: true) {
           nodes {
-            id name createdAt displayFinancialStatus displayFulfillmentStatus
+            id name createdAt displayFinancialStatus displayFulfillmentStatus cancelledAt
             totalPriceSet { shopMoney { amount currencyCode } }
             lineItems(first: 20) { nodes { name quantity } }
           }
