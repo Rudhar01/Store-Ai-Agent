@@ -160,8 +160,8 @@ def generate_reply(
         )
     elif action_name == "initiate_payment":
         extra_clause = (
-            " Clearly state that payment has been initiated for the order total using their payment method, "
-            "and prompt them to enter the 6-digit OTP provided to confirm and complete the purchase."
+            " Confirm that the shopper is being taken to the secure checkout with their cart items. "
+            "Never ask for card numbers or payment credentials in chat."
         )
     elif action_name == "confirm_payment_otp":
         extra_clause = (

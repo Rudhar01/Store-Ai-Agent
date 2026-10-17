@@ -430,7 +430,73 @@ async def run_tests():
     print("PASS: Removing 1 unit of item with 10 units leaves 9 units with 'cart_set_quantity'.")
 
     print("\n==================================================")
-    print("  ALL 9 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
+    print("  TEST 10: SECURE CHECKOUT, CARD SHIELD & PAYMENT POLICY ROUTING")
+    print("==================================================")
+    orig_get_store = chatbot_widget._get_store
+    chatbot_widget._get_store = lambda s: store
+    try:
+        # 1. Card Number Privacy Shield (rejects without processing or logging)
+        card_req = chatbot_widget.ChatRequest(
+            message="Here is my card 4111 2222 3333 4444 to pay",
+            session_id="test_card_session",
+            shop="demo-store.myshopify.com"
+        )
+        card_res = await chatbot_widget.chat(card_req)
+        assert "For your security, card details should only be entered directly at checkout" in card_res.get("reply", "")
+        print("PASS: Card number detected and rejected with security warning; not processed or logged.")
+
+        # 2. Checkout with empty cart -> say so
+        empty_req = chatbot_widget.ChatRequest(
+            message="checkout",
+            session_id="test_checkout_empty_session",
+            shop="demo-store.myshopify.com",
+            cart_data={"items": [], "item_count": 0, "total_price": 0}
+        )
+        empty_res = await chatbot_widget.chat(empty_req)
+        assert empty_res.get("status") == "cart_empty"
+        assert "Your cart is currently empty" in empty_res.get("reply", "")
+        assert "widget_action" not in empty_res or empty_res.get("widget_action") is None
+        print("PASS: Checkout on empty cart notifies shopper that cart is empty.")
+
+        # 3. Checkout with items -> short confirmation + redirect to store checkout
+        chatbot_widget._remember_customer("demo-store.myshopify.com", "test_checkout_items_session", "cust_123", "shopper@store.com", "Shopper User")
+        items_req = chatbot_widget.ChatRequest(
+            message="pay now",
+            session_id="test_checkout_items_session",
+            shop="demo-store.myshopify.com",
+            customer_email="shopper@store.com",
+            cart_data={
+                "items": [
+                    {"title": "Snowboard A", "quantity": 1, "price": 10000},
+                    {"title": "Snowboard B", "quantity": 1, "price": 15000}
+                ],
+                "item_count": 2,
+                "total_price": 25000
+            }
+        )
+        items_res = await chatbot_widget.chat(items_req)
+        assert items_res.get("status") == "checkout_redirect"
+        assert "Taking you to secure checkout with 2 items" in items_res.get("reply", "")
+        assert items_res.get("widget_action", {}).get("type") == "checkout"
+        assert "checkout[email]=shopper%40store.com" in items_res.get("widget_action", {}).get("url", "")
+        print(f"PASS: Checkout with 2 items produced confirmation '{items_res.get('reply')}' and redirect action ({items_res.get('widget_action')}).")
+
+        # 4. Exact-phrase match verification: "can I pay with UPI?" routes to policy answer, NOT checkout
+        policy_res = await shopify_actions.dispatch(
+            "policy_query", "answer_policy_question", store,
+            {"policy_type": "payment_policy"},
+            session_id=session_id
+        )
+        assert "UPI" in (policy_res.get("body") or policy_res.get("policy") or policy_res.get("text") or "")
+        # Check that "can I pay with UPI?" does NOT match _EXACT_CHECKOUT in chatbot_widget
+        assert "can i pay with upi?" not in chatbot_widget._EXACT_CHECKOUT
+        assert "can i pay with upi" not in chatbot_widget._EXACT_CHECKOUT
+        print("PASS: 'Can I pay with UPI?' does not trigger checkout redirect and routes to payment policy.")
+    finally:
+        chatbot_widget._get_store = orig_get_store
+
+    print("\n==================================================")
+    print("  ALL 10 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
     print("==================================================")
 
 if __name__ == "__main__":

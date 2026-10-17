@@ -509,7 +509,10 @@
             "What is your return policy?",
             "Do you have a warranty policy?",
             "What is your cancellation policy?",
-            "Do you sell my data to anyone?"
+            "Do you sell my data to anyone?",
+            "Can I pay with UPI?",
+            "What payment methods do you accept?",
+            "Do you accept cash on delivery?"
           ]
         }
       ],
@@ -522,7 +525,9 @@
         "How long does shipping take?",
         "What is your return policy?",
         "What is your warranty policy?",
-        "Do you sell my data to anyone?"
+        "Do you sell my data to anyone?",
+        "Can I pay with UPI?",
+        "What payment methods do you accept?"
       ],
       "policy_types": [
         "refund_policy",
@@ -531,7 +536,8 @@
         "privacy_policy",
         "warranty_policy",
         "terms_of_service",
-        "cancellation_policy"
+        "cancellation_policy",
+        "payment_policy"
       ]
     },
     {

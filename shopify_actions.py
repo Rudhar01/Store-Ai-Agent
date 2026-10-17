@@ -1618,6 +1618,8 @@ _POLICY_FIELD_MAP = {
     "terms_of_service": "terms_of_service",
     "warranty_policy": "warranty_policy",
     "cancellation_policy": "cancellation_policy",
+    "payment_policy": "payment_policy",
+    "payment_methods": "payment_policy",
 }
 
 _STANDARD_POLICIES = {
@@ -1649,6 +1651,11 @@ _STANDARD_POLICIES = {
     "cancellation_policy": (
         "Orders can be cancelled free of charge within 2 hours of placement before warehouse dispatch. "
         "To request a cancellation, simply let our assistant know in chat or contact support."
+    ),
+    "payment_policy": (
+        "We accept all major credit and debit cards (Visa, Mastercard, American Express), "
+        "UPI, Net Banking, and digital wallets at our store's secure checkout gateway. "
+        "All payments are encrypted and processed securely directly on Shopify's payment gateway."
     ),
 }
 

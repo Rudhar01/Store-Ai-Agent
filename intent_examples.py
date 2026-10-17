@@ -98,8 +98,9 @@ EXAMPLES: dict[tuple[str, str], list[str]] = {
         "what's your refund policy", "how long does shipping take", "do you ship internationally",
         "can I return an item after 30 days", "do you share my data with anyone", "what are the delivery charges",
         "what is your warranty policy", "return policy kya hai", "shipping mein kitna time lagta hai",
-        "delivery charges kitne hain", "warranty terms kya hain",
-        "आपकी रिफंड पॉलिसी क्या है", "ਤੁਹਾਡੀ ਰਿਫੰਡ ਪਾਲਿਸੀ ਕੀ ਹੈ",
+        "delivery charges kitne hain", "warranty terms kya hain", "can I pay with UPI", "can i pay with upi",
+        "what payment methods do you accept", "do you take credit cards", "can I pay with cash on delivery",
+        "payment options kya hain", "आपकी रिफंड पॉलिसी क्या है", "ਤੁਹਾਡੀ ਰਿਫੰਡ ਪਾਲਿਸੀ ਕੀ ਹੈ",
     ],
     ("registration_login", "register"): [
         "I want to create an account", "sign me up", "how do I register", "account banana hai",

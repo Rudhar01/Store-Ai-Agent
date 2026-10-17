@@ -241,13 +241,17 @@ def _session_customer_name(shop: str, session_id: str) -> str | None:
 
 
 def _get_store(shop: str) -> SimpleNamespace | None:
-    doc = repo.get_store(shop)
-    if not doc:
+    try:
+        doc = repo.get_store(shop)
+        if not doc:
+            return None
+        shop_domain = doc.get("shop_domain") if isinstance(doc, dict) else getattr(doc, "shop_domain", shop)
+        access_token = doc.get("access_token") if isinstance(doc, dict) else getattr(doc, "access_token", "")
+        store_id = doc.get("$id") if isinstance(doc, dict) else getattr(doc, "id", None)
+        return SimpleNamespace(shop_domain=shop_domain or shop, access_token=access_token, id=store_id)
+    except Exception as e:
+        print(f"chatbot_widget: _get_store failed: {str(e)[:100]}")
         return None
-    shop_domain = doc.get("shop_domain") if isinstance(doc, dict) else getattr(doc, "shop_domain", shop)
-    access_token = doc.get("access_token") if isinstance(doc, dict) else getattr(doc, "access_token", "")
-    store_id = doc.get("$id") if isinstance(doc, dict) else getattr(doc, "id", None)
-    return SimpleNamespace(shop_domain=shop_domain or shop, access_token=access_token, id=store_id)
 
 
 import contextvars
@@ -321,6 +325,7 @@ def _build_events(status: str, intent, action, entities, session_id, visitor_id)
 
 def _log(shop: str, message: str, status: str, intent=None, action=None, entities=None, reply: str = "") -> None:
     try:
+        clean_msg = re.sub(r"\b(?:\d[ -]*?){13,19}\b", "[REDACTED_CARD]", str(message or ""))
         _sid, _vid = _CURRENT_SESSION_ID.get(), _CURRENT_VISITOR_ID.get()
         _extra = {}
         if _sid and _sid != "anonymous":
@@ -329,7 +334,7 @@ def _log(shop: str, message: str, status: str, intent=None, action=None, entitie
             _extra["visitor_id"] = str(_vid)[:80]
         if _extra:
             entities = {**(entities if isinstance(entities, dict) else {}), **_extra}
-        repo.log_request(shop, message, status, detected_intent=intent, detected_action=action, reply=reply, entities=entities)
+        repo.log_request(shop, clean_msg, status, detected_intent=intent, detected_action=action, reply=reply, entities=entities)
     except Exception as e:
         print(f"chatbot_widget: log_request failed: {str(e)[:100]}")
 
@@ -398,6 +403,14 @@ _GREETING_RE = re.compile(
 _PAY_RE = re.compile(r"\b(pay(ment)?|pay now|pay for (my )?(cart|order)|complete payment|proceed to pay(ment)?|buy now with card)\b", re.IGNORECASE)
 _OTP_RE = re.compile(r"\b(?:otp\s*(?:is|code)?\s*[:=]?\s*)?(\d{6})\b", re.IGNORECASE)
 _WARRANTY_RE = re.compile(r"\b(warranty|guarantee|claim|replace|broken|damaged|defective)\b", re.IGNORECASE)
+
+_EXACT_GREETINGS = {"hi", "hello", "hey", "hey there", "howdy", "hola", "namaste"}
+_EXACT_CART_VIEW = {"view cart", "show cart", "my cart", "view my cart", "show my cart", "check cart", "check my cart"}
+_EXACT_CHECKOUT = {
+    "checkout", "pay now", "proceed to checkout", "go to checkout",
+    "pay for my cart", "complete checkout", "take me to checkout",
+    "proceed to payment", "complete payment", "pay for cart"
+}
 
 EMAIL_RE = re.compile(r"[\w.+\-]+@[\w\-]+\.[\w.\-]+")
 _VERIFY_ERRORS = {"verification_required", "verification_failed"}
@@ -835,6 +848,16 @@ async def _chat_impl(req: ChatRequest):
     if not message and not req.otp_code:
         return {"reply": "Could you type or say something first?"}
 
+    # SECURITY: Detect anything that looks like a credit/debit card number (13-19 digits, possibly with spaces or dashes).
+    # Never process, log, or store card numbers in chat — guide shopper to store checkout.
+    card_match = re.search(r"\b(?:\d[ -]*?){13,19}\b", message)
+    if card_match:
+        digits_only = re.sub(r"\D", "", card_match.group(0))
+        if 13 <= len(digits_only) <= 19:
+            return {
+                "reply": "For your security, card details should only be entered directly at checkout. Please do not share payment card numbers in chat."
+            }
+
     store = _get_store(req.shop)
     if not store:
         return {"reply": "Sorry, I couldn't verify this store. Please reload the page and try again."}
@@ -932,9 +955,6 @@ async def _chat_impl(req: ChatRequest):
     # messages that happen to contain a matching keyword.
     # The LLM handles every other message so complex phrasing is not penalised.
     _msg_lower = message.strip().lower()
-    _EXACT_GREETINGS = {"hi", "hello", "hey", "hey there", "howdy", "hola", "namaste"}
-    _EXACT_CART_VIEW = {"view cart", "show cart", "my cart", "view my cart", "show my cart", "check cart", "check my cart"}
-    _EXACT_PAY = {"pay now", "checkout", "pay", "pay for my cart", "proceed to payment", "complete payment"}
     if _msg_lower in _EXACT_GREETINGS:
         intent, action = "general_chat", "assistant_help"
         entities = {}
@@ -945,7 +965,7 @@ async def _chat_impl(req: ChatRequest):
         entities = {}
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
-    elif _msg_lower in _EXACT_PAY:
+    elif _msg_lower in _EXACT_CHECKOUT:
         intent, action = "payment_checkout", "initiate_payment"
         entities = {}
         language = "en"
@@ -1107,6 +1127,56 @@ async def _chat_impl(req: ChatRequest):
                                language, message, "Could you describe the issue or damage with the item?",
                                entities={"order_number": entities["order_number"]})
                     return out
+
+        # 5. Checkout / Pay Now -> Validate Cart & Redirect to Store Checkout Gateway
+        if (intent, action) in (("payment_checkout", "initiate_payment"), ("cart_management", "checkout")):
+            cart = entities.get("cart_data") or _parse_storefront_cart(req.cart_data)
+            items = (cart or {}).get("items") or entities.get("items") or []
+            item_count = (cart or {}).get("item_count")
+            if item_count is None:
+                item_count = sum(int(it.get("quantity") or 1) for it in items) if items else 0
+
+            # Fallback to session cart if storefront payload was empty
+            if not items:
+                cart_id = shopify_actions._SESSION_CARTS.get(req.session_id)
+                if cart_id and store:
+                    try:
+                        sf_cart = await shopify_actions._fetch_cart(store, cart_id)
+                        summary = shopify_actions._summarize_cart(sf_cart)
+                        items = summary.get("items") or []
+                        item_count = summary.get("item_count") or len(items)
+                    except Exception:
+                        pass
+
+            # 1. If cart is empty, say so!
+            if not items or item_count <= 0:
+                reply = "Your cart is currently empty. Please add items to your cart before proceeding to checkout."
+                _log(req.shop, message, "cart_empty", intent, action, entities, reply)
+                return {
+                    "status": "cart_empty",
+                    "reply": reply,
+                    "language": language,
+                }
+
+            # 2. If not empty: reply with short confirmation and redirect to checkout
+            item_text = f"{item_count} item" if item_count == 1 else f"{item_count} items"
+            reply = f"Taking you to secure checkout with {item_text}."
+
+            from urllib.parse import quote
+            if customer_email:
+                checkout_url = f"/checkout?checkout[email]={quote(customer_email)}"
+            else:
+                checkout_url = "/checkout"
+
+            widget_action = {"type": "checkout", "url": checkout_url}
+            _log(req.shop, message, "checkout_redirect", intent, action, entities, reply)
+            return {
+                "status": "checkout_redirect",
+                "reply": reply,
+                "language": language,
+                "checkout_url": checkout_url,
+                "widget_action": widget_action,
+            }
 
         # Feature checks
         if not _feature_enabled(store.id, intent, action, entities):
@@ -1610,7 +1680,7 @@ WIDGET_JS = r"""
         '<div class="bubble bot" id="greetingBubble">Hi! How can I help you today?</div>' +
       "</div>" +
       '<div class="input-row">' +
-        '<input type="text" id="chatInput" placeholder="Search, order status, warranty, pay cart....." />' +
+        '<input type="text" id="chatInput" placeholder="Search, order status, warranty, checkout....." />' +
         '<button class="mic-btn" id="micBtn" aria-label="Voice input">' +
           '<svg class="icon-mic-inner" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>' +
           '<svg class="icon-send-inner" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>' +
@@ -2311,7 +2381,7 @@ WIDGET_JS = r"""
         cartClear();
         break;
       case "checkout":
-        window.location.href = "/checkout";
+        setTimeout(function () { window.location.href = action.url || "/checkout"; }, 600);
         break;
     }
   }
@@ -2319,7 +2389,7 @@ WIDGET_JS = r"""
   var QUICK_ACTIONS = [
     { icon: "📦", label: "Show all my orders", command: "Show all my orders" },
     { icon: "🚚", label: "Track an order", command: "Track order" },
-    { icon: "💳", label: "Pay for my cart", command: "Pay for my cart" },
+    { icon: "💳", label: "Checkout", command: "checkout" },
     { icon: "🛡️", label: "Claim a warranty", command: "I want to claim a warranty" },
     { icon: "📋", label: "Return & store policies", command: "What is your return policy?" },
     { icon: "🛒", label: "View my cart", command: "What's in my cart?" },
