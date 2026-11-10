@@ -16,6 +16,33 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# --------------------------------------------------------------------
+# Startup env-var validation — fail loudly at boot rather than
+# silently during the first merchant install.
+# --------------------------------------------------------------------
+_REQUIRED_VARS = {
+    "APPWRITE_ENDPOINT":    "Appwrite cloud/self-hosted URL  (e.g. https://cloud.appwrite.io/v1)",
+    "APPWRITE_PROJECT_ID":  "Appwrite Project ID             (from your Appwrite console)",
+    "APPWRITE_API_KEY":     "Appwrite server-side API key    (databases.* scope required)",
+    "APPWRITE_DATABASE_ID": "Appwrite Database ID            (the DB you created for this app)",
+    "SHOPIFY_API_KEY":      "Shopify App API Key / Client ID (from Partners Dashboard)",
+    "SHOPIFY_API_SECRET":   "Shopify App API Secret          (from Partners Dashboard)",
+    "APP_URL":              "Public HTTPS URL of this server (e.g. https://myapp.onrender.com)",
+}
+
+_missing = [f"  {var}  — {desc}" for var, desc in _REQUIRED_VARS.items() if not os.environ.get(var)]
+if _missing:
+    import sys
+    print("\n" + "=" * 70)
+    print("STARTUP ERROR — the following required environment variables are NOT SET:")
+    print("\n".join(_missing))
+    print("=" * 70)
+    print("Set them in your .env file (local) or in your hosting platform's")
+    print("environment settings (Render / Railway / Fly.io etc.) and restart.\n")
+    # Warn but don't crash — lets the server run so the / health endpoint
+    # can still respond and the error is visible in platform logs.
+    # Change `print` to `sys.exit(1)` above if you prefer a hard stop.
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware

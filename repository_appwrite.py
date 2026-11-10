@@ -112,16 +112,26 @@ def get_store_by_id(store_id: str) -> dict | None:
 
 
 def upsert_shop(shop_domain: str, access_token: str, scopes: str) -> dict:
+    if not DATABASE_ID:
+        raise RuntimeError(
+            "upsert_shop: APPWRITE_DATABASE_ID is not set. "
+            "The store record for %r CANNOT be saved. "
+            "Set the env var and restart the server." % shop_domain
+        )
     existing = _find_store_doc(shop_domain)
     if existing:
-        return databases.update_document(
+        doc = databases.update_document(
             DATABASE_ID, STORES_COLLECTION, existing["$id"],
             data={"access_token": access_token, "scopes": scopes, "uninstalled": False},
         )
-    return databases.create_document(
+        print(f"[upsert_shop] Updated existing store record for {shop_domain!r} (id={existing['$id']!r})")
+        return doc
+    doc = databases.create_document(
         DATABASE_ID, STORES_COLLECTION, ID.unique(),
         data={"shop_domain": shop_domain, "access_token": access_token, "scopes": scopes, "uninstalled": False},
     )
+    print(f"[upsert_shop] Created new store record for {shop_domain!r} (id={doc.get('$id')!r})")
+    return doc
 
 
 def get_shop_token(shop_domain: str) -> str | None:
