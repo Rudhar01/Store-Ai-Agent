@@ -114,7 +114,7 @@ def get_store_by_id(store_id: str) -> dict | None:
         return None
 
 
-def upsert_shop(shop_domain: str, access_token: str, scopes: str) -> dict:
+def upsert_shop(shop_domain: str, access_token: str, scopes: str, plan: str = "free") -> dict:
     if not DATABASE_ID:
         raise RuntimeError(
             "upsert_shop: APPWRITE_DATABASE_ID is not set. "
@@ -122,16 +122,25 @@ def upsert_shop(shop_domain: str, access_token: str, scopes: str) -> dict:
             "Set the env var and restart the server." % shop_domain
         )
     existing = _find_store_doc(shop_domain)
+    data = {
+        "access_token": access_token,
+        "scopes": scopes,
+        "uninstalled": False,
+        "setup_completed": False if not existing else existing.get("setup_completed", False),
+        "plan": plan or (existing.get("plan") if existing else "free") or "free",
+    }
     if existing:
         doc = databases.update_document(
             DATABASE_ID, STORES_COLLECTION, existing["$id"],
-            data={"access_token": access_token, "scopes": scopes, "uninstalled": False},
+            data=data,
         )
         print(f"[upsert_shop] Updated existing store record for {shop_domain!r} (id={existing['$id']!r})")
         return doc
+
+    data["shop_domain"] = shop_domain
     doc = databases.create_document(
         DATABASE_ID, STORES_COLLECTION, ID.unique(),
-        data={"shop_domain": shop_domain, "access_token": access_token, "scopes": scopes, "uninstalled": False},
+        data=data,
     )
     print(f"[upsert_shop] Created new store record for {shop_domain!r} (id={doc.get('$id')!r})")
     return doc
@@ -550,17 +559,40 @@ def get_store_info(store_id: str) -> dict | None:
         return None
 
 
-def ensure_store_info(store_id: str) -> dict:
+def ensure_store_info(store_id: str, business_name: str = "", support_email: str = "", timezone: str = "UTC") -> dict:
     existing = get_store_info(store_id)
     if existing:
+        updates = {}
+        if business_name and not existing.get("business_name"):
+            updates["business_name"] = business_name
+        if support_email and not existing.get("support_email"):
+            updates["support_email"] = support_email
+        if timezone and (not existing.get("timezone") or existing.get("timezone") == "UTC"):
+            updates["timezone"] = timezone
+        if updates:
+            try:
+                return databases.update_document(DATABASE_ID, STORE_INFO_COLLECTION, existing["$id"], data=updates)
+            except Exception as e:
+                print(f"[ensure_store_info] update failed: {e!r}")
         return existing
     try:
         return databases.create_document(
             DATABASE_ID, STORE_INFO_COLLECTION, ID.unique(),
-            data={"store": store_id, "business_name": "", "support_email": "", "timezone": "UTC"},
+            data={
+                "store": store_id,
+                "business_name": business_name or "",
+                "support_email": support_email or "",
+                "timezone": timezone or "UTC",
+            },
         )
     except Exception:
-        return {"$id": f"info_{store_id}", "store": store_id, "business_name": "", "support_email": "", "timezone": "UTC"}
+        return {
+            "$id": f"info_{store_id}",
+            "store": store_id,
+            "business_name": business_name or "",
+            "support_email": support_email or "",
+            "timezone": timezone or "UTC",
+        }
 
 
 def update_store_info(store_id: str, **fields) -> dict:

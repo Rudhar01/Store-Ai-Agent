@@ -237,15 +237,30 @@ async def auth_callback(request: Request):
     granted_scopes = data.get("scope", "")
     print(f"Installed on {shop}. Scopes: {granted_scopes}. Token starts with: {access_token[:10]}...")
 
-    store = repo.upsert_shop(shop, access_token, granted_scopes)
+    # Fetch store information from Shopify Admin API (shop.json)
+    store_obj = SimpleNamespace(shop_domain=shop, access_token=access_token, id="")
+    shop_info = await shopify_actions.fetch_shop_details(store_obj)
+    plan_name = shop_info.get("plan_name", "free")
+    business_name = shop_info.get("name", "")
+    support_email = shop_info.get("customer_email") or shop_info.get("email") or ""
+    timezone_val = shop_info.get("timezone", "UTC")
+
+    # Upsert store document with plan, setup_completed, uninstalled, etc.
+    store = repo.upsert_shop(shop, access_token, granted_scopes, plan=plan_name)
+    store_obj.id = store["$id"]
+
     repo.ensure_customization(store["$id"])
     repo.ensure_features(store["$id"])
-    repo.ensure_store_info(store["$id"])
+    repo.ensure_store_info(
+        store["$id"],
+        business_name=business_name,
+        support_email=support_email,
+        timezone=timezone_val,
+    )
     is_new_store = not repo.has_dashboard_user(store["$id"])
 
     # Directly add widget script to the store upon app install
     try:
-        store_obj = SimpleNamespace(shop_domain=shop, access_token=access_token, id=store["$id"])
         install_res = await shopify_actions.install_widget_script(store_obj, app_url=APP_URL)
         print(f"[install callback] Auto-installed widget script on {shop}: {install_res}")
     except Exception as e:

@@ -142,6 +142,41 @@ async def _delete(store, path: str) -> httpx.Response:
         return await client.delete(_url(store, path), headers=_headers(store))
 
 
+async def fetch_shop_details(store) -> dict:
+    """Fetches store details directly from Shopify Admin REST API GET /admin/api/{version}/shop.json.
+    Returns:
+        dict: {
+            "name": str,
+            "email": str,
+            "customer_email": str,
+            "timezone": str,
+            "plan_name": str,
+            "domain": str,
+            "myshopify_domain": str,
+            "currency": str,
+        }
+    """
+    try:
+        resp = await _get(store, "shop.json")
+        if resp.status_code == 200:
+            shop_data = resp.json().get("shop", {})
+            return {
+                "name": shop_data.get("name") or "",
+                "email": shop_data.get("email") or "",
+                "customer_email": shop_data.get("customer_email") or shop_data.get("email") or "",
+                "timezone": shop_data.get("iana_timezone") or shop_data.get("timezone") or "UTC",
+                "plan_name": shop_data.get("plan_name") or "free",
+                "domain": shop_data.get("domain") or "",
+                "myshopify_domain": shop_data.get("myshopify_domain") or "",
+                "currency": shop_data.get("currency") or "USD",
+            }
+        else:
+            print(f"[fetch_shop_details] Shopify API returned status {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"[fetch_shop_details] Failed to fetch shop details: {e!r}")
+    return {}
+
+
 def _normalize_app_url(app_url: str = "") -> str:
     base = (app_url or os.environ.get("APP_URL") or os.environ.get("HOST") or "").strip().rstrip("/")
     if not base:
