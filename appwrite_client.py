@@ -99,6 +99,8 @@ class DatabaseWrapper:
 
     def list_documents(self, *args, **kwargs):
         if not args or not args[0]:
+            print("appwrite_client: list_documents called with empty DATABASE_ID — returning empty. "
+                  "Set APPWRITE_DATABASE_ID env var.")
             return _normalize_list(None)
         try:
             res = self._target.list_documents(*args, **kwargs)
@@ -109,6 +111,8 @@ class DatabaseWrapper:
 
     def get_document(self, *args, **kwargs):
         if not args or not args[0] or (len(args) > 2 and not args[2]):
+            print("appwrite_client: get_document called with empty DATABASE_ID or document_id — returning None. "
+                  "Set APPWRITE_DATABASE_ID env var.")
             return None
         try:
             res = self._target.get_document(*args, **kwargs)
@@ -119,27 +123,33 @@ class DatabaseWrapper:
 
     def create_document(self, *args, **kwargs):
         if not args or not args[0]:
-            data = kwargs.get("data") or (args[3] if len(args) > 3 else {})
-            return _normalize_doc({"$id": "local_mock_id", **data})
+            # DATABASE_ID is empty — env var not set. Raise immediately so the
+            # caller (upsert_shop etc.) gets a real error instead of a silent mock.
+            raise RuntimeError(
+                "appwrite_client: create_document called with empty DATABASE_ID. "
+                "Set APPWRITE_DATABASE_ID in your .env / hosting environment and restart."
+            )
         try:
             res = self._target.create_document(*args, **kwargs)
             return _normalize_doc(res)
         except Exception as e:
-            print(f"appwrite_client: create_document failed for collection {args[1] if len(args) > 1 else 'unknown'}: {e!r}")
-            data = kwargs.get("data") or (args[3] if len(args) > 3 else {})
-            return _normalize_doc({"$id": "local_mock_id", **data})
+            print(f"appwrite_client: create_document FAILED for collection "
+                  f"{args[1] if len(args) > 1 else 'unknown'}: {e!r}")
+            raise  # re-raise so callers know the write failed
 
     def update_document(self, *args, **kwargs):
         if not args or not args[0]:
-            data = kwargs.get("data") or (args[3] if len(args) > 3 else {})
-            return _normalize_doc({"$id": args[2] if len(args) > 2 else "local_mock_id", **data})
+            raise RuntimeError(
+                "appwrite_client: update_document called with empty DATABASE_ID. "
+                "Set APPWRITE_DATABASE_ID in your .env / hosting environment and restart."
+            )
         try:
             res = self._target.update_document(*args, **kwargs)
             return _normalize_doc(res)
         except Exception as e:
-            print(f"appwrite_client: update_document failed for collection {args[1] if len(args) > 1 else 'unknown'}: {e!r}")
-            data = kwargs.get("data") or (args[3] if len(args) > 3 else {})
-            return _normalize_doc({"$id": args[2] if len(args) > 2 else "local_mock_id", **data})
+            print(f"appwrite_client: update_document FAILED for collection "
+                  f"{args[1] if len(args) > 1 else 'unknown'}: {e!r}")
+            raise  # re-raise so callers know the write failed
 
     def delete_document(self, *args, **kwargs):
         if not args or not args[0]:

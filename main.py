@@ -43,6 +43,32 @@ if _missing:
     # can still respond and the error is visible in platform logs.
     # Change `print` to `sys.exit(1)` above if you prefer a hard stop.
 
+# --------------------------------------------------------------------
+# Appwrite connectivity probe — runs once at startup, prints clear
+# PASS/FAIL so you know immediately if the database connection works.
+# --------------------------------------------------------------------
+def _probe_appwrite():
+    try:
+        from appwrite_client import databases, DATABASE_ID, STORES_COLLECTION
+        if not DATABASE_ID:
+            print("[Appwrite probe] SKIP — APPWRITE_DATABASE_ID is not set")
+            return
+        # list_documents with limit=1 is a lightweight read-only ping
+        from appwrite.query import Query
+        result = databases.list_documents(
+            DATABASE_ID, STORES_COLLECTION,
+            queries=[Query.limit(1)],
+        )
+        total = result.get("total", "?") if isinstance(result, dict) else getattr(result, "total", "?")
+        print(f"[Appwrite probe] ✅  Connected — 'stores' collection reachable "
+              f"({total} document(s) found)")
+    except Exception as e:
+        print(f"[Appwrite probe] ❌  FAILED: {e!r}")
+        print("[Appwrite probe]    App installs will NOT be saved until this is fixed.")
+        print("[Appwrite probe]    Run: python test_appwrite_connection.py  for a full diagnosis.")
+
+_probe_appwrite()
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
