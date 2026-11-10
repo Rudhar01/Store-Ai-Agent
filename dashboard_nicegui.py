@@ -854,9 +854,49 @@ def setup_page(shop: str = ""):
                         if not store_domain.value.strip() or not email.value.strip() or len(password.value) < 8:
                             account_error.text = "Fill in every field — password needs at least 8 characters."
                             return
-                        store = repo.get_store(store_domain.value.strip())
+                        raw_domain = store_domain.value.strip().lower().rstrip("/")
+                        # Normalize: strip https:// and trailing /admin if pasted from browser
+                        for _prefix in ("https://", "http://"):
+                            if raw_domain.startswith(_prefix):
+                                raw_domain = raw_domain[len(_prefix):]
+                        raw_domain = raw_domain.split("/")[0]  # drop any path component
+                        # Always try the canonical *.myshopify.com form first
+                        store = repo.get_store(raw_domain)
+                        # Fallback: if the app was reinstalled after a previous uninstall the
+                        # `uninstalled` flag may still be True (OAuth callback may have cleared it
+                        # but a timing race left the cached doc stale). Try the raw doc directly.
                         if not store:
-                            account_error.text = "Store not found — please reinstall the app."
+                            store = repo._find_store_doc(raw_domain)
+                            if store and store.get("uninstalled"):
+                                # OAuth re-install DID save the token — clear the flag now
+                                try:
+                                    from appwrite_client import databases, DATABASE_ID, STORES_COLLECTION
+                                    if DATABASE_ID:
+                                        databases.update_document(
+                                            DATABASE_ID, STORES_COLLECTION, store["$id"],
+                                            data={"uninstalled": False},
+                                        )
+                                        store["uninstalled"] = False
+                                except Exception as _e:
+                                    print(f"[setup] could not clear uninstalled flag: {_e!r}")
+                                    store = None
+                        if not store:
+                            # Give the merchant a helpful error that shows exactly what domain
+                            # was looked up and what env vars are configured.
+                            from appwrite_client import DATABASE_ID as _DBID
+                            if not _DBID:
+                                account_error.text = (
+                                    "Appwrite is not configured (APPWRITE_DATABASE_ID is missing). "
+                                    "Set the required env vars and restart the server."
+                                )
+                            else:
+                                account_error.text = (
+                                    f"Store \"{raw_domain}\" not found in the database. "
+                                    "Make sure you completed the Shopify app install flow first "
+                                    "(visit your Shopify admin → Apps → install this app). "
+                                    "If you already did that, check that the domain above exactly "
+                                    "matches your *.myshopify.com domain."
+                                )
                             return
                         if repo.has_dashboard_user(store["$id"]):
                             account_error.text = "This store already has a dashboard login — log in instead."

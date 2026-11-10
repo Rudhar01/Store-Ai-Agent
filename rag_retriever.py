@@ -1,35 +1,24 @@
 """
-Queries a store-specific Dify Knowledge Base for relevant chunks and caches
-results in a short-lived in-memory store, so repeated/similar queries within
-the TTL window don't re-hit the API.
+Backend-side RAG client. Drop-in replacement for the old rag_retriever.py.
 
-Multi-tenant design: each store gets its own Dify dataset (knowledge base),
-so one store's documents are never visible to another store's queries. This
-module is responsible for resolving "which store is asking" -> "which Dify
-dataset_id to query" before ever calling Dify.
+reply_generator.py keeps calling  retrieve_context(store_identifier, query)  and gets the same shape back:
+    [{"content": str, "score": float, "document": str, ...extra fields}, ...]
 
-That mapping is meant to live in Appwrite long-term (a collection of
-store_id -> dify_dataset_id). Until that's wired up, STORE_DATASET_MAP below
-acts as a stand-in with the exact same shape, so swapping in the real
-Appwrite call later is a one-function change, not a rewrite.
+All retrieval logic (hybrid search, translation, reranking, cutoffs) lives in the remote RAG service; this file only
+asks it and returns the final documents. Any failure returns [] so a RAG outage never breaks a reply.
 
-Keeps this concern separate from reply_generator.py on purpose:
-  - rag_retriever.py decides WHICH store's data to search, WHAT context to
-    fetch, and caches it
-  - reply_generator.py decides HOW to phrase the answer using that context
-
-Env vars expected:
-  DIFY_BASE_URL         e.g. "https://dify.yourdomain.com"
-  DIFY_DATASET_API_KEY  the "dataset-..." key from Dify (workspace-scoped —
-                         the same key works across all datasets/knowledge
-                         bases in your Dify workspace, so this stays a single
-                         env var even though dataset_id varies per store)
+Env vars (backend):
+  RAG_SERVICE_URL   e.g. https://rag.yourdomain.com
+  RAG_API_KEY       the same key the service was started with
+  RAG_TIMEOUT_S     total time allowed for one retrieval (default 6)
 """
-
-import os
-import time
 import hashlib
-import requests
+import os
+import re
+import threading
+import time
+
+import httpx
 
 try:
     from langfuse import observe, get_client
@@ -38,201 +27,220 @@ except ImportError:
         def decorator(f):
             return f
         return decorator
+
     def get_client(*args, **kwargs):
         return None
 
-DIFY_BASE_URL = os.environ.get("DIFY_BASE_URL", "").rstrip("/")
-DIFY_DATASET_API_KEY = os.environ.get("DIFY_DATASET_API_KEY", "")
-
-# How long a cached result stays valid, in seconds. Short-lived by design —
-# this is meant to smooth out repeated/near-duplicate queries in a single
-# conversation burst, not act as a long-term store.
+RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "").rstrip("/")
+RAG_API_KEY = os.environ.get("RAG_API_KEY", "")
+RAG_TIMEOUT_S = float(os.environ.get("RAG_TIMEOUT_S", "6"))
 CACHE_TTL_SECONDS = 300
 
+# chatbot_widget builds policy queries as "refund policy: <message>". Those prefixes become a metadata hint.
+KNOWN_POLICY_TYPES = set(filter(None, os.environ.get(
+    "RAG_POLICY_TYPES", "refund_policy,shipping_policy,privacy_policy,terms_of_service,warranty_policy").split(",")))
+_PREFIX = re.compile(r"^\s*([A-Za-z_ ]{3,40}?)\s*:\s")
 
-# ---------------------------------------------------------------------------
-# Store -> Dify dataset_id resolution
-# ---------------------------------------------------------------------------
+_cache: dict[str, dict] = {}
+_cache_lock = threading.Lock()
+_http: httpx.Client | None = None
 
-# Fallback map used only when Appwrite has no entry for a store.
-# Only keep your known production / dev stores here.
-STORE_DATASET_MAP: dict[str, str] = {
-    "nhtcnc-hs.myshopify.com": "a4d60f13-ff14-4e91-a19f-621cf2e41bb2",
-}
-
-# Short-lived cache for store -> dataset_id lookups too, separate from the
-# retrieval cache above, since this rarely changes and is worth avoiding a
-# DB round-trip for on every single message.
-_dataset_id_cache: dict[str, dict] = {}
-DATASET_ID_CACHE_TTL_SECONDS = 3600
+# circuit breaker: after 3 failures in a row, skip the service for 30 s instead of adding a timeout to every chat
+_fail_count, _open_until = 0, 0.0
+_BREAKER_FAILS, _BREAKER_SECONDS = 3, 30.0
 
 
-def _lookup_dataset_id_from_appwrite(store_identifier: str) -> str | None:
-    """
-    Query the Appwrite store_info collection for a dify_dataset_id field.
-    Returns None when Appwrite is unconfigured or the store has no entry.
-    """
-    try:
-        aw_endpoint  = os.environ.get("APPWRITE_ENDPOINT", "").rstrip("/")
-        aw_project   = os.environ.get("APPWRITE_PROJECT_ID", "")
-        aw_api_key   = os.environ.get("APPWRITE_API_KEY", "")
-        aw_db_id     = os.environ.get("APPWRITE_DATABASE_ID", "")
-        aw_col       = os.environ.get("APPWRITE_STORE_INFO_COLLECTION_ID", "store_info")
-        if not all([aw_endpoint, aw_project, aw_api_key, aw_db_id]):
-            return None
-        import httpx
-        with httpx.Client(timeout=5) as client:
-            resp = client.get(
-                f"{aw_endpoint}/databases/{aw_db_id}/collections/{aw_col}/documents",
-                headers={"X-Appwrite-Project": aw_project, "X-Appwrite-Key": aw_api_key},
-                params={"queries[]": f'equal("store","{store_identifier}")', "limit": "1"},
-            )
-        if resp.status_code == 200:
-            docs = resp.json().get("documents", [])
-            if docs and docs[0].get("dify_dataset_id"):
-                return str(docs[0]["dify_dataset_id"])
-    except Exception as e:
-        print(f"rag_retriever: Appwrite lookup failed ({e!r}), falling back to STORE_DATASET_MAP")
-    return None
+def _client() -> httpx.Client:
+    global _http
+    if _http is None:
+        _http = httpx.Client(timeout=RAG_TIMEOUT_S)
+    return _http
 
 
-def get_dataset_id(store_identifier: str, use_cache: bool = True) -> str | None:
-    """
-    Resolves a store's unique identifier to its Dify dataset_id.
-    Returns None if the store has no dataset mapped anywhere (Appwrite or
-    the pseudo dict) — callers should treat that as "no knowledge base
-    configured for this store" and skip retrieval rather than error out.
-    """
-    if not store_identifier:
-        return None
-
-    if use_cache:
-        now = time.time()
-        cached = _dataset_id_cache.get(store_identifier)
-        if cached and now - cached["timestamp"] < DATASET_ID_CACHE_TTL_SECONDS:
-            return cached["dataset_id"]
-
-    dataset_id = _lookup_dataset_id_from_appwrite(store_identifier)
-
-    if dataset_id is None:
-        # Fallback to the pseudo mapping until Appwrite is live.
-        dataset_id = STORE_DATASET_MAP.get(store_identifier)
-
-    if dataset_id and use_cache:
-        _dataset_id_cache[store_identifier] = {
-            "timestamp": time.time(),
-            "dataset_id": dataset_id,
-        }
-
-    return dataset_id
+def _headers() -> dict:
+    return {"Authorization": f"Bearer {RAG_API_KEY}"}
 
 
-# ---------------------------------------------------------------------------
-# Retrieval (chunk fetching + caching)
-# ---------------------------------------------------------------------------
-
-# (store_identifier, query_hash) -> {"timestamp": float, "chunks": list[dict]}
-_retrieval_cache: dict[str, dict] = {}
+def _tenant(store_identifier: str) -> str:
+    return (store_identifier or "").strip().lower()
 
 
-def _cache_key(store_identifier: str, query: str, top_k: int) -> str:
-    raw = f"{store_identifier}::{query.strip().lower()}::{top_k}"
+def _auto_hints(query: str, hints: dict | None) -> dict:
+    out = dict(hints or {})
+    if "policy_type" not in out:
+        m = _PREFIX.match(query)
+        if m:
+            candidate = m.group(1).strip().lower().replace(" ", "_")
+            if candidate in KNOWN_POLICY_TYPES:
+                out["policy_type"] = candidate
+    return out
+
+
+def _breaker_open() -> bool:
+    return time.time() < _open_until
+
+
+def _record(ok: bool) -> None:
+    global _fail_count, _open_until
+    if ok:
+        _fail_count = 0
+        return
+    _fail_count += 1
+    if _fail_count >= _BREAKER_FAILS:
+        _open_until = time.time() + _BREAKER_SECONDS
+        _fail_count = 0
+        print(f"rag_retriever: RAG service failing, pausing retrieval for {int(_BREAKER_SECONDS)}s")
+
+
+def _cache_key(tenant: str, query: str, top_k: int, threshold, hints: dict) -> str:
+    raw = f"{tenant}::{query.strip().lower()}::{top_k}::{threshold}::{sorted(hints.items())}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _prune_expired() -> None:
     now = time.time()
-    expired = [k for k, v in _retrieval_cache.items() if now - v["timestamp"] > CACHE_TTL_SECONDS]
-    for k in expired:
-        del _retrieval_cache[k]
+    with _cache_lock:
+        for k in [k for k, v in _cache.items() if now - v["timestamp"] > CACHE_TTL_SECONDS]:
+            _cache.pop(k, None)
+
+
+def _payload(tenant, query, top_k, hints) -> dict:
+    return {"tenant": tenant, "query": query, "top_k": top_k, "hints": hints or None,
+            "deadline_ms": int(max(RAG_TIMEOUT_S - 1.0, 1.0) * 1000)}
+
+
+def _finish(tenant, data, threshold, key, use_cache) -> list[dict]:
+    chunks = [r for r in data.get("results", []) if r.get("content")]
+    if threshold is not None:     # optional extra cutoff; the service already applies its own
+        chunks = [r for r in chunks if r.get("score", 0.0) >= threshold]
+    try:
+        cli = get_client()
+        if cli and hasattr(cli, "update_current_span"):
+            cli.update_current_span(metadata={"store": tenant, "chunks": len(chunks), "rag_meta": data.get("meta")})
+    except Exception:
+        pass
+    if use_cache:
+        with _cache_lock:
+            _cache[key] = {"timestamp": time.time(), "chunks": chunks}
+    return chunks
+
+
+def _ready(store_identifier: str, query: str) -> bool:
+    if not query or not query.strip() or not store_identifier:
+        return False
+    if not (RAG_SERVICE_URL and RAG_API_KEY):
+        print("rag_retriever: RAG_SERVICE_URL / RAG_API_KEY not set, skipping retrieval")
+        return False
+    return not _breaker_open()
+
 
 @observe(name="rag_retrieve")
 def retrieve_context(
     store_identifier: str,
     query: str,
     top_k: int = 3,
-    score_threshold: float | None = 0.5,
+    score_threshold: float | None = None,
     use_cache: bool = True,
+    hints: dict | None = None,
 ) -> list[dict]:
-    """
-    Returns a list of chunks: [{"content": str, "score": float, "document": str}, ...]
-    scoped to the requesting store's own dataset only.
-
-    Returns an empty list on any failure, including "store has no dataset
-    mapped" — callers should treat that as "no relevant context found"
-    rather than crash the reply pipeline.
-    """
-    if not query or not query.strip():
+    """Final documents for one question, scoped to one store. Returns [] on any failure."""
+    if not _ready(store_identifier, query):
         return []
-
-    dataset_id = get_dataset_id(store_identifier)
-    if not dataset_id:
-        print(f"rag_retriever: no dataset mapped for store '{store_identifier}', skipping retrieval")
-        return []
-
-    if not (DIFY_BASE_URL and DIFY_DATASET_API_KEY):
-        print("rag_retriever: missing DIFY_BASE_URL / DIFY_DATASET_API_KEY, skipping retrieval")
-        return []
-
-    key = _cache_key(store_identifier, query, top_k)
-
+    tenant, hints = _tenant(store_identifier), _auto_hints(query, hints)
+    key = _cache_key(tenant, query, top_k, score_threshold, hints)
     if use_cache:
         _prune_expired()
-        cached = _retrieval_cache.get(key)
-        if cached:
-            return cached["chunks"]
-
-    payload = {
-        "query": query,
-        "retrieval_model": {
-            "search_method": "hybrid_search",
-            "reranking_enable": False,
-            "top_k": top_k,
-            "score_threshold_enabled": score_threshold is not None,
-            "score_threshold": score_threshold or 0.0,
-        },
-    }
-
+        with _cache_lock:
+            hit = _cache.get(key)
+        if hit:
+            return hit["chunks"]
     try:
-        resp = requests.post(
-            f"{DIFY_BASE_URL}/datasets/{dataset_id}/retrieve",
-            headers={
-                "Authorization": f"Bearer {DIFY_DATASET_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        records = resp.json().get("records", [])
+        r = _client().post(f"{RAG_SERVICE_URL}/v1/retrieve", headers=_headers(), json=_payload(tenant, query, top_k, hints))
+        r.raise_for_status()
+        data = r.json()
+        _record(True)
     except Exception as e:
-        print(f"rag_retriever: retrieval failed for store '{store_identifier}' ({e!r}), returning no context")
+        _record(False)
+        print(f"rag_retriever: retrieval failed for '{tenant}' ({e!r}), returning no context")
         return []
+    return _finish(tenant, data, score_threshold, key, use_cache)
 
-    chunks = [
-        {
-            "content": r.get("segment", {}).get("content", ""),
-            "score": r.get("score", 0.0),
-            "document": r.get("segment", {}).get("document", {}).get("name", ""),
-        }
-        for r in records
-        if r.get("segment", {}).get("content")
-    ]
-    # Update Langfuse span with retrieval metadata (guard against missing client)
-    try:
-        cli = get_client()
-        if cli and hasattr(cli, "update_current_span"):
-            cli.update_current_span(metadata={"store": store_identifier, "chunks": len(chunks)})
-    except Exception:
-        pass
 
+async def aretrieve_context(store_identifier: str, query: str, top_k: int = 3, score_threshold: float | None = None,
+                            use_cache: bool = True, hints: dict | None = None) -> list[dict]:
+    """Async twin for async callers: does not block the event loop."""
+    if not _ready(store_identifier, query):
+        return []
+    tenant, hints = _tenant(store_identifier), _auto_hints(query, hints)
+    key = _cache_key(tenant, query, top_k, score_threshold, hints)
     if use_cache:
-        _retrieval_cache[key] = {"timestamp": time.time(), "chunks": chunks}
-
-    return chunks
+        _prune_expired()
+        with _cache_lock:
+            hit = _cache.get(key)
+        if hit:
+            return hit["chunks"]
+    try:
+        async with httpx.AsyncClient(timeout=RAG_TIMEOUT_S) as c:
+            r = await c.post(f"{RAG_SERVICE_URL}/v1/retrieve", headers=_headers(), json=_payload(tenant, query, top_k, hints))
+        r.raise_for_status()
+        data = r.json()
+        _record(True)
+    except Exception as e:
+        _record(False)
+        print(f"rag_retriever: retrieval failed for '{tenant}' ({e!r}), returning no context")
+        return []
+    return _finish(tenant, data, score_threshold, key, use_cache)
 
 
 def clear_cache() -> None:
-    """Optional manual reset, e.g. between test runs or if a KB was just re-indexed."""
-    _retrieval_cache.clear()
-    _dataset_id_cache.clear()
+    with _cache_lock:
+        _cache.clear()
+
+
+# ----------------------------------------------------------------------------- admin helpers
+# Used by dashboards, install / uninstall webhooks and scripts. They raise on failure (unlike retrieval).
+def _admin(method: str, path: str, **kw) -> dict:
+    if not (RAG_SERVICE_URL and RAG_API_KEY):
+        raise RuntimeError("RAG_SERVICE_URL / RAG_API_KEY not set")
+    r = httpx.request(method, f"{RAG_SERVICE_URL}{path}", headers=_headers(), timeout=120, **kw)
+    if r.status_code >= 400:
+        raise RuntimeError(f"RAG service {r.status_code}: {r.text[:300]}")
+    clear_cache()           # content changed: drop cached answers
+    return r.json()
+
+
+def ingest_text(store: str, doc_id: str, text: str, title: str = "", **fields) -> dict:
+    """fields: kind, policy_type, url, format ('markdown'|'html'|'text')."""
+    return _admin("POST", "/v1/documents", json={"tenant": _tenant(store), "doc_id": doc_id, "text": text,
+                                                "title": title, **fields})
+
+
+def delete_document(store: str, doc_id: str) -> dict:
+    return _admin("DELETE", "/v1/documents", json={"tenant": _tenant(store), "doc_id": doc_id})
+
+
+def list_documents(store: str) -> list[dict]:
+    return _admin("GET", "/v1/documents", params={"tenant": _tenant(store)})["documents"]
+
+
+def crawl_site(store: str, url: str, limit: int = 25, include_paths: list[str] | None = None,
+               exclude_paths: list[str] | None = None) -> dict:
+    return _admin("POST", "/v1/crawl", json={"tenant": _tenant(store), "url": url, "limit": limit,
+                                            "include_paths": include_paths, "exclude_paths": exclude_paths})
+
+
+def scrape_page(store: str, url: str) -> dict:
+    return _admin("POST", "/v1/scrape", json={"tenant": _tenant(store), "url": url})
+
+
+def job_status(job_id: str) -> dict:
+    return _admin("GET", f"/v1/crawl/{job_id}")
+
+
+def store_stats(store: str) -> dict:
+    return _admin("GET", f"/v1/tenants/{_tenant(store)}/stats")
+
+
+def delete_store(store: str) -> dict:
+    """Call from your uninstall and shop/redact webhooks."""
+    return _admin("DELETE", f"/v1/tenants/{_tenant(store)}")

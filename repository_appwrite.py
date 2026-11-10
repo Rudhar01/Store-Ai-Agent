@@ -75,6 +75,9 @@ from appwrite_client import (
 
 
 def _find_store_doc(shop_domain: str):
+    """Internal helper — returns the raw Appwrite document regardless of
+    the `uninstalled` flag. Callers that need the filtered version should
+    use get_store() instead."""
     if not DATABASE_ID or not shop_domain:
         return None
     try:
