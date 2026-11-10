@@ -155,10 +155,19 @@ def upsert_shop(shop_domain: str, access_token: str, scopes: str, plan: str = "f
         )
     # Always store the canonical *.myshopify.com domain so lookups are consistent
     canonical_domain = _normalize_domain(shop_domain) or shop_domain
+
+    # Appwrite string attribute 'scopes' has a max length limit (typically 1000 chars).
+    # When Shopify grants many permissions (especially on dev stores), it easily exceeds 1000 chars.
+    safe_scopes = str(scopes or "").strip()
+    if len(safe_scopes) > 950:
+        safe_scopes = safe_scopes[:950]
+        if "," in safe_scopes:
+            safe_scopes = safe_scopes.rsplit(",", 1)[0]
+
     existing = _find_store_doc(canonical_domain)
     full_data = {
         "access_token": access_token,
-        "scopes": scopes,
+        "scopes": safe_scopes,
         "uninstalled": False,
         "setup_completed": False if not existing else existing.get("setup_completed", False),
         "plan": plan or (existing.get("plan") if existing else "free") or "free",
@@ -166,7 +175,7 @@ def upsert_shop(shop_domain: str, access_token: str, scopes: str, plan: str = "f
     # Minimal data for fallback if the collection is missing optional attributes
     minimal_data = {
         "access_token": access_token,
-        "scopes": scopes,
+        "scopes": safe_scopes,
         "uninstalled": False,
     }
 
@@ -190,7 +199,18 @@ def upsert_shop(shop_domain: str, access_token: str, scopes: str, plan: str = "f
         return _try_write(full_data)
     except Exception as e:
         err_msg = str(e).lower()
-        # If the write failed because the collection doesn't have the new optional
+        # Fallback 1: If 'scopes' attribute length or formatting error occurred, try with truncated or empty scopes
+        if "scopes" in err_msg:
+            print(f"[upsert_shop] Scopes attribute error ({e!r}); retrying with shortened scopes")
+            short_data = dict(full_data)
+            short_data["scopes"] = (short_data.get("scopes") or "")[:250]
+            try:
+                return _try_write(short_data)
+            except Exception:
+                short_data["scopes"] = ""
+                return _try_write(short_data)
+
+        # Fallback 2: If the write failed because the collection doesn't have the new optional
         # attributes (plan / setup_completed) yet, fall back to the minimal payload.
         if "plan" in err_msg or "setup_completed" in err_msg or "unknown attribute" in err_msg or "attribute not found" in err_msg or "invalid attribute" in err_msg:
             print(f"[upsert_shop] Full write failed ({e!r}); retrying with minimal data (run init_new_appwrite_db.py to add missing attributes)")

@@ -287,17 +287,26 @@ async def auth_callback(request: Request):
     timezone_val = shop_info.get("timezone", "UTC")
 
     # Upsert store document with plan, setup_completed, uninstalled, etc.
-    store = repo.upsert_shop(shop, access_token, granted_scopes, plan=plan_name)
-    store_obj.id = store["$id"]
+    try:
+        store = repo.upsert_shop(shop, access_token, granted_scopes, plan=plan_name)
+        store_obj.id = store["$id"]
+    except Exception as e:
+        print(f"[callback] CRITICAL: Failed to upsert store {shop!r}: {e!r}")
+        # Return a helpful error or retry with minimal params
+        return PlainTextResponse(f"Failed to save store {shop} in database: {e}", status_code=500)
 
-    repo.ensure_customization(store["$id"])
-    repo.ensure_features(store["$id"])
-    repo.ensure_store_info(
-        store["$id"],
-        business_name=business_name,
-        support_email=support_email,
-        timezone=timezone_val,
-    )
+    try:
+        repo.ensure_customization(store["$id"])
+        repo.ensure_features(store["$id"])
+        repo.ensure_store_info(
+            store["$id"],
+            business_name=business_name,
+            support_email=support_email,
+            timezone=timezone_val,
+        )
+    except Exception as e:
+        print(f"[callback] Warning: secondary doc creation had non-fatal error: {e!r}")
+
     is_new_store = not repo.has_dashboard_user(store["$id"])
 
     # Directly add widget script to the store upon app install
