@@ -114,7 +114,7 @@ def _pkey(shop: str, session_id: str) -> str:
 
 
 HISTORY: dict[str, dict] = {}
-HISTORY_TTL_SECONDS = 1800
+HISTORY_TTL_SECONDS = 7200  # 2 hours — covers a full shopping session
 HISTORY_MAX_MESSAGES = 6
 
 
@@ -1621,6 +1621,113 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
     return {"found": False}
 
 
+@router.get("/chat-history")
+async def chat_history(shop: str = "", session_id: str = "", customer_id: str = "", customer_email: str = "", limit: int = 4):
+    """Retrieves previous 3-4 chat messages/turns for this session or customer,
+    allowing context to be clearly identified when the shopper refreshes or pulls up history."""
+    if not shop:
+        return {"status": "error", "message": "Missing shop parameter", "chats": []}
+
+    limit = max(1, min(int(limit or 4), 10))
+    chats = []
+
+    # 1. First check in-memory HISTORY turns for this session
+    key = _pkey(shop, session_id)
+    in_mem_turns = _history_for(key)
+    if in_mem_turns:
+        pair_list = []
+        i = 0
+        while i < len(in_mem_turns) - 1:
+            u_role, u_text = in_mem_turns[i]
+            a_role, a_text = in_mem_turns[i+1]
+            if u_role == "user" and a_role == "assistant":
+                pair_list.append({
+                    "id": f"mem_{i}",
+                    "user_message": u_text,
+                    "agent_reply": a_text,
+                    "source": "current_session"
+                })
+                i += 2
+            else:
+                i += 1
+        chats.extend(pair_list[-limit:])
+
+    # 2. Check customer-keyed history in memory if available
+    cid = (customer_id or "").strip()
+    cmail = (customer_email or "").strip().lower()
+    if len(chats) < limit and cid:
+        cust_key = f"{shop}::cust_{cid}"
+        cust_turns = _history_for(cust_key)
+        if cust_turns:
+            i = 0
+            while i < len(cust_turns) - 1:
+                u_role, u_text = cust_turns[i]
+                a_role, a_text = cust_turns[i+1]
+                if u_role == "user" and a_role == "assistant":
+                    if not any(c.get("user_message") == u_text for c in chats):
+                        chats.append({
+                            "id": f"cust_mem_{i}",
+                            "user_message": u_text,
+                            "agent_reply": a_text,
+                            "source": "customer_session"
+                        })
+                    i += 2
+                else:
+                    i += 1
+
+    # 3. Pull from Appwrite request_logs for this store
+    store = _get_store(shop)
+    store_id = getattr(store, "id", None) or getattr(store, "$id", None) or (store.get("$id") if isinstance(store, dict) else None)
+    if len(chats) < limit and store_id:
+        try:
+            logs = repo.get_recent_logs(store_id, limit=30)
+            for log in logs:
+                msg = (log.get("message") or "").strip()
+                reply = (log.get("reply") or "").strip()
+                entities_raw = log.get("entities") or "{}"
+                if isinstance(entities_raw, str):
+                    try:
+                        entities = json.loads(entities_raw)
+                    except Exception:
+                        entities = {}
+                else:
+                    entities = entities_raw or {}
+
+                log_session = entities.get("session_id")
+                log_cid = entities.get("customer_id")
+                log_email = entities.get("email") or entities.get("customer_email")
+
+                is_match = False
+                if cid and log_cid and str(log_cid) == str(cid):
+                    is_match = True
+                elif cmail and log_email and str(log_email).lower() == cmail:
+                    is_match = True
+                elif session_id and log_session and str(log_session) == str(session_id):
+                    is_match = True
+                elif not cid and not session_id:
+                    is_match = True
+
+                if is_match and msg and reply and not msg.startswith("[card-redacted]"):
+                    if not any(c.get("user_message") == msg for c in chats):
+                        chats.append({
+                            "id": log.get("$id") or f"log_{len(chats)}",
+                            "user_message": msg,
+                            "agent_reply": reply,
+                            "source": "store_logs"
+                        })
+                if len(chats) >= limit:
+                    break
+        except Exception as e:
+            print(f"chatbot_widget: chat_history logs query failed: {e!r}")
+
+    return {
+        "status": "success",
+        "shop": shop,
+        "count": len(chats),
+        "chats": chats[:limit]
+    }
+
+
 @router.get("/widget.js")
 async def widget_js():
     return Response(
@@ -1650,6 +1757,7 @@ WIDGET_JS = r"""
     saveCredentialsEndpoint: ORIGIN + "/save-payment-credentials",
     initiatePaymentEndpoint: ORIGIN + "/initiate-payment",
     verifyOtpEndpoint: ORIGIN + "/verify-otp",
+    chatHistoryEndpoint: ORIGIN + "/chat-history?shop=" + encodeURIComponent(SHOP),
     configEndpoint: ORIGIN + "/widget-config?shop=" + encodeURIComponent(SHOP),
     customerProfileEndpoint: ORIGIN + "/customer-profile?shop=" + encodeURIComponent(SHOP),
     customerSessionPath: (THIS_SCRIPT && THIS_SCRIPT.dataset.proxyPath) || "/apps/ai-agent/customer-session"
@@ -1693,10 +1801,19 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .header h1 { margin:0; font-size:13px; font-weight:700; color:#1a1a1a; }",
     "#ai-chat-widget-root .header-cust-badge { display:none; align-items:center; font-size:9.5px; font-weight:600; color:#166534; background:#dcfce7; border:1px solid #bbf7d0; padding:2px 7px; border-radius:999px; max-width:115px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-left:4px; }",
     "#ai-chat-widget-root .header-right { margin-left:auto; display:flex; align-items:center; gap:6px; }",
-    "#ai-chat-widget-root .icon-btn { position:relative; width:24px; height:24px; border-radius:50%; background:#f5f5f5; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; }",
+    "#ai-chat-widget-root .icon-btn { position:relative; width:24px; height:24px; border-radius:50%; background:#f5f5f5; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:transform .2s ease; }",
     "#ai-chat-widget-root .icon-btn svg { width:14px; height:14px; stroke:#444; }",
     "#ai-chat-widget-root .icon-btn.active { background:#2b2b2b; }",
     "#ai-chat-widget-root .icon-btn.active svg { stroke:#fff; }",
+    "#ai-chat-widget-root .icon-btn.spinning svg { animation:aiRotate .8s linear infinite; }",
+    "@keyframes aiRotate { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }",
+    "#ai-chat-widget-root .history-context-box { background:#f8fafc; border:1px dashed #cbd5e1; border-radius:12px; padding:10px; margin:6px 0; font-size:11px; color:#334155; }",
+    "#ai-chat-widget-root .history-context-header { font-weight:700; font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:#64748b; margin-bottom:6px; display:flex; align-items:center; justify-content:space-between; }",
+    "#ai-chat-widget-root .history-item { margin-bottom:8px; padding-bottom:6px; border-bottom:1px solid #e2e8f0; }",
+    "#ai-chat-widget-root .history-item:last-child { margin-bottom:0; padding-bottom:0; border-bottom:none; }",
+    "#ai-chat-widget-root .history-q { font-weight:600; color:#0f172a; margin-bottom:2px; }",
+    "#ai-chat-widget-root .history-a { color:#475569; line-height:1.35; }",
+    "#ai-chat-widget-root .history-indicator { font-size:9.5px; color:#059669; font-weight:600; display:inline-flex; align-items:center; gap:3px; }",
     "#ai-chat-widget-root .cart-badge { position:absolute; top:-4px; right:-4px; background:#d64545; color:#fff; font-size:9.5px; font-weight:700; min-width:16px; height:16px; border-radius:999px; display:none; align-items:center; justify-content:center; padding:0 3px; }",
     "#ai-chat-widget-root .cart-badge.show { display:flex; }",
     "#ai-chat-widget-root #expandToggle .icon-collapse { display:none; }",
@@ -1815,6 +1932,9 @@ WIDGET_JS = r"""
         '<div class="avatar" id="headerAvatar">AI</div>' +
         '<h1 id="headerName">AI Assistant</h1>' +
         '<div class="header-right">' +
+          '<button class="icon-btn" id="historyBtn" title="Load previous chats">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.95"/></svg>' +
+          "</button>" +
           '<button class="icon-btn" id="ttsToggle" title="Toggle spoken replies">' +
             '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg>' +
           "</button>" +
@@ -1867,6 +1987,7 @@ WIDGET_JS = r"""
   var cartBadge = document.getElementById("cartBadge");
   var headerCart = document.getElementById("headerCart");
   var ttsToggle = document.getElementById("ttsToggle");
+  var historyBtn = document.getElementById("historyBtn");
   var expandToggle = document.getElementById("expandToggle");
   var headerAvatar = document.getElementById("headerAvatar");
   var headerName = document.getElementById("headerName");
@@ -2027,6 +2148,11 @@ WIDGET_JS = r"""
       var isOpen = widget.classList.toggle("open", true);
       fab.classList.toggle("open", true);
       renderQuickActions();
+      if (_firstOpen) {
+        _firstOpen = false;
+        restoreState();
+        loadChatHistory();
+      }
       persistState();
       if (activeOrder) {
         var ordQuery = activeOrder.order_number ? "Where is my order #" + activeOrder.order_number : "Where is my order?";
@@ -2770,6 +2896,103 @@ WIDGET_JS = r"""
     { icon: "🔍", label: "Search products", command: "Show me products" }
   ];
 
+  var SESSION_TTL_MS = (customerId || customerEmail) ? 7200000 : 1800000; // 2h logged-in, 30m anon
+
+  function restoreState() {
+    try {
+      var raw = sessionStorage.getItem(STATE_KEY);
+      if (!raw) return;
+      var saved = JSON.parse(raw);
+      // Restore chat history from sessionStorage (no server round-trip)
+      if (saved.history && saved.history.length > 0) {
+        // Replay previous turns into the conversation div
+        // Hide greeting bubble since we have real history
+        if (greetingBubble) greetingBubble.style.display = "none";
+        // Add a small divider first
+        var divider = document.createElement("div");
+        divider.className = "history-divider";
+        divider.textContent = "— Continuing conversation —";
+        conversation.appendChild(divider);
+        saved.history.forEach(function (item) {
+          if (item.type === "bubble") {
+            var el = document.createElement("div");
+            el.className = "bubble " + (item.who || "bot");
+            el.textContent = item.text || "";
+            conversation.appendChild(el);
+          }
+        });
+        chatHistory = saved.history;
+        autoResizeConversation();
+      }
+    } catch (e) {}
+  }
+
+  var _historyLoaded = false;
+  function loadChatHistory() {
+    if (_historyLoaded) return;
+    _historyLoaded = true;
+    if (!CFG.chatHistoryEndpoint) return;
+    var url = CFG.chatHistoryEndpoint +
+      "&session_id=" + encodeURIComponent(SESSION_ID) +
+      "&customer_id=" + encodeURIComponent(customerId || "") +
+      "&customer_email=" + encodeURIComponent(customerEmail || "");
+    if (historyBtn) historyBtn.classList.add("spinning");
+    fetch(url)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (historyBtn) historyBtn.classList.remove("spinning");
+        if (!data || !data.chats || data.chats.length === 0) return;
+        // Build history context box above greeting bubble
+        var box = document.createElement("div");
+        box.className = "history-context-box";
+        box.id = "chatHistoryBox";
+        var header = document.createElement("div");
+        header.className = "history-context-header";
+        var indicator = document.createElement("span");
+        indicator.className = "history-indicator";
+        indicator.innerHTML = "&#x2713; Previous chats";
+        var closeBtn = document.createElement("button");
+        closeBtn.textContent = "\u00d7";
+        closeBtn.style.cssText = "background:none;border:none;cursor:pointer;font-size:14px;color:#94a3b8;line-height:1;padding:0;";
+        closeBtn.addEventListener("click", function () { box.remove(); });
+        header.appendChild(indicator);
+        header.appendChild(closeBtn);
+        box.appendChild(header);
+        data.chats.forEach(function (chat) {
+          var item = document.createElement("div");
+          item.className = "history-item";
+          var q = document.createElement("div");
+          q.className = "history-q";
+          q.textContent = chat.user_message || "";
+          var a = document.createElement("div");
+          a.className = "history-a";
+          a.textContent = (chat.bot_response || "").slice(0, 160) + ((chat.bot_response || "").length > 160 ? "…" : "");
+          item.appendChild(q);
+          item.appendChild(a);
+          box.appendChild(item);
+        });
+        var divider = document.createElement("div");
+        divider.className = "history-divider";
+        divider.textContent = "— Start of new conversation —";
+        conversation.insertBefore(box, conversation.firstChild);
+        conversation.insertBefore(divider, greetingBubble || conversation.firstChild);
+        autoResizeConversation();
+      })
+      .catch(function () {
+        if (historyBtn) historyBtn.classList.remove("spinning");
+        _historyLoaded = false; // allow retry on next open
+      });
+  }
+
+  if (historyBtn) {
+    historyBtn.addEventListener("click", function () {
+      _historyLoaded = false; // force reload on manual click
+      var existing = document.getElementById("chatHistoryBox");
+      if (existing) existing.remove();
+      loadChatHistory();
+    });
+  }
+
   function renderQuickActions() {
     if (quickActionsRendered) return;
     quickActionsRendered = true;
@@ -2851,12 +3074,18 @@ WIDGET_JS = r"""
     micBtn.classList.toggle("has-text", input.value.trim().length > 0);
   });
 
+  var _firstOpen = true;
   fab.addEventListener("click", function () {
     syncCustomerSession();
     var isOpen = widget.classList.toggle("open");
     fab.classList.toggle("open", isOpen);
     if (isOpen) {
       hideOutsideGreeting(false);
+      if (_firstOpen) {
+        _firstOpen = false;
+        restoreState();       // replay sessionStorage history without network
+        loadChatHistory();    // also fetch server-side previous chats
+      }
       renderQuickActions();
     }
     persistState();
