@@ -860,11 +860,14 @@ def setup_page(shop: str = ""):
                             if raw_domain.startswith(_prefix):
                                 raw_domain = raw_domain[len(_prefix):]
                         raw_domain = raw_domain.split("/")[0]  # drop any path component
-                        # Always try the canonical *.myshopify.com form first
+                        # Ensure it ends in .myshopify.com
+                        if "." not in raw_domain:
+                            raw_domain = f"{raw_domain}.myshopify.com"
+
+                        # 1. Normal lookup (active store)
                         store = repo.get_store(raw_domain)
-                        # Fallback: if the app was reinstalled after a previous uninstall the
-                        # `uninstalled` flag may still be True (OAuth callback may have cleared it
-                        # but a timing race left the cached doc stale). Try the raw doc directly.
+
+                        # 2. Fallback: store exists but is marked uninstalled — reinstall fixed it
                         if not store:
                             store = repo._find_store_doc(raw_domain)
                             if store and store.get("uninstalled"):
@@ -880,24 +883,33 @@ def setup_page(shop: str = ""):
                                 except Exception as _e:
                                     print(f"[setup] could not clear uninstalled flag: {_e!r}")
                                     store = None
+
+                        # 3. Auto-register: OAuth callback may have failed to write (wrong endpoint,
+                        #    missing env vars, DB schema mismatch). Create a placeholder record so
+                        #    the merchant can at least set up their account now. The access token
+                        #    will be filled in properly on the next app install.
                         if not store:
-                            # Give the merchant a helpful error that shows exactly what domain
-                            # was looked up and what env vars are configured.
                             from appwrite_client import DATABASE_ID as _DBID
                             if not _DBID:
                                 account_error.text = (
                                     "Appwrite is not configured (APPWRITE_DATABASE_ID is missing). "
                                     "Set the required env vars and restart the server."
                                 )
-                            else:
+                                return
+                            try:
+                                store = repo.upsert_shop(raw_domain, "", "")
+                                repo.ensure_customization(store["$id"])
+                                repo.ensure_features(store["$id"])
+                                repo.ensure_store_info(store["$id"])
+                                print(f"[setup wizard] Auto-registered store '{raw_domain}' (access token missing — reinstall app to get a token)")
+                            except Exception as _e:
+                                logger.error("setup wizard: auto-register store failed for %r: %s", raw_domain, _e)
                                 account_error.text = (
-                                    f"Store \"{raw_domain}\" not found in the database. "
-                                    "Make sure you completed the Shopify app install flow first "
-                                    "(visit your Shopify admin → Apps → install this app). "
-                                    "If you already did that, check that the domain above exactly "
-                                    "matches your *.myshopify.com domain."
+                                    f"Store \"{raw_domain}\" was not found and could not be auto-registered. "
+                                    "Please reinstall the app from your Shopify Partners dashboard and try again."
                                 )
-                            return
+                                return
+
                         if repo.has_dashboard_user(store["$id"]):
                             account_error.text = "This store already has a dashboard login — log in instead."
                             return

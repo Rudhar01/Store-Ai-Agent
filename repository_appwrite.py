@@ -74,22 +74,54 @@ from appwrite_client import (
 )
 
 
+def _normalize_domain(domain: str) -> str:
+    """Normalize a shop domain to canonical *.myshopify.com form."""
+    if not domain:
+        return ""
+    d = str(domain).strip().lower()
+    # Strip protocol
+    d = re.sub(r"^https?://", "", d)
+    # Strip path / query
+    d = d.split("/")[0].split("?")[0].strip()
+    # Handle admin.shopify.com/store/<slug> URLs
+    m = re.search(r"admin\.shopify\.com/store/([^/?]+)", str(domain).lower())
+    if m:
+        return f"{m.group(1)}.myshopify.com"
+    # If no dot at all, assume it's just the store slug
+    if "." not in d and d:
+        return f"{d}.myshopify.com"
+    return d
+
+
 def _find_store_doc(shop_domain: str):
     """Internal helper — returns the raw Appwrite document regardless of
     the `uninstalled` flag. Callers that need the filtered version should
-    use get_store() instead."""
+    use get_store() instead.
+
+    Tries multiple domain candidates so that 'mystore', 'mystore.myshopify.com',
+    or 'https://mystore.myshopify.com' all resolve to the same record.
+    """
     if not DATABASE_ID or not shop_domain:
         return None
-    try:
-        result = databases.list_documents(
-            DATABASE_ID, STORES_COLLECTION,
-            queries=[Query.equal("shop_domain", shop_domain)],
-        )
-        docs = _normalize_list(result)["documents"]
-        return docs[0] if docs else None
-    except Exception as e:
-        print(f"repository_appwrite: _find_store_doc({shop_domain!r}) failed: {e!r}")
-        return None
+    canonical = _normalize_domain(shop_domain)
+    raw = str(shop_domain).strip().lower()
+    # Build a deduplicated list of candidates to try
+    candidates: list[str] = []
+    for c in [canonical, raw, str(shop_domain).strip()]:
+        if c and c not in candidates:
+            candidates.append(c)
+    for cand in candidates:
+        try:
+            result = databases.list_documents(
+                DATABASE_ID, STORES_COLLECTION,
+                queries=[Query.equal("shop_domain", cand)],
+            )
+            docs = _normalize_list(result)["documents"]
+            if docs:
+                return docs[0]
+        except Exception as e:
+            print(f"repository_appwrite: _find_store_doc({cand!r}) failed: {e!r}")
+    return None
 
 
 def get_store(shop_domain: str) -> dict | None:
@@ -121,29 +153,53 @@ def upsert_shop(shop_domain: str, access_token: str, scopes: str, plan: str = "f
             "The store record for %r CANNOT be saved. "
             "Set the env var and restart the server." % shop_domain
         )
-    existing = _find_store_doc(shop_domain)
-    data = {
+    # Always store the canonical *.myshopify.com domain so lookups are consistent
+    canonical_domain = _normalize_domain(shop_domain) or shop_domain
+    existing = _find_store_doc(canonical_domain)
+    full_data = {
         "access_token": access_token,
         "scopes": scopes,
         "uninstalled": False,
         "setup_completed": False if not existing else existing.get("setup_completed", False),
         "plan": plan or (existing.get("plan") if existing else "free") or "free",
     }
-    if existing:
-        doc = databases.update_document(
-            DATABASE_ID, STORES_COLLECTION, existing["$id"],
-            data=data,
+    # Minimal data for fallback if the collection is missing optional attributes
+    minimal_data = {
+        "access_token": access_token,
+        "scopes": scopes,
+        "uninstalled": False,
+    }
+
+    def _try_write(data: dict) -> dict:
+        if existing:
+            doc = databases.update_document(
+                DATABASE_ID, STORES_COLLECTION, existing["$id"],
+                data=data,
+            )
+            print(f"[upsert_shop] Updated existing store record for {canonical_domain!r} (id={existing['$id']!r})")
+            return doc
+        d = {**data, "shop_domain": canonical_domain}
+        doc = databases.create_document(
+            DATABASE_ID, STORES_COLLECTION, ID.unique(),
+            data=d,
         )
-        print(f"[upsert_shop] Updated existing store record for {shop_domain!r} (id={existing['$id']!r})")
+        print(f"[upsert_shop] Created new store record for {canonical_domain!r} (id={doc.get('$id')!r})")
         return doc
 
-    data["shop_domain"] = shop_domain
-    doc = databases.create_document(
-        DATABASE_ID, STORES_COLLECTION, ID.unique(),
-        data=data,
-    )
-    print(f"[upsert_shop] Created new store record for {shop_domain!r} (id={doc.get('$id')!r})")
-    return doc
+    try:
+        return _try_write(full_data)
+    except Exception as e:
+        err_msg = str(e).lower()
+        # If the write failed because the collection doesn't have the new optional
+        # attributes (plan / setup_completed) yet, fall back to the minimal payload.
+        if "plan" in err_msg or "setup_completed" in err_msg or "unknown attribute" in err_msg or "attribute not found" in err_msg or "invalid attribute" in err_msg:
+            print(f"[upsert_shop] Full write failed ({e!r}); retrying with minimal data (run init_new_appwrite_db.py to add missing attributes)")
+            try:
+                return _try_write(minimal_data)
+            except Exception as e2:
+                print(f"[upsert_shop] Minimal write also failed for {canonical_domain!r}: {e2!r}")
+                raise
+        raise
 
 
 def get_shop_token(shop_domain: str) -> str | None:

@@ -138,6 +138,47 @@ def health():
     return {"status": "healthy"}
 
 
+@router.get("/debug/store")
+async def debug_store(shop: str = ""):
+    """Diagnostic endpoint — shows what the DB says about a shop domain.
+    Usage: GET /debug/store?shop=your-store.myshopify.com
+    Remove or secure this route once debugging is complete.
+    """
+    import appwrite_client as _awc
+    result: dict = {
+        "query_domain": shop,
+        "normalized": repo._normalize_domain(shop) if shop else None,
+        "appwrite_endpoint": _awc.APPWRITE_ENDPOINT,
+        "appwrite_project_id": _awc.APPWRITE_PROJECT_ID,
+        "database_id": _awc.DATABASE_ID,
+        "stores_collection": _awc.STORES_COLLECTION,
+    }
+    if shop:
+        try:
+            store = repo.get_store(shop)
+            result["store_found"] = store is not None
+            if store:
+                result["store_id"] = store.get("$id")
+                result["store_domain"] = store.get("shop_domain")
+                result["has_token"] = bool(store.get("access_token"))
+                result["uninstalled"] = store.get("uninstalled")
+                result["plan"] = store.get("plan")
+                result["setup_completed"] = store.get("setup_completed")
+        except Exception as e:
+            result["store_lookup_error"] = str(e)
+        # Also try listing first 5 stores
+        try:
+            from appwrite_client import databases, DATABASE_ID, STORES_COLLECTION
+            from appwrite.query import Query
+            from appwrite_client import _normalize_list
+            docs_res = databases.list_documents(DATABASE_ID, STORES_COLLECTION, queries=[Query.limit(5)])
+            result["total_stores_in_db"] = docs_res.get("total", "unknown") if isinstance(docs_res, dict) else "unknown"
+            result["sample_domains"] = [d.get("shop_domain") for d in _normalize_list(docs_res).get("documents", [])]
+        except Exception as e:
+            result["store_list_error"] = str(e)
+    return result
+
+
 # --------------------------------------------------------------------
 # Step 1: redirect to Shopify's permission screen
 # --------------------------------------------------------------------
