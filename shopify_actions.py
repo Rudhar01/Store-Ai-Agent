@@ -2009,6 +2009,94 @@ async def clarify(store, entities: dict, session_id: str) -> dict:
     }
 
 
+async def _find_store_product(store, product_query: str, size: str = "", color: str = "") -> tuple[dict | None, dict | None, bool, bool]:
+    """Finds a product in the store matching product_query, resolves best variant,
+    and checks if the item is currently in stock.
+    Returns: (matched_product_dict, best_variant_dict, is_in_stock, catalog_checked_successfully)
+    """
+    if not product_query:
+        return None, None, False, False
+
+    try:
+        resp = await _get(store, "products.json", {"status": "active", "limit": 100})
+        if resp.status_code != 200:
+            return None, None, False, False
+        all_products = resp.json().get("products", [])
+    except Exception:
+        return None, None, False, False
+
+    if not all_products:
+        return None, None, False, True
+
+    tokens = _clean_search_tokens(str(product_query))
+    q_lower = str(product_query).lower().strip()
+
+    scored = []
+    for p in all_products:
+        p_title = (p.get("title") or "").lower()
+        p_handle = (p.get("handle") or "").lower()
+
+        if q_lower == p_title or q_lower == p_handle:
+            score = 10.0
+        elif q_lower in p_title or p_title in q_lower:
+            score = 6.0
+        elif tokens:
+            score = _score_product_match(p, tokens)
+        else:
+            score = 0.0
+
+        if score >= 0.75:
+            scored.append((score, p))
+
+    if not scored:
+        return None, None, False, True
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_p = scored[0][1]
+
+    variants = best_p.get("variants", [])
+    if not variants:
+        return best_p, None, False, True
+
+    chosen_variant = None
+    target_size = size.lower().strip()
+    target_color = color.lower().strip()
+
+    if target_size or target_color:
+        for v in variants:
+            opts = " ".join(str(o) for o in [v.get("option1"), v.get("option2"), v.get("option3")] if o).lower()
+            if target_size and target_size not in opts:
+                continue
+            if target_color and target_color not in opts:
+                continue
+            chosen_variant = v
+            break
+
+    if not chosen_variant:
+        for v in variants:
+            is_managed = (v.get("inventory_management") or "").lower() == "shopify"
+            policy_continue = (v.get("inventory_policy") or "").lower() == "continue"
+            qty = v.get("inventory_quantity")
+            if not is_managed or policy_continue or (qty is not None and int(qty) > 0):
+                chosen_variant = v
+                break
+        if not chosen_variant:
+            chosen_variant = variants[0]
+
+    is_managed = (chosen_variant.get("inventory_management") or "").lower() == "shopify"
+    policy_continue = (chosen_variant.get("inventory_policy") or "").lower() == "continue"
+    qty = chosen_variant.get("inventory_quantity")
+
+    if not is_managed or policy_continue:
+        is_in_stock = True
+    elif qty is not None and int(qty) > 0:
+        is_in_stock = True
+    else:
+        is_in_stock = False
+
+    return best_p, chosen_variant, is_in_stock, True
+
+
 # ==========================================================================
 # RESTOCK & PRICE-DROP ALERTS (Autonomous Shopper Watchers)
 # ==========================================================================
@@ -2019,36 +2107,64 @@ async def subscribe_restock(store, entities: dict, session_id: str, customer_id:
     email = (entities.get("email") or "").strip().lower()
     product_query = entities.get("product_name_or_id") or entities.get("query") or entities.get("product_title") or ""
     size = (entities.get("size") or "").strip()
+    color = (entities.get("color") or "").strip()
     target_price = (str(entities.get("target_price") or "")).strip()
     alert_type = "price_drop" if target_price else "restock"
 
+    # Step 1: Verify product name & find the product in the store catalog
+    prod, variant, in_stock, catalog_checked = await _find_store_product(store, str(product_query), size=size, color=color)
+
+    if catalog_checked and not prod:
+        clean_name = str(product_query).strip() or "that product"
+        return {
+            "status": "not_found",
+            "product_title": clean_name,
+            "message": f"I couldn't find '{clean_name}' in our store catalog. Please check the product name or explore our active collection.",
+        }
+
+    prod_title = (prod.get("title") if prod else None) or str(product_query) or "Product"
+    variant_id = (str(variant.get("id")) if variant else None) or str(entities.get("variant_id") or "")
+    price = float(variant.get("price", 0) or 0) if variant else 0.0
+
+    product_card = {
+        "id": variant_id,
+        "product_id": str(prod.get("id", "")) if prod else "",
+        "name": prod_title,
+        "price": price,
+        "image": (prod.get("image") or {}).get("src", "") if prod else "",
+        "handle": prod.get("handle", "") if prod else "",
+        "url": f"https://{shop}/products/{prod.get('handle', '')}" if (prod and prod.get("handle")) else "",
+        "in_stock": in_stock,
+    }
+
+    # Step 2: If the product is IN STOCK, inform the user directly on chat!
+    if in_stock:
+        size_label = f" in size {size}" if size else ""
+        return {
+            "status": "already_in_stock",
+            "product_title": prod_title,
+            "results": [product_card],
+            "message": f"Good news! '{prod_title}'{size_label} is currently in stock and available right now! You don't have to wait for a restock alert.",
+        }
+
+    # Step 3: Product is OUT OF STOCK.
+    # Check whether shopper provided email so we can email them when back in stock.
     if not email:
         return {
             "status": "email_required",
-            "message": "Please provide your email address so I can notify you the moment this item is back in stock.",
+            "product_title": prod_title,
+            "product_id": str(prod.get("id", "")) if prod else "",
+            "variant_id": variant_id,
+            "size": size,
+            "message": f"'{prod_title}' is currently out of stock. Please share your email address so I can email you the moment it's available again!",
         }
-
-    # Resolve product title & variant ID if available
-    product_title = product_query or "Product"
-    product_id = ""
-    variant_id = entities.get("variant_id") or ""
-
-    if product_query:
-        try:
-            prod, _ = await _resolve_product(store, str(product_query))
-            if prod:
-                product_title = prod.get("name") or product_title
-                variant_id = str(prod.get("id") or variant_id)
-                product_id = str(prod.get("product_id") or "")
-        except Exception:
-            pass
 
     record = _repo.save_restock_alert(
         store_id=store_id,
         shop_domain=shop,
         customer_email=email,
-        product_id=product_id or variant_id or product_title,
-        product_title=product_title,
+        product_id=str(prod.get("id", "")) if prod else (variant_id or prod_title),
+        product_title=prod_title,
         variant_id=str(variant_id),
         size=size,
         target_price=target_price,
@@ -2058,14 +2174,14 @@ async def subscribe_restock(store, entities: dict, session_id: str, customer_id:
     size_text = f" (Size {size})" if size else ""
     return {
         "status": "alert_subscribed",
-        "product_title": product_title,
+        "product_title": prod_title,
         "email": email,
         "size": size,
         "alert_type": alert_type,
         "subscription_id": record.get("$id") or record.get("id"),
         "message": (
-            f"You're all set! We'll email you at {email} the moment {product_title}{size_text} is back in stock. "
-            f"You won't miss it!"
+            f"You're all set! '{prod_title}'{size_text} is currently out of stock, but we will email you at {email} "
+            f"the moment fresh stock arrives. You won't miss it!"
         ),
     }
 

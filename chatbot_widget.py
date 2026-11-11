@@ -126,19 +126,23 @@ HISTORY_TTL_SECONDS = 7200  # 2 hours — covers a full shopping session
 HISTORY_MAX_MESSAGES = 6
 
 
-def _remember_turn(key: str, user_text: str, bot_reply: str) -> None:
+def _remember_turn(key: str, user_text: str, bot_reply: str, customer_id: str | None = None, visitor_id: str | None = None) -> None:
     now = time.time()
-    for k in [k for k, v in HISTORY.items() if v["ts"] < now - HISTORY_TTL_SECONDS]:
+    for k in [k for k, v in HISTORY.items() if v.get("ts", 0) < now - HISTORY_TTL_SECONDS]:
         HISTORY.pop(k, None)
-    entry = HISTORY.setdefault(key, {"ts": now, "turns": []})
+    entry = HISTORY.setdefault(key, {"ts": now, "turns": [], "customer_id": customer_id, "visitor_id": visitor_id})
     entry["ts"] = now
+    if customer_id:
+        entry["customer_id"] = str(customer_id)
+    if visitor_id:
+        entry["visitor_id"] = str(visitor_id)
     entry["turns"] += [("user", user_text[:300]), ("assistant", (bot_reply or "")[:300])]
     entry["turns"] = entry["turns"][-HISTORY_MAX_MESSAGES:]
 
 
 def _history_for(key: str) -> list:
     entry = HISTORY.get(key)
-    return list(entry["turns"]) if entry and entry["ts"] > time.time() - HISTORY_TTL_SECONDS else []
+    return list(entry["turns"]) if entry and entry.get("ts", 0) > time.time() - HISTORY_TTL_SECONDS else []
 
 
 def _set_pending(key: str, **fields) -> None:
@@ -223,18 +227,36 @@ class VerifyOtpRequest(BaseModel):
 _CUSTOMER_SESSIONS: dict[tuple[str, str], str] = {}
 _CUSTOMER_EMAILS: dict[tuple[str, str], str] = {}
 _CUSTOMER_NAMES: dict[tuple[str, str], str] = {}
+_CUSTOMER_VISITORS: dict[tuple[str, str], str] = {}
+_SESSION_TIMESTAMPS: dict[tuple[str, str], float] = {}
 
 
-def _remember_customer(shop: str, session_id: str, customer_id: str | None, email: str | None = None, name: str | None = None) -> None:
+def _clear_session(shop: str, session_id: str) -> None:
     key = (shop, session_id)
+    _CUSTOMER_SESSIONS.pop(key, None)
+    _CUSTOMER_EMAILS.pop(key, None)
+    _CUSTOMER_NAMES.pop(key, None)
+    _CUSTOMER_VISITORS.pop(key, None)
+    _SESSION_TIMESTAMPS.pop(key, None)
+    HISTORY.pop(_pkey(shop, session_id), None)
+
+
+def _remember_customer(shop: str, session_id: str, customer_id: str | None, email: str | None = None, name: str | None = None, visitor_id: str | None = None) -> None:
+    key = (shop, session_id)
+    now = time.time()
+    _SESSION_TIMESTAMPS[key] = now
     if customer_id:
         _CUSTOMER_SESSIONS[key] = str(customer_id)
     elif customer_id is None and not email:
         _CUSTOMER_SESSIONS.pop(key, None)
     if email:
         _CUSTOMER_EMAILS[key] = str(email).strip().lower()
+    elif email is None and not customer_id:
+        _CUSTOMER_EMAILS.pop(key, None)
     if name:
         _CUSTOMER_NAMES[key] = str(name).strip()
+    if visitor_id:
+        _CUSTOMER_VISITORS[key] = str(visitor_id)
 
 
 def _session_customer(shop: str, session_id: str) -> str | None:
@@ -656,7 +678,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                 except Exception as e:
                     print(f"chatbot_widget: fallback products fetch failed: {e!r}")
 
-    products = data.get("results") if action in {"search_products", "get_recommendations", "recommend_products", "assistant_help", "clarify", "search_by_image"} and isinstance(data, dict) else None
+    products = data.get("results") if action in {"search_products", "get_recommendations", "recommend_products", "assistant_help", "clarify", "search_by_image", "subscribe_restock"} and isinstance(data, dict) else None
     if products and isinstance(products, list) and len(products) > 0:
         first_prod = products[0]
         if isinstance(first_prod, dict) and first_prod.get("name"):
@@ -699,6 +721,14 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
         for k in ("otp", "claim_id", "order_number", "amount_paid", "currency", "payment_method", "claim_status"):
             if k in data:
                 out[k] = data[k]
+
+    # Arm restock email followup if out-of-stock item requires customer email
+    if action == "subscribe_restock" and isinstance(data, dict) and data.get("status") == "email_required":
+        _set_pending(_pkey(shop, session_id), type="await_restock_email", intent="restock_alert", action="subscribe_restock",
+                     entities={"product_name_or_id": data.get("product_title") or entities.get("product_name_or_id"),
+                               "size": entities.get("size") or "", "color": entities.get("color") or ""},
+                     language=language)
+
     return out
 
 
@@ -866,7 +896,8 @@ async def chat(req: ChatRequest):
     try:
         text = (req.message or "").strip()
         if text and isinstance(result, dict):
-            _remember_turn(_pkey(req.shop, req.session_id), text, result.get("reply") or "")
+            cid = req.customer_id or _session_customer(req.shop, req.session_id)
+            _remember_turn(_pkey(req.shop, req.session_id), text, result.get("reply") or "", customer_id=cid, visitor_id=req.visitor_id)
     except Exception as e:
         print(f"chatbot_widget: history update failed: {e!r}")
     return result
@@ -901,21 +932,31 @@ async def _chat_impl(req: ChatRequest):
     if cfg.get("status", "active") == "inactive":
         return {"reply": "This assistant isn't available right now."}
 
-    # Customer identity resolution: accepts App Proxy signed token, active session,
-    # or storefront customer_id (from Shopify's window.__st.cid).
-    customer_id = (
+    # Customer identity resolution: accepts App Proxy signed token, storefront customer_id (from Shopify window.__st.cid).
+    req_cid = (
         customer_profiles.read_session_token(req.customer_token, req.shop)
-        or _session_customer(req.shop, req.session_id)
         or (req.customer_id or "").strip()
     )
-    customer_email = (
-        _session_customer_email(req.shop, req.session_id)
-        or (req.customer_email or "").strip().lower()
-    )
-    customer_name = (
-        _session_customer_name(req.shop, req.session_id)
-        or (req.customer_name or "").strip()
-    )
+    req_email = (req.customer_email or "").strip().lower()
+    req_name = (req.customer_name or "").strip()
+
+    cached_cid = _session_customer(req.shop, req.session_id)
+    cached_email = _session_customer_email(req.shop, req.session_id)
+
+    # Detect user account switch on same session to prevent cross-account leakage
+    if cached_cid and req_cid and str(cached_cid) != str(req_cid):
+        _clear_session(req.shop, req.session_id)
+        cached_cid = None
+        cached_email = None
+    elif cached_cid and not req_cid and not req_email:
+        # User logged out; current request is anonymous guest
+        _clear_session(req.shop, req.session_id)
+        cached_cid = None
+        cached_email = None
+
+    customer_id = req_cid or cached_cid or None
+    customer_email = req_email or cached_email or None
+    customer_name = req_name or _session_customer_name(req.shop, req.session_id) or None
 
     if req.customer_token and not customer_id:
         return {"reply": "", "session_expired": True}
@@ -940,7 +981,7 @@ async def _chat_impl(req: ChatRequest):
             except Exception as e:
                 print(f"chatbot_widget: get_customer lookup failed: {e!r}")
 
-    _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name)
+    _remember_customer(req.shop, req.session_id, customer_id, customer_email, customer_name, visitor_id=req.visitor_id)
     customer_profile = await customer_profiles.get_profile(req.shop, customer_id) if customer_id else None
 
     _prune_pending()
@@ -1083,18 +1124,12 @@ async def _chat_impl(req: ChatRequest):
             if parsed_cart.get("currency") and not entities.get("currency"):
                 entities["currency"] = parsed_cart["currency"]
 
-        # 0. Restock Alert: ensure email is captured
+        # 0. Restock Alert: extract inline email if shopper provided it in their request
         if (intent, action) == ("restock_alert", "subscribe_restock"):
-            if not customer_id and not entities.get("email") and not customer_email:
+            if not entities.get("email") and not customer_email:
                 email_found = EMAIL_RE.search(message)
                 if email_found:
                     entities["email"] = email_found.group(0).lower()
-                else:
-                    out = _ask(key, "await_restock_email", "Ask the shopper for their email address so they can be notified when the item is back in stock.",
-                               language, message, "Please provide your email address so I can notify you the moment this item is back in stock.",
-                               entities=entities)
-                    _log(req.shop, message, "awaiting_email", intent, action, None, out["reply"])
-                    return out
 
         # 1. Order History: Show all orders
         if (intent, action) in (("order_tracking", "list_recent_orders"), ("customer_account", "get_my_orders")):
@@ -1638,43 +1673,57 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
 
 
 @router.get("/chat-history")
-async def chat_history(shop: str = "", session_id: str = "", customer_id: str = "", customer_email: str = "", limit: int = 4):
+async def chat_history(shop: str = "", session_id: str = "", customer_id: str = "", customer_email: str = "", visitor_id: str = "", limit: int = 4):
     """Retrieves previous 3-4 chat messages/turns for this session or customer,
-    allowing context to be clearly identified when the shopper refreshes or pulls up history."""
+    strictly isolating user history so no user's chat is ever visible to another account or guest."""
     if not shop:
         return {"status": "error", "message": "Missing shop parameter", "chats": []}
 
     limit = max(1, min(int(limit or 4), 10))
     chats = []
+    cid = (customer_id or "").strip()
+    cmail = (customer_email or "").strip().lower()
 
     # 1. First check in-memory HISTORY turns for this session
     key = _pkey(shop, session_id)
-    in_mem_turns = _history_for(key)
-    if in_mem_turns:
-        pair_list = []
-        i = 0
-        while i < len(in_mem_turns) - 1:
-            u_role, u_text = in_mem_turns[i]
-            a_role, a_text = in_mem_turns[i+1]
-            if u_role == "user" and a_role == "assistant":
-                pair_list.append({
-                    "id": f"mem_{i}",
-                    "user_message": u_text,
-                    "agent_reply": a_text,
-                    "source": "current_session"
-                })
-                i += 2
-            else:
-                i += 1
-        chats.extend(pair_list[-limit:])
+    entry = HISTORY.get(key)
+    if entry and entry.get("ts", 0) > time.time() - HISTORY_TTL_SECONDS:
+        entry_cid = entry.get("customer_id")
+        entry_vid = entry.get("visitor_id")
+        authorized = False
+        if cid:
+            if not entry_cid or str(entry_cid) == str(cid):
+                authorized = True
+        else:
+            if not entry_cid:
+                if not visitor_id or not entry_vid or str(visitor_id) == str(entry_vid):
+                    authorized = True
+
+        if authorized:
+            in_mem_turns = entry.get("turns", [])
+            pair_list = []
+            i = 0
+            while i < len(in_mem_turns) - 1:
+                u_role, u_text = in_mem_turns[i]
+                a_role, a_text = in_mem_turns[i+1]
+                if u_role == "user" and a_role == "assistant":
+                    pair_list.append({
+                        "id": f"mem_{i}",
+                        "user_message": u_text,
+                        "agent_reply": a_text,
+                        "source": "current_session"
+                    })
+                    i += 2
+                else:
+                    i += 1
+            chats.extend(pair_list[-limit:])
 
     # 2. Check customer-keyed history in memory if available
-    cid = (customer_id or "").strip()
-    cmail = (customer_email or "").strip().lower()
     if len(chats) < limit and cid:
         cust_key = f"{shop}::cust_{cid}"
-        cust_turns = _history_for(cust_key)
-        if cust_turns:
+        cust_entry = HISTORY.get(cust_key)
+        if cust_entry and cust_entry.get("ts", 0) > time.time() - HISTORY_TTL_SECONDS:
+            cust_turns = cust_entry.get("turns", [])
             i = 0
             while i < len(cust_turns) - 1:
                 u_role, u_text = cust_turns[i]
@@ -1714,14 +1763,14 @@ async def chat_history(shop: str = "", session_id: str = "", customer_id: str = 
                 log_email = entities.get("email") or entities.get("customer_email")
 
                 is_match = False
-                if cid and log_cid and str(log_cid) == str(cid):
-                    is_match = True
-                elif cmail and log_email and str(log_email).lower() == cmail:
-                    is_match = True
-                elif session_id and log_session and str(log_session) == str(session_id):
-                    is_match = True
-                elif not cid and not session_id:
-                    is_match = True
+                if cid:
+                    if log_cid and str(log_cid) == str(cid):
+                        is_match = True
+                    elif cmail and log_email and str(log_email).lower() == cmail:
+                        is_match = True
+                else:
+                    if session_id and log_session and str(log_session) == str(session_id) and not log_cid and not log_email:
+                        is_match = True
 
                 if is_match and msg and reply and not msg.startswith("[card-redacted]"):
                     if not any(c.get("user_message") == msg for c in chats):
@@ -1739,6 +1788,7 @@ async def chat_history(shop: str = "", session_id: str = "", customer_id: str = 
     return {
         "status": "success",
         "shop": shop,
+        "customer_id": cid or None,
         "count": len(chats),
         "chats": chats[:limit]
     }
@@ -2188,17 +2238,6 @@ WIDGET_JS = r"""
     });
   }
 
-  var SESSION_ID = (function () {
-    var k = "aiChatSessionId_" + SHOP;
-    var s = null;
-    try { s = sessionStorage.getItem(k); } catch (e) {}
-    if (!s) {
-      s = "sess_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
-      try { sessionStorage.setItem(k, s); } catch (e) {}
-    }
-    return s;
-  })();
-
   var VISITOR_ID = (function () {
     var k = "aiChatVisitorId_" + SHOP;
     var v = null;
@@ -2213,6 +2252,103 @@ WIDGET_JS = r"""
   var customerToken = null;
   var customerId = null;
   var customerEmail = null;
+  var customerName = null;
+
+  function getCurrentUserKey() {
+    if (customerId) return "cust_" + String(customerId).replace(/[^a-zA-Z0-9_-]/g, "_");
+    if (customerEmail) return "email_" + String(customerEmail).toLowerCase().replace(/[^a-zA-Z0-9_-]/g, "_");
+    return "guest_" + VISITOR_ID;
+  }
+
+  var SESSION_TTL_MS = 7200000; // 2 hours for logged-in user
+  var GUEST_TTL_MS = 1800000;   // 30 minutes for guest
+  var ACTIVE_USER_TRACKER = "ai_active_user_" + SHOP;
+  var SESSION_ID = "";
+
+  function enforceUserSessionIsolation() {
+    var uKey = getCurrentUserKey();
+    var lastUser = null;
+    try { lastUser = sessionStorage.getItem(ACTIVE_USER_TRACKER); } catch (e) {}
+
+    // Account Switch or Login/Logout detected!
+    if (lastUser && lastUser !== uKey) {
+      chatHistory = [];
+      _historyLoaded = false;
+      if (conversation) {
+        conversation.innerHTML = "";
+        if (greetingBubble) {
+          greetingBubble.style.display = "";
+          conversation.appendChild(greetingBubble);
+        }
+      }
+      var historyBox = document.getElementById("chatHistoryBox");
+      if (historyBox) historyBox.remove();
+
+      try {
+        sessionStorage.removeItem("aiChatWidgetState_" + SHOP + "_" + lastUser);
+        sessionStorage.removeItem("aiChatSessionId_" + SHOP + "_" + lastUser);
+        sessionStorage.removeItem("aiChatSessionId_" + SHOP + "_" + lastUser + "_created");
+      } catch (e) {}
+
+      var freshId = "sess_" + uKey + "_" + VISITOR_ID.slice(-6) + "_" + Date.now();
+      SESSION_ID = freshId;
+      try {
+        sessionStorage.setItem("aiChatSessionId_" + SHOP + "_" + uKey, freshId);
+        sessionStorage.setItem("aiChatSessionId_" + SHOP + "_" + uKey + "_created", String(Date.now()));
+        sessionStorage.setItem(ACTIVE_USER_TRACKER, uKey);
+      } catch (e) {}
+
+      updateHeaderProfileBadge();
+      updateOutsideGreetingText();
+      return true;
+    }
+
+    try { sessionStorage.setItem(ACTIVE_USER_TRACKER, uKey); } catch (e) {}
+
+    var sessKey = "aiChatSessionId_" + SHOP + "_" + uKey;
+    var stateKey = "aiChatWidgetState_" + SHOP + "_" + uKey;
+    var createdKey = sessKey + "_created";
+    var maxAge = (customerId || customerEmail) ? SESSION_TTL_MS : GUEST_TTL_MS;
+    var createdAt = 0;
+    try { createdAt = parseInt(sessionStorage.getItem(createdKey) || "0", 10); } catch (e) {}
+    var now = Date.now();
+
+    if (createdAt && (now - createdAt > maxAge)) {
+      try {
+        sessionStorage.removeItem(stateKey);
+        sessionStorage.removeItem(sessKey);
+        sessionStorage.removeItem(createdKey);
+      } catch (e) {}
+      var expiredNewId = "sess_" + uKey + "_" + VISITOR_ID.slice(-6) + "_" + now;
+      SESSION_ID = expiredNewId;
+      try {
+        sessionStorage.setItem(sessKey, expiredNewId);
+        sessionStorage.setItem(createdKey, String(now));
+      } catch (e) {}
+      chatHistory = [];
+      _historyLoaded = false;
+      if (conversation && greetingBubble) {
+        conversation.innerHTML = "";
+        greetingBubble.style.display = "";
+        conversation.appendChild(greetingBubble);
+      }
+      return true;
+    }
+
+    var s = null;
+    try { s = sessionStorage.getItem(sessKey); } catch (e) {}
+    if (!s) {
+      s = "sess_" + uKey + "_" + VISITOR_ID.slice(-6) + "_" + now;
+      try {
+        sessionStorage.setItem(sessKey, s);
+        sessionStorage.setItem(createdKey, String(now));
+      } catch (e) {}
+    }
+    SESSION_ID = s;
+    return false;
+  }
+
+  enforceUserSessionIsolation();
   var customerName = null;
 
   function updateHeaderProfileBadge() {
@@ -2271,9 +2407,24 @@ WIDGET_JS = r"""
 
   function syncCustomerSession() {
     try {
-      customerId = customerId || sessionStorage.getItem("ai_cust_id_" + SHOP) || null;
-      customerEmail = customerEmail || sessionStorage.getItem("ai_cust_email_" + SHOP) || null;
-      customerName = customerName || sessionStorage.getItem("ai_cust_name_" + SHOP) || null;
+      var isLogoutPresent = Boolean(document.querySelector('a[href*="/account/logout"], a[href*="logout"]'));
+      var isLoginPresent = Boolean(document.querySelector('a[href*="/account/login"], a[href*="login"]'));
+
+      if (!isLogoutPresent && isLoginPresent) {
+        customerId = null;
+        customerEmail = null;
+        customerName = null;
+        customerToken = null;
+        try {
+          sessionStorage.removeItem("ai_cust_id_" + SHOP);
+          sessionStorage.removeItem("ai_cust_email_" + SHOP);
+          sessionStorage.removeItem("ai_cust_name_" + SHOP);
+        } catch (e) {}
+      } else {
+        customerId = customerId || sessionStorage.getItem("ai_cust_id_" + SHOP) || null;
+        customerEmail = customerEmail || sessionStorage.getItem("ai_cust_email_" + SHOP) || null;
+        customerName = customerName || sessionStorage.getItem("ai_cust_name_" + SHOP) || null;
+      }
 
       if (window.__st) {
         if (window.__st.cid) customerId = String(window.__st.cid);
@@ -2400,20 +2551,26 @@ WIDGET_JS = r"""
           .catch(function () {});
       }
     } catch (e) {}
+    enforceUserSessionIsolation();
     updateHeaderProfileBadge();
     updateOutsideGreetingText();
   }
-  var STATE_KEY = "aiChatWidgetState_" + SHOP;
   var chatHistory = [];
   var quickActionsRendered = false;
 
   function persistState() {
     try {
-      sessionStorage.setItem(STATE_KEY, JSON.stringify({
+      var uKey = getCurrentUserKey();
+      var stateKey = "aiChatWidgetState_" + SHOP + "_" + uKey;
+      sessionStorage.setItem(stateKey, JSON.stringify({
+        userKey: uKey,
+        visitorId: VISITOR_ID,
+        sessionId: SESSION_ID,
+        timestamp: Date.now(),
         open: widget.classList.contains("open"),
         expanded: widget.classList.contains("expanded"),
         quickActionsShown: quickActionsRendered,
-        history: chatHistory
+        history: chatHistory.slice(-20)
       }));
     } catch (e) {}
   }
@@ -2918,15 +3075,24 @@ WIDGET_JS = r"""
 
   function restoreState() {
     try {
-      var raw = sessionStorage.getItem(STATE_KEY);
+      enforceUserSessionIsolation();
+      var uKey = getCurrentUserKey();
+      var stateKey = "aiChatWidgetState_" + SHOP + "_" + uKey;
+      var raw = sessionStorage.getItem(stateKey);
       if (!raw) return;
       var saved = JSON.parse(raw);
-      // Restore chat history from sessionStorage (no server round-trip)
+      if (!saved || saved.userKey !== uKey || (saved.visitorId && saved.visitorId !== VISITOR_ID)) {
+        sessionStorage.removeItem(stateKey);
+        return;
+      }
+      var maxAge = (customerId || customerEmail) ? SESSION_TTL_MS : GUEST_TTL_MS;
+      if (saved.timestamp && (Date.now() - saved.timestamp > maxAge)) {
+        sessionStorage.removeItem(stateKey);
+        return;
+      }
+      // Replay previous turns safely into the conversation div
       if (saved.history && saved.history.length > 0) {
-        // Replay previous turns into the conversation div
-        // Hide greeting bubble since we have real history
         if (greetingBubble) greetingBubble.style.display = "none";
-        // Add a small divider first
         var divider = document.createElement("div");
         divider.className = "history-divider";
         divider.textContent = "— Continuing conversation —";
@@ -2950,12 +3116,55 @@ WIDGET_JS = r"""
     if (_historyLoaded) return;
     _historyLoaded = true;
     if (!CFG.chatHistoryEndpoint) return;
+    var requestUserKey = getCurrentUserKey();
     var url = CFG.chatHistoryEndpoint +
       "&session_id=" + encodeURIComponent(SESSION_ID) +
       "&customer_id=" + encodeURIComponent(customerId || "") +
-      "&customer_email=" + encodeURIComponent(customerEmail || "");
+      "&customer_email=" + encodeURIComponent(customerEmail || "") +
+      "&visitor_id=" + encodeURIComponent(VISITOR_ID);
     if (historyBtn) historyBtn.classList.add("spinning");
     fetch(url)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (historyBtn) historyBtn.classList.remove("spinning");
+        if (getCurrentUserKey() !== requestUserKey) return;
+        if (!data || !data.chats || data.chats.length === 0) return;
+        var box = document.createElement("div");
+        box.className = "history-context-box";
+        box.id = "chatHistoryBox";
+        var header = document.createElement("div");
+        header.className = "history-context-header";
+        var indicator = document.createElement("span");
+        indicator.className = "history-indicator";
+        indicator.innerHTML = "&#x2713; Previous chats";
+        var closeBtn = document.createElement("button");
+        closeBtn.textContent = "\u00d7";
+        closeBtn.style.cssText = "background:none;border:none;cursor:pointer;font-size:14px;color:#94a3b8;line-height:1;padding:0;";
+        closeBtn.addEventListener("click", function () { box.remove(); });
+        header.appendChild(indicator);
+        header.appendChild(closeBtn);
+        box.appendChild(header);
+        data.chats.forEach(function (chat) {
+          var item = document.createElement("div");
+          item.className = "history-item";
+          var uMsg = document.createElement("div");
+          uMsg.className = "history-user-msg";
+          uMsg.textContent = "\uD83D\uDC64 " + (chat.user_message || "");
+          var aRep = document.createElement("div");
+          aRep.className = "history-agent-reply";
+          aRep.textContent = "\uD83E\uDD16 " + (chat.agent_reply || "");
+          item.appendChild(uMsg);
+          item.appendChild(aRep);
+          box.appendChild(item);
+        });
+        if (conversation) {
+          conversation.insertBefore(box, conversation.firstChild);
+        }
+      })
+      .catch(function () {
+        if (historyBtn) historyBtn.classList.remove("spinning");
+      });
+  }
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
         if (historyBtn) historyBtn.classList.remove("spinning");

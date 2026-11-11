@@ -210,8 +210,11 @@ def generate_reply(
         )
     elif action_name == "subscribe_restock":
         extra_clause = (
-            " Confirm cheerfully that the shopper is subscribed to restock / price alerts for the product, "
-            "mentioning their email and that they'll be notified the moment it's available."
+            " For restock / stock alerts: "
+            "If status is 'already_in_stock', enthusiastically tell the shopper that the product is currently IN STOCK and available to purchase right now, so they don't have to wait for a restock! Invite them to check out the item card. "
+            "If status is 'not_found', kindly let them know the product could not be found in the store catalog and suggest double-checking the product name. "
+            "If status is 'email_required', inform them the product is out of stock and warmly ask for their email address so we can alert them the second it arrives. "
+            "If status is 'alert_subscribed', confirm cheerfully that they are subscribed and will receive an email as soon as fresh stock arrives."
         )
     elif action_name == "search_by_image":
         extra_clause = (
