@@ -1500,9 +1500,10 @@ async def widget_config(shop: str):
         else f"Hey there! I'm {agent_name}. {agent_title}"
     )
     raw_icon = cfg.get("custom_icon_url") or cfg.get("icon_url") or ""
-    import shopify_auth
+    import shopify_auth, hashlib
     app_url = (shopify_auth.APP_URL or "").rstrip("/")
-    proxy_icon_url = f"{app_url}/widget-icon?shop={shop}" if (raw_icon and app_url) else raw_icon
+    icon_ver = hashlib.md5(raw_icon.encode()).hexdigest()[:8] if raw_icon else "0"
+    proxy_icon_url = f"{app_url}/widget-icon?shop={shop}&v={icon_ver}" if (raw_icon and app_url) else raw_icon
     return {
         "status": cfg.get("status", "active"),
         "agent_name": agent_name,
@@ -1513,12 +1514,13 @@ async def widget_config(shop: str):
         "custom_icon_url": raw_icon,
         "proxy_icon_url": proxy_icon_url,
         "direct_icon_url": raw_icon,
+        "icon_version": icon_ver,
         "customer_session_path": os.environ.get("SHOPIFY_APP_PROXY_PATH", "/apps/ai-agent/customer-session"),
     }
 
 
 @router.get("/widget-icon")
-async def get_widget_icon(shop: str = "", store_id: str = ""):
+async def get_widget_icon(shop: str = "", store_id: str = "", v: str = ""):
     """Serves the store's custom widget icon with high-performance caching.
     Fetches directly from Appwrite Storage or local cache using server credentials,
     guaranteeing 100% reliable rendering on the storefront without CORS or guest
@@ -1540,55 +1542,74 @@ async def get_widget_icon(shop: str = "", store_id: str = ""):
     if not icon_url:
         return Response(status_code=404)
 
-    # 1. Check local static file cache first
     import os
     static_uploads = os.path.join(os.path.dirname(__file__), "static", "uploads")
-    for ext in (".png", ".jpg", ".jpeg", ".svg", ".webp"):
-        local_path = os.path.join(static_uploads, f"icon_{s_id}{ext}")
-        if os.path.exists(local_path):
-            try:
-                with open(local_path, "rb") as f:
-                    content = f.read()
-                mime = "image/png" if ext == ".png" else ("image/jpeg" if ext in (".jpg", ".jpeg") else "image/svg+xml")
-                return Response(
-                    content=content,
-                    media_type=mime,
-                    headers={
-                        "Cache-Control": "public, max-age=86400",
-                        "Access-Control-Allow-Origin": "*",
-                    },
-                )
-            except Exception:
-                pass
+    os.makedirs(static_uploads, exist_ok=True)
 
-    # 2. If it's an Appwrite Storage URL, fetch using server-side client
+    # 1. If it's an Appwrite Storage URL, match exact file_id to guarantee zero stale cache
     if "/storage/buckets/" in icon_url and "/files/" in icon_url:
         try:
             parts = icon_url.split("/storage/buckets/")[1]
             bucket_id = parts.split("/files/")[0]
             file_id = parts.split("/files/")[1].split("/")[0].split("?")[0]
-            from appwrite_client import storage
-            content = storage.get_file_view(bucket_id, file_id)
-            if content:
-                # Save to local cache for subsequent fast hits
-                try:
-                    os.makedirs(static_uploads, exist_ok=True)
-                    with open(os.path.join(static_uploads, f"icon_{s_id}.png"), "wb") as f:
-                        f.write(content)
-                except Exception:
-                    pass
+            cached_file = os.path.join(static_uploads, f"icon_{s_id}_{file_id}.png")
+
+            # Exact matching version cached on disk
+            if os.path.exists(cached_file):
+                with open(cached_file, "rb") as f:
+                    content = f.read()
                 return Response(
                     content=content,
                     media_type="image/png",
                     headers={
-                        "Cache-Control": "public, max-age=86400",
+                        "Cache-Control": "public, max-age=300, must-revalidate",
+                        "ETag": f'"{file_id}"',
+                        "Access-Control-Allow-Origin": "*",
+                    },
+                )
+
+            # Newly updated or not yet cached: fetch live from Appwrite Storage
+            from appwrite_client import storage
+            content = storage.get_file_view(bucket_id, file_id)
+            if content:
+                # Purge older cached files for this store so stale icons are removed
+                import glob
+                for old_f in glob.glob(os.path.join(static_uploads, f"icon_{s_id}_*")):
+                    try:
+                        os.remove(old_f)
+                    except Exception:
+                        pass
+                with open(cached_file, "wb") as f:
+                    f.write(content)
+
+                return Response(
+                    content=content,
+                    media_type="image/png",
+                    headers={
+                        "Cache-Control": "public, max-age=300, must-revalidate",
+                        "ETag": f'"{file_id}"',
                         "Access-Control-Allow-Origin": "*",
                     },
                 )
         except Exception as e:
             print(f"[get_widget_icon] Appwrite storage fetch error: {e!r}")
 
-    # 3. Fallback: redirect to direct URL
+    # 2. Local disk fallback
+    for ext in (".png", ".jpg", ".jpeg", ".svg", ".webp"):
+        local_path = os.path.join(static_uploads, f"icon_{s_id}{ext}")
+        if os.path.exists(local_path):
+            with open(local_path, "rb") as f:
+                content = f.read()
+            mime = "image/png" if ext == ".png" else ("image/jpeg" if ext in (".jpg", ".jpeg") else "image/svg+xml")
+            return Response(
+                content=content,
+                media_type=mime,
+                headers={
+                    "Cache-Control": "public, max-age=300, must-revalidate",
+                    "Access-Control-Allow-Origin": "*",
+                },
+            )
+
     from starlette.responses import RedirectResponse
     return RedirectResponse(url=icon_url)
 

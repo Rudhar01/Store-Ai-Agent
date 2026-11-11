@@ -651,63 +651,64 @@ def upload_icon_file(store_id: str, filename: str, content: bytes) -> str:
     if not content:
         raise ValueError("Cannot upload empty icon file.")
 
+    import os, time, re, glob
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".svg", ".webp"):
+        ext = ".png"
+    # Ensure safe, clean filename for Appwrite Storage (no spaces, special chars or unicode)
+    clean_filename = f"icon_{store_id}_{int(time.time())}{ext}"
+
+    # Purge old local cache files for this store to prevent stale caching
+    static_uploads = os.path.join(os.path.dirname(__file__), "static", "uploads")
+    os.makedirs(static_uploads, exist_ok=True)
+    for old_f in glob.glob(os.path.join(static_uploads, f"icon_{store_id}*")):
+        try:
+            os.remove(old_f)
+        except Exception:
+            pass
+
     # 1. Upload to Appwrite Storage bucket
     try:
         bucket_id = _ensure_widget_icons_bucket()
         file_id = ID.unique()
+        from appwrite.permission import Permission
+        from appwrite.role import Role
+        perms = [Permission.read(Role.any())]
+
         try:
-            # First attempt: without perms (inherits bucket public read when file_security=False)
+            # First attempt: with explicit public read permissions
             storage.create_file(
                 bucket_id=bucket_id,
                 file_id=file_id,
-                file=InputFile.from_bytes(content, filename=filename),
-            )
-            cdn_url = _storage_file_url(file_id, bucket_id)
-            print(f"[upload_icon_file] ✅ Uploaded to Appwrite Storage bucket '{bucket_id}' (file_id={file_id})")
-            try:
-                import os
-                ext = os.path.splitext(filename)[1].lower() or ".png"
-                static_uploads = os.path.join(os.path.dirname(__file__), "static", "uploads")
-                os.makedirs(static_uploads, exist_ok=True)
-                with open(os.path.join(static_uploads, f"icon_{store_id}{ext}"), "wb") as f:
-                    f.write(content)
-            except Exception:
-                pass
-            return cdn_url
-        except Exception as upload_err:
-            # Second attempt: with explicit public read permissions
-            from appwrite.permission import Permission
-            from appwrite.role import Role
-            perms = [Permission.read(Role.any())]
-            storage.create_file(
-                bucket_id=bucket_id,
-                file_id=file_id,
-                file=InputFile.from_bytes(content, filename=filename),
+                file=InputFile.from_bytes(content, filename=clean_filename),
                 permissions=perms,
             )
             cdn_url = _storage_file_url(file_id, bucket_id)
-            print(f"[upload_icon_file] ✅ Uploaded to Appwrite Storage with permissions (file_id={file_id})")
-            try:
-                import os
-                ext = os.path.splitext(filename)[1].lower() or ".png"
-                static_uploads = os.path.join(os.path.dirname(__file__), "static", "uploads")
-                os.makedirs(static_uploads, exist_ok=True)
-                with open(os.path.join(static_uploads, f"icon_{store_id}{ext}"), "wb") as f:
-                    f.write(content)
-            except Exception:
-                pass
-            return cdn_url
+            print(f"[upload_icon_file] ✅ Uploaded to Appwrite Storage bucket '{bucket_id}' (file_id={file_id})")
+        except Exception as upload_err:
+            # Second attempt: without perms (inherits bucket public read when file_security=False)
+            storage.create_file(
+                bucket_id=bucket_id,
+                file_id=file_id,
+                file=InputFile.from_bytes(content, filename=clean_filename),
+            )
+            cdn_url = _storage_file_url(file_id, bucket_id)
+            print(f"[upload_icon_file] ✅ Uploaded to Appwrite Storage (file_id={file_id})")
+
+        # Cache locally on disk with matching file_id for instant local responses
+        try:
+            with open(os.path.join(static_uploads, f"icon_{store_id}_{file_id}{ext}"), "wb") as f:
+                f.write(content)
+            with open(os.path.join(static_uploads, f"icon_{store_id}{ext}"), "wb") as f:
+                f.write(content)
+        except Exception:
+            pass
+        return cdn_url
     except Exception as storage_err:
         print(f"[upload_icon_file] ⚠️ Appwrite Storage unavailable ({storage_err!r}); using resilient fallback.")
 
     # 2. Resilient local disk fallback
-    import base64
-    import os
     import shopify_auth
-
-    ext = os.path.splitext(filename)[1].lower() or ".png"
-    static_uploads = os.path.join(os.path.dirname(__file__), "static", "uploads")
-    os.makedirs(static_uploads, exist_ok=True)
     out_path = os.path.join(static_uploads, f"icon_{store_id}{ext}")
     try:
         with open(out_path, "wb") as f:
@@ -719,6 +720,7 @@ def upload_icon_file(store_id: str, filename: str, content: bytes) -> str:
         print(f"[upload_icon_file] Local static file write notice: {io_err!r}")
 
     # 3. Base64 fallback if file system is completely read-only
+    import base64
     mime = "image/png" if ext == ".png" else ("image/jpeg" if ext in (".jpg", ".jpeg") else "image/svg+xml")
     b64 = base64.b64encode(content).decode("ascii")
     return f"data:{mime};base64,{b64}"
@@ -728,22 +730,26 @@ def delete_icon_file(file_url: str) -> None:
     """Best-effort delete of a previously uploaded icon."""
     if not file_url:
         return
-    if "/storage/buckets/" in file_url:
+    if "/storage/buckets/" in file_url and "/files/" in file_url:
         try:
-            file_id = file_url.split("/files/")[1].split("/")[0]
-            storage.delete_file(WIDGET_ICONS_BUCKET, file_id)
-        except Exception:
-            pass
-    elif "/static/uploads/" in file_url:
-        try:
-            import os
-            clean_url = file_url.split("?")[0]
-            fname = clean_url.split("/static/uploads/")[-1]
-            p = os.path.join(os.path.dirname(__file__), "static", "uploads", fname)
+            parts = file_url.split("/storage/buckets/")[1]
+            bucket_id = parts.split("/files/")[0]
+            file_id = parts.split("/files/")[1].split("/")[0].split("?")[0]
+            storage.delete_file(bucket_id, file_id)
+            print(f"[delete_icon_file] ✅ Deleted previous icon file '{file_id}' from bucket '{bucket_id}'")
+        except Exception as e:
+            print(f"[delete_icon_file] Notice: could not delete old storage file: {e!r}")
+    try:
+        import os, glob
+        clean_url = file_url.split("?")[0]
+        fname = clean_url.split("/static/uploads/")[-1] if "/static/uploads/" in clean_url else ""
+        static_uploads = os.path.join(os.path.dirname(__file__), "static", "uploads")
+        if fname:
+            p = os.path.join(static_uploads, fname)
             if os.path.exists(p):
                 os.remove(p)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 
 # --- Features (per-store toggles for what the AI agent can do) ---

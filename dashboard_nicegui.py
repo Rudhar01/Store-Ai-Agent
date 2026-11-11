@@ -2473,7 +2473,8 @@ def appearance_page():
                 current_icon = cfg.get("custom_icon_url") or cfg.get("icon_url") or ""
                 with icon_preview_row:
                     if current_icon and cfg.get("icon_type") != "preset":
-                        ui.image(current_icon).classes("w-12 h-12 rounded-full object-cover border border-gray-200")
+                        preview_src = f"{current_icon}?t={int(time.time())}" if current_icon.startswith("http") and "?" not in current_icon else current_icon
+                        ui.image(preview_src).classes("w-12 h-12 rounded-full object-cover border border-gray-200")
 
                         def delete_icon():
                             repo.delete_icon_file(current_icon)
@@ -2481,6 +2482,10 @@ def appearance_page():
                             cfg["custom_icon_url"] = ""
                             cfg["icon_url"] = ""
                             cfg["icon_type"] = "preset"
+                            try:
+                                uploader.reset()
+                            except Exception:
+                                pass
                             render_icon_preview()
                             _trigger_widget_install_async(store)
                             ui.notify("Custom icon removed — reverted to default preset.", type="positive")
@@ -2515,9 +2520,16 @@ def appearance_page():
                     cfg["icon_type"] = "custom"
                     if old_url and old_url != new_url:
                         repo.delete_icon_file(old_url)
+                    try:
+                        uploader.reset()
+                    except Exception:
+                        pass
                     render_icon_preview()
                     _trigger_widget_install_async(store)
-                    ui.notify("Custom icon uploaded to Appwrite Storage and applied successfully!", type="positive")
+                    if "/storage/buckets/" in new_url:
+                        ui.notify("✅ Custom icon saved to Appwrite Storage bucket and synced to store!", type="positive", duration=6)
+                    else:
+                        ui.notify("⚠️ Saved locally (Appwrite Storage was unreachable). Check server logs.", type="warning", duration=8)
                 except Exception as err:
                     logger.error("Failed to upload custom icon: %s", err, exc_info=True)
                     err_msg = str(err)
@@ -2531,7 +2543,7 @@ def appearance_page():
                     else:
                         ui.notify(f"Upload failed: {err}", type="negative", duration=10)
 
-            ui.upload(on_upload=handle_upload, auto_upload=True).props("accept=image/* max-file-size=5000000").classes("w-full")
+            uploader = ui.upload(on_upload=handle_upload, auto_upload=True).props("accept=image/* max-file-size=5000000").classes("w-full")
             ui.label("Permanent cloud storage in Appwrite bucket 'widget_icons'. Requires 'files.*' and 'buckets.*' API key scopes.").classes("text-[11px] text-gray-400 mt-1")
 
 
