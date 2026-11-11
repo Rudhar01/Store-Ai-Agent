@@ -2205,6 +2205,8 @@ WIDGET_JS = r"""
     }
   }
 
+  var _firstOpen = true;
+
   if (fabGreeting) {
     fabGreeting.addEventListener("click", function (e) {
       if (e.target && (e.target.id === "fgClose" || e.target.classList.contains("fg-close"))) {
@@ -2250,9 +2252,11 @@ WIDGET_JS = r"""
   })();
 
   var customerToken = null;
-  var customerId = null;
-  var customerEmail = null;
-  var customerName = null;
+  // Bootstrap customer identity eagerly from localStorage so that getCurrentUserKey()
+  // returns the right key on first call (before syncCustomerSession runs).
+  var customerId   = (function() { try { return localStorage.getItem("ai_cust_id_" + SHOP) || null; } catch(e){ return null; } })();
+  var customerEmail= (function() { try { return localStorage.getItem("ai_cust_email_" + SHOP) || null; } catch(e){ return null; } })();
+  var customerName = (function() { try { return localStorage.getItem("ai_cust_name_" + SHOP) || null; } catch(e){ return null; } })();
 
   function getCurrentUserKey() {
     if (customerId) return "cust_" + String(customerId).replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -2268,7 +2272,7 @@ WIDGET_JS = r"""
   function enforceUserSessionIsolation() {
     var uKey = getCurrentUserKey();
     var lastUser = null;
-    try { lastUser = sessionStorage.getItem(ACTIVE_USER_TRACKER); } catch (e) {}
+    try { lastUser = localStorage.getItem(ACTIVE_USER_TRACKER); } catch (e) {}
 
     // Account Switch or Login/Logout detected!
     if (lastUser && lastUser !== uKey) {
@@ -2284,46 +2288,46 @@ WIDGET_JS = r"""
       var historyBox = document.getElementById("chatHistoryBox");
       if (historyBox) historyBox.remove();
 
-      try {
-        sessionStorage.removeItem("aiChatWidgetState_" + SHOP + "_" + lastUser);
-        sessionStorage.removeItem("aiChatSessionId_" + SHOP + "_" + lastUser);
-        sessionStorage.removeItem("aiChatSessionId_" + SHOP + "_" + lastUser + "_created");
-      } catch (e) {}
-
-      var freshId = "sess_" + uKey + "_" + VISITOR_ID.slice(-6) + "_" + Date.now();
-      SESSION_ID = freshId;
-      try {
-        sessionStorage.setItem("aiChatSessionId_" + SHOP + "_" + uKey, freshId);
-        sessionStorage.setItem("aiChatSessionId_" + SHOP + "_" + uKey + "_created", String(Date.now()));
-        sessionStorage.setItem(ACTIVE_USER_TRACKER, uKey);
-      } catch (e) {}
+      var sessKey = "aiChatSessionId_" + SHOP + "_" + uKey;
+      var createdKey = sessKey + "_created";
+      var s = null;
+      try { s = localStorage.getItem(sessKey); } catch (e) {}
+      if (!s) {
+        s = "sess_" + uKey + "_" + VISITOR_ID.slice(-6) + "_" + Date.now();
+        try {
+          localStorage.setItem(sessKey, s);
+          localStorage.setItem(createdKey, String(Date.now()));
+        } catch (e) {}
+      }
+      SESSION_ID = s;
+      try { localStorage.setItem(ACTIVE_USER_TRACKER, uKey); } catch (e) {}
 
       updateHeaderProfileBadge();
       updateOutsideGreetingText();
       return true;
     }
 
-    try { sessionStorage.setItem(ACTIVE_USER_TRACKER, uKey); } catch (e) {}
+    try { localStorage.setItem(ACTIVE_USER_TRACKER, uKey); } catch (e) {}
 
     var sessKey = "aiChatSessionId_" + SHOP + "_" + uKey;
     var stateKey = "aiChatWidgetState_" + SHOP + "_" + uKey;
     var createdKey = sessKey + "_created";
     var maxAge = (customerId || customerEmail) ? SESSION_TTL_MS : GUEST_TTL_MS;
     var createdAt = 0;
-    try { createdAt = parseInt(sessionStorage.getItem(createdKey) || "0", 10); } catch (e) {}
+    try { createdAt = parseInt(localStorage.getItem(createdKey) || "0", 10); } catch (e) {}
     var now = Date.now();
 
     if (createdAt && (now - createdAt > maxAge)) {
       try {
-        sessionStorage.removeItem(stateKey);
-        sessionStorage.removeItem(sessKey);
-        sessionStorage.removeItem(createdKey);
+        localStorage.removeItem(stateKey);
+        localStorage.removeItem(sessKey);
+        localStorage.removeItem(createdKey);
       } catch (e) {}
       var expiredNewId = "sess_" + uKey + "_" + VISITOR_ID.slice(-6) + "_" + now;
       SESSION_ID = expiredNewId;
       try {
-        sessionStorage.setItem(sessKey, expiredNewId);
-        sessionStorage.setItem(createdKey, String(now));
+        localStorage.setItem(sessKey, expiredNewId);
+        localStorage.setItem(createdKey, String(now));
       } catch (e) {}
       chatHistory = [];
       _historyLoaded = false;
@@ -2336,12 +2340,12 @@ WIDGET_JS = r"""
     }
 
     var s = null;
-    try { s = sessionStorage.getItem(sessKey); } catch (e) {}
+    try { s = localStorage.getItem(sessKey); } catch (e) {}
     if (!s) {
       s = "sess_" + uKey + "_" + VISITOR_ID.slice(-6) + "_" + now;
       try {
-        sessionStorage.setItem(sessKey, s);
-        sessionStorage.setItem(createdKey, String(now));
+        localStorage.setItem(sessKey, s);
+        localStorage.setItem(createdKey, String(now));
       } catch (e) {}
     }
     SESSION_ID = s;
@@ -2407,10 +2411,10 @@ WIDGET_JS = r"""
 
   function syncCustomerSession() {
     try {
-      var isLogoutPresent = Boolean(document.querySelector('a[href*="/account/logout"], a[href*="logout"]'));
-      var isLoginPresent = Boolean(document.querySelector('a[href*="/account/login"], a[href*="login"]'));
-
-      if (!isLogoutPresent && isLoginPresent) {
+      // Explicit logout detection: only clear customer data if URL indicates logout
+      var isLogoutUrl = window.location.pathname.indexOf("/account/logout") !== -1 ||
+                        (window.location.search && window.location.search.indexOf("logged_out") !== -1);
+      if (isLogoutUrl) {
         customerId = null;
         customerEmail = null;
         customerName = null;
@@ -2419,11 +2423,14 @@ WIDGET_JS = r"""
           sessionStorage.removeItem("ai_cust_id_" + SHOP);
           sessionStorage.removeItem("ai_cust_email_" + SHOP);
           sessionStorage.removeItem("ai_cust_name_" + SHOP);
+          localStorage.removeItem("ai_cust_id_" + SHOP);
+          localStorage.removeItem("ai_cust_email_" + SHOP);
+          localStorage.removeItem("ai_cust_name_" + SHOP);
         } catch (e) {}
       } else {
-        customerId = customerId || sessionStorage.getItem("ai_cust_id_" + SHOP) || null;
-        customerEmail = customerEmail || sessionStorage.getItem("ai_cust_email_" + SHOP) || null;
-        customerName = customerName || sessionStorage.getItem("ai_cust_name_" + SHOP) || null;
+        customerId = customerId || sessionStorage.getItem("ai_cust_id_" + SHOP) || localStorage.getItem("ai_cust_id_" + SHOP) || null;
+        customerEmail = customerEmail || sessionStorage.getItem("ai_cust_email_" + SHOP) || localStorage.getItem("ai_cust_email_" + SHOP) || null;
+        customerName = customerName || sessionStorage.getItem("ai_cust_name_" + SHOP) || localStorage.getItem("ai_cust_name_" + SHOP) || null;
       }
 
       if (window.__st) {
@@ -2498,9 +2505,9 @@ WIDGET_JS = r"""
         if (nick.length >= 2) customerName = nick.charAt(0).toUpperCase() + nick.slice(1);
       }
 
-      if (customerId) sessionStorage.setItem("ai_cust_id_" + SHOP, customerId);
-      if (customerEmail) sessionStorage.setItem("ai_cust_email_" + SHOP, customerEmail);
-      if (customerName) sessionStorage.setItem("ai_cust_name_" + SHOP, customerName);
+      if (customerId) { sessionStorage.setItem("ai_cust_id_" + SHOP, customerId); try { localStorage.setItem("ai_cust_id_" + SHOP, customerId); } catch(e){} }
+      if (customerEmail) { sessionStorage.setItem("ai_cust_email_" + SHOP, customerEmail); try { localStorage.setItem("ai_cust_email_" + SHOP, customerEmail); } catch(e){} }
+      if (customerName) { sessionStorage.setItem("ai_cust_name_" + SHOP, customerName); try { localStorage.setItem("ai_cust_name_" + SHOP, customerName); } catch(e){} }
 
       updateHeaderProfileBadge();
       updateOutsideGreetingText();
@@ -2562,7 +2569,7 @@ WIDGET_JS = r"""
     try {
       var uKey = getCurrentUserKey();
       var stateKey = "aiChatWidgetState_" + SHOP + "_" + uKey;
-      sessionStorage.setItem(stateKey, JSON.stringify({
+      var data = JSON.stringify({
         userKey: uKey,
         visitorId: VISITOR_ID,
         sessionId: SESSION_ID,
@@ -2571,7 +2578,9 @@ WIDGET_JS = r"""
         expanded: widget.classList.contains("expanded"),
         quickActionsShown: quickActionsRendered,
         history: chatHistory.slice(-20)
-      }));
+      });
+      localStorage.setItem(stateKey, data);
+      try { sessionStorage.setItem(stateKey, data); } catch (e) {}
     } catch (e) {}
   }
 
@@ -3078,33 +3087,49 @@ WIDGET_JS = r"""
       enforceUserSessionIsolation();
       var uKey = getCurrentUserKey();
       var stateKey = "aiChatWidgetState_" + SHOP + "_" + uKey;
-      var raw = sessionStorage.getItem(stateKey);
+      var raw = localStorage.getItem(stateKey) || sessionStorage.getItem(stateKey);
       if (!raw) return;
       var saved = JSON.parse(raw);
-      if (!saved || saved.userKey !== uKey || (saved.visitorId && saved.visitorId !== VISITOR_ID)) {
-        sessionStorage.removeItem(stateKey);
+      if (!saved || saved.userKey !== uKey) {
         return;
       }
       var maxAge = (customerId || customerEmail) ? SESSION_TTL_MS : GUEST_TTL_MS;
       if (saved.timestamp && (Date.now() - saved.timestamp > maxAge)) {
-        sessionStorage.removeItem(stateKey);
+        try { localStorage.removeItem(stateKey); sessionStorage.removeItem(stateKey); } catch (e) {}
         return;
       }
+      // Re-open widget if it was open on the previous page
+      if (saved.open && widget && fab) {
+        widget.classList.add("open");
+        fab.classList.add("open");
+        hideOutsideGreeting(false);
+        renderQuickActions();
+      }
+      if (saved.expanded && widget && expandToggle) {
+        widget.classList.add("expanded");
+        expandToggle.classList.add("active-expand");
+      }
       // Replay previous turns safely into the conversation div
-      if (saved.history && saved.history.length > 0) {
+      if (saved.history && saved.history.length > 0 && conversation) {
         if (greetingBubble) greetingBubble.style.display = "none";
-        var divider = document.createElement("div");
-        divider.className = "history-divider";
-        divider.textContent = "— Continuing conversation —";
-        conversation.appendChild(divider);
-        saved.history.forEach(function (item) {
-          if (item.type === "bubble") {
-            var el = document.createElement("div");
-            el.className = "bubble " + (item.who || "bot");
-            el.textContent = item.text || "";
-            conversation.appendChild(el);
-          }
-        });
+        if (!conversation.querySelector(".history-divider")) {
+          var divider = document.createElement("div");
+          divider.className = "history-divider";
+          divider.textContent = "— Continuing conversation —";
+          conversation.appendChild(divider);
+          saved.history.forEach(function (item) {
+            if (item.type === "bubble") {
+              var el = document.createElement("div");
+              el.className = "bubble " + (item.who || "bot");
+              el.textContent = item.text || "";
+              conversation.appendChild(el);
+            } else if (item.type === "products" && item.products) {
+              addProductRow(item.products, { record: false });
+            } else if (item.type === "orders" && item.orders) {
+              addOrderPicker(item.orders, { record: false });
+            }
+          });
+        }
         chatHistory = saved.history;
         autoResizeConversation();
       }
@@ -3357,6 +3382,7 @@ WIDGET_JS = r"""
       if (cfg && cfg.status !== "inactive") {
         root.style.display = "block";
         syncCustomerSession();
+        restoreState();
         if (cfg.agent_name) headerName.textContent = cfg.agent_name;
         if (cfg.agent_title) greetingBubble.textContent = cfg.agent_title;
         if (cfg.theme_color) {
@@ -3384,6 +3410,7 @@ WIDGET_JS = r"""
     .catch(function () {
       root.style.display = "block";
       syncCustomerSession();
+      restoreState();
       showOutsideGreeting();
     });
 })();

@@ -562,25 +562,64 @@ def update_customization(store_id: str, **fields) -> dict:
 
 # --- Widget icon storage (Appwrite Storage bucket + Local Static fallback) ---
 
-def _storage_file_url(file_id: str) -> str:
-    return f"{APPWRITE_ENDPOINT}/storage/buckets/{WIDGET_ICONS_BUCKET}/files/{file_id}/view?project={APPWRITE_PROJECT_ID}"
+def _storage_file_url(file_id: str, bucket_id: str | None = None) -> str:
+    b_id = bucket_id or WIDGET_ICONS_BUCKET
+    return f"{APPWRITE_ENDPOINT}/storage/buckets/{b_id}/files/{file_id}/view?project={APPWRITE_PROJECT_ID}"
 
 
-def _ensure_widget_icons_bucket() -> None:
+def _ensure_widget_icons_bucket() -> str:
+    """Ensures a storage bucket exists for widget icons and returns its bucket_id.
+    Discovers existing buckets in Appwrite project or creates WIDGET_ICONS_BUCKET."""
+    # 1. Check if configured WIDGET_ICONS_BUCKET exists
     try:
         storage.get_bucket(WIDGET_ICONS_BUCKET)
-    except Exception:
-        try:
-            from appwrite.permission import Permission
-            from appwrite.role import Role
-            storage.create_bucket(
-                bucket_id=WIDGET_ICONS_BUCKET,
-                name="Widget Icons",
-                permissions=[Permission.read(Role.any())],
-                file_security=False,
-            )
-        except Exception as e:
-            print(f"repository_appwrite: auto-create bucket notice: {e!r}")
+        return WIDGET_ICONS_BUCKET
+    except Exception as e:
+        if "policy" in str(e).lower():
+            raise AppwriteException(
+                f"Appwrite Storage blocked by policy: Your API Key does not have 'buckets.read' / 'buckets.write' scope on {APPWRITE_ENDPOINT}. "
+                "In Appwrite Console, go to Overview -> API Keys -> Select your key -> check 'files.read', 'files.write', 'buckets.read', 'buckets.write'."
+            ) from e
+
+    # 2. Try to list buckets to see if user created one with a different ID or name
+    try:
+        res = storage.list_buckets()
+        buckets = res.get("buckets", []) if isinstance(res, dict) else getattr(res, "buckets", [])
+        for b in buckets:
+            bid = b.get("$id") if isinstance(b, dict) else getattr(b, "id", None)
+            bname = (b.get("name") or "").lower() if isinstance(b, dict) else getattr(b, "name", "").lower()
+            if bid == WIDGET_ICONS_BUCKET or "icon" in bname or "widget" in bname:
+                return bid
+        if buckets:
+            bid = buckets[0].get("$id") if isinstance(buckets[0], dict) else getattr(buckets[0], "id", None)
+            if bid:
+                return bid
+    except Exception as e:
+        if "policy" in str(e).lower():
+            raise AppwriteException(
+                f"Appwrite Storage blocked by policy: Your API Key does not have 'buckets.read' scope on {APPWRITE_ENDPOINT}."
+            ) from e
+
+    # 3. Create bucket
+    try:
+        from appwrite.permission import Permission
+        from appwrite.role import Role
+        storage.create_bucket(
+            bucket_id=WIDGET_ICONS_BUCKET,
+            name="Widget Icons",
+            permissions=[Permission.read(Role.any())],
+            file_security=False,
+            enabled=True,
+        )
+        return WIDGET_ICONS_BUCKET
+    except Exception as e:
+        print(f"repository_appwrite: auto-create bucket notice: {e!r}")
+        if "policy" in str(e).lower():
+            raise AppwriteException(
+                "Appwrite Storage blocked by policy: Your Appwrite API key lacks 'buckets.write' scope. "
+                "Enable 'files.*' and 'buckets.*' in Appwrite Console -> API Keys."
+            ) from e
+        return WIDGET_ICONS_BUCKET
 
 
 def upload_icon_file(store_id: str, filename: str, content: bytes) -> str:
@@ -591,41 +630,38 @@ def upload_icon_file(store_id: str, filename: str, content: bytes) -> str:
     if not content:
         raise ValueError("Cannot upload empty icon file.")
 
-    # 1. Try Appwrite Storage first
+    # 1. Upload to Appwrite Storage bucket
     try:
+        bucket_id = _ensure_widget_icons_bucket()
         file_id = ID.unique()
         try:
+            # First attempt: without perms (inherits bucket public read when file_security=False)
+            storage.create_file(
+                bucket_id=bucket_id,
+                file_id=file_id,
+                file=InputFile.from_bytes(content, filename=filename),
+            )
+            cdn_url = _storage_file_url(file_id, bucket_id)
+            print(f"[upload_icon_file] ✅ Uploaded to Appwrite Storage bucket '{bucket_id}' (file_id={file_id})")
+            return cdn_url
+        except Exception as upload_err:
+            # Second attempt: with explicit public read permissions
             from appwrite.permission import Permission
             from appwrite.role import Role
             perms = [Permission.read(Role.any())]
-        except Exception:
-            perms = ['read("any")']
-
-        try:
             storage.create_file(
-                bucket_id=WIDGET_ICONS_BUCKET,
+                bucket_id=bucket_id,
                 file_id=file_id,
                 file=InputFile.from_bytes(content, filename=filename),
                 permissions=perms,
             )
-            print(f"[upload_icon_file] Uploaded to Appwrite Storage bucket '{WIDGET_ICONS_BUCKET}' (file_id={file_id})")
-            return _storage_file_url(file_id)
-        except Exception as bucket_err:
-            if "bucket" in str(bucket_err).lower() or "not found" in str(bucket_err).lower():
-                _ensure_widget_icons_bucket()
-                storage.create_file(
-                    bucket_id=WIDGET_ICONS_BUCKET,
-                    file_id=file_id,
-                    file=InputFile.from_bytes(content, filename=filename),
-                    permissions=perms,
-                )
-                print(f"[upload_icon_file] Created bucket and uploaded file {file_id}")
-                return _storage_file_url(file_id)
-            raise
+            cdn_url = _storage_file_url(file_id, bucket_id)
+            print(f"[upload_icon_file] ✅ Uploaded to Appwrite Storage with permissions (file_id={file_id})")
+            return cdn_url
     except Exception as storage_err:
-        print(f"[upload_icon_file] Appwrite Storage unavailable ({storage_err!r}); using resilient fallback.")
+        print(f"[upload_icon_file] ⚠️ Appwrite Storage unavailable ({storage_err!r}); using resilient fallback.")
 
-    # 2. Resilient Fallback: Save to static/uploads directory served by FastAPI
+    # 2. Resilient local disk fallback
     import base64
     import os
     import shopify_auth

@@ -2517,12 +2517,22 @@ def appearance_page():
                         repo.delete_icon_file(old_url)
                     render_icon_preview()
                     _trigger_widget_install_async(store)
-                    ui.notify("Custom icon uploaded and applied successfully!", type="positive")
+                    ui.notify("Custom icon uploaded to Appwrite Storage and applied successfully!", type="positive")
                 except Exception as err:
                     logger.error("Failed to upload custom icon: %s", err, exc_info=True)
-                    ui.notify(f"Upload failed: {err}", type="negative")
+                    err_msg = str(err)
+                    if "policy" in err_msg.lower() or "files" in err_msg.lower() or "buckets" in err_msg.lower():
+                        ui.notify(
+                            "Appwrite Storage Scope Required: Your API key lacks Storage scopes. "
+                            "In Appwrite Console -> Overview -> API Keys, check 'files.read', 'files.write', 'buckets.read', 'buckets.write'.",
+                            type="negative",
+                            duration=15,
+                        )
+                    else:
+                        ui.notify(f"Upload failed: {err}", type="negative", duration=10)
 
             ui.upload(on_upload=handle_upload, auto_upload=True).props("accept=image/* max-file-size=5000000").classes("w-full")
+            ui.label("Permanent cloud storage in Appwrite bucket 'widget_icons'. Requires 'files.*' and 'buckets.*' API key scopes.").classes("text-[11px] text-gray-400 mt-1")
 
 
 # --------------------------------------------------------------------

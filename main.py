@@ -23,7 +23,7 @@ load_dotenv()
 _REQUIRED_VARS = {
     "APPWRITE_ENDPOINT":    "Appwrite cloud/self-hosted URL  (e.g. https://cloud.appwrite.io/v1)",
     "APPWRITE_PROJECT_ID":  "Appwrite Project ID             (from your Appwrite console)",
-    "APPWRITE_API_KEY":     "Appwrite server-side API key    (databases.* scope required)",
+    "APPWRITE_API_KEY":     "Appwrite server-side API key    (databases.* AND files.*, buckets.* scopes required for icons)",
     "APPWRITE_DATABASE_ID": "Appwrite Database ID            (the DB you created for this app)",
     "SHOPIFY_API_KEY":      "Shopify App API Key / Client ID (from Partners Dashboard)",
     "SHOPIFY_API_SECRET":   "Shopify App API Secret          (from Partners Dashboard)",
@@ -67,7 +67,21 @@ def _probe_appwrite():
         print("[Appwrite probe]    App installs will NOT be saved until this is fixed.")
         print("[Appwrite probe]    Run: python test_appwrite_connection.py  for a full diagnosis.")
 
+
+def _probe_appwrite_storage():
+    try:
+        from appwrite_client import storage, WIDGET_ICONS_BUCKET
+        storage.get_bucket(WIDGET_ICONS_BUCKET)
+        print(f"[Appwrite Storage probe] ✅  Connected — Storage bucket '{WIDGET_ICONS_BUCKET}' reachable.")
+    except Exception as e:
+        if "policy" in str(e).lower():
+            print(f"[Appwrite Storage probe] ⚠️  Storage scopes not enabled on API key. Enable 'files.*' and 'buckets.*' in Appwrite Console -> API Keys for permanent custom icons.")
+        else:
+            print(f"[Appwrite Storage probe] ℹ️  Storage bucket check notice: {e!r}")
+
+
 _probe_appwrite()
+_probe_appwrite_storage()
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
