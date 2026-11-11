@@ -124,19 +124,94 @@ def migrate(databases, db_id):
             print(f"  Could not create '{CUSTOMER_PROFILES_COLLECTION}': {e}")
     _run("customer_profiles.store",
          databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
-         "store", 36, False)
+         "store", 255, False)
+    _run("customer_profiles.shop",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "shop", 255, False)
     _run("customer_profiles.customer_id",
          databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
-         "customer_id", 100, False)
+         "customer_id", 128, False)
     _run("customer_profiles.email",
          databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
          "email", 255, False)
+    _run("customer_profiles.first_name",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "first_name", 100, False)
+    _run("customer_profiles.last_name",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "last_name", 100, False)
     _run("customer_profiles.name",
          databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
          "name", 255, False)
+    _run("customer_profiles.phone",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "phone", 60, False)
+    _run("customer_profiles.order_count",
+         databases.create_integer_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "order_count", False, 0)
+    _run("customer_profiles.orders_count",
+         databases.create_integer_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "orders_count", False, 0)
+    _run("customer_profiles.total_spent",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "total_spent", 60, False)
+    _run("customer_profiles.recent_orders",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "recent_orders", 65535, False)
+    _run("customer_profiles.orders_data",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "orders_data", 65535, False)
+    _run("customer_profiles.active_orders",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "active_orders", 10000, False)
+    _run("customer_profiles.purchased_product_ids",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "purchased_product_ids", 65535, False)
+    _run("customer_profiles.top_types",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "top_types", 4096, False)
+    _run("customer_profiles.top_tags",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "top_tags", 4096, False)
+    _run("customer_profiles.recent_searches",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "recent_searches", 4096, False)
+    _run("customer_profiles.favorite_colors",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "favorite_colors", 1024, False)
+    _run("customer_profiles.budget_min",
+         databases.create_integer_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "budget_min", False, 0)
+    _run("customer_profiles.budget_max",
+         databases.create_integer_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "budget_max", False, 0)
+    _run("customer_profiles.chat_history",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "chat_history", 65535, False)
+    _run("customer_profiles.last_message",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "last_message", 1000, False)
+    _run("customer_profiles.total_chats",
+         databases.create_integer_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "total_chats", False, 0)
     _run("customer_profiles.preferences",
          databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
          "preferences", 4000, False)
+    _run("customer_profiles.tags",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "tags", 1000, False)
+    _run("customer_profiles.currency",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "currency", 20, False)
+    _run("customer_profiles.addresses",
+         databases.create_string_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "addresses", 2000, False)
+    _run("customer_profiles.synced_at",
+         databases.create_integer_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "synced_at", False, 0)
+    _run("customer_profiles.last_seen",
+         databases.create_integer_attribute, db_id, CUSTOMER_PROFILES_COLLECTION,
+         "last_seen", False, 0)
 
     print("\n── Analytics Events ───────────────────────────────────")
     # Create the collection if it doesn't exist

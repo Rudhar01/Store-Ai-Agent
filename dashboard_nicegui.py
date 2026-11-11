@@ -72,6 +72,7 @@ SHOPIFY_API_KEY = os.environ.get("SHOPIFY_API_KEY", "")
 NAV_ITEMS = [
     ("Dashboard", "Dashboard", "home"),
     ("analytics", "Analytics", "bar_chart"),
+    ("customers", "Customers", "people"),
     ("store", "Store Information", "storefront"),
     ("agent", "AI Agent", "smart_toy"),
     ("features", "Features", "grid_view"),
@@ -2159,6 +2160,194 @@ async def analytics_page():
 
     await client.connected()  # so the loading spinner is visible while data loads
     await refresh()
+
+
+# --------------------------------------------------------------------
+# CUSTOMERS & CHAT PROFILES
+# --------------------------------------------------------------------
+@ui.page("/dashboard/customers")
+async def customers_page():
+    store = _require_store()
+    if not store:
+        return
+    cfg = repo.ensure_customization(store["$id"])
+    shop = store.get("shop_domain") or ""
+
+    import customer_profiles
+
+    content = _layout("customers", store, cfg)
+    with content:
+        _page_header("Customers & Chat Transcripts", "Shoppers interacting with your AI assistant, order history, and full chat logs.")
+
+        profiles = await customer_profiles.list_customer_profiles(shop, limit=200)
+
+        total_custs = len(profiles)
+        total_orders = sum(int(p.get("order_count") or p.get("orders_count") or 0) for p in profiles)
+        total_chats = sum(int(p.get("total_chats") or (len(p.get("chat_history") or []) if isinstance(p.get("chat_history"), list) else 0)) for p in profiles)
+
+        with ui.row().classes("w-full grid grid-cols-1 md:grid-cols-3 gap-4 -mt-1"):
+            for title, val, icon in [
+                ("Total Customers", str(total_custs), "people"),
+                ("Customer Orders", str(total_orders), "shopping_bag"),
+                ("Chat Messages Logged", str(total_chats), "chat"),
+            ]:
+                with ui.card().classes(CARD_CLASSES + " p-5 gap-1"):
+                    with ui.row().classes("items-center justify-between w-full"):
+                        ui.label(title).classes("text-xs font-semibold text-gray-500 uppercase tracking-wide")
+                        ui.icon(icon, size="20px").style("color:#6B7280;")
+                    ui.label(val).classes("text-2xl font-bold text-gray-900")
+
+        # Detail modal dialog
+        detail_dialog = ui.dialog().props("maximized-on-mobile")
+        dialog_container = ui.element("div")
+
+        def open_details(profile: dict):
+            detail_dialog.clear()
+            with detail_dialog, ui.card().classes("w-full max-w-4xl p-6 gap-6 bg-white rounded-2xl shadow-xl").style("max-height:85vh;overflow-y:auto;"):
+                with ui.row().classes("w-full items-center justify-between border-b pb-4"):
+                    with ui.row().classes("items-center gap-3"):
+                        with ui.element("div").classes("w-10 h-10 rounded-full flex items-center justify-center").style("background:#2B2B2B;color:white;font-weight:bold;"):
+                            ui.label((profile.get("name") or profile.get("first_name") or profile.get("email") or "C")[:1].upper())
+                        with ui.column().classes("gap-0"):
+                            ui.label(profile.get("name") or f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip() or "Shopper").classes("text-lg font-bold text-gray-900")
+                            ui.label(profile.get("email") or "No email provided").classes("text-xs text-gray-500")
+                    ui.button(icon="close", on_click=detail_dialog.close).props("flat round dense")
+
+                # Personal details row
+                with ui.row().classes("w-full grid grid-cols-2 md:grid-cols-4 gap-4 p-4 rounded-xl bg-gray-50 border border-gray-100"):
+                    with ui.column().classes("gap-0.5"):
+                        ui.label("CUSTOMER ID").classes("text-[10px] font-bold text-gray-400 uppercase tracking-wider")
+                        ui.label(str(profile.get("customer_id") or "N/A")).classes("text-xs font-semibold text-gray-800")
+                    with ui.column().classes("gap-0.5"):
+                        ui.label("PHONE").classes("text-[10px] font-bold text-gray-400 uppercase tracking-wider")
+                        ui.label(str(profile.get("phone") or "N/A")).classes("text-xs font-semibold text-gray-800")
+                    with ui.column().classes("gap-0.5"):
+                        ui.label("ORDERS / SPENT").classes("text-[10px] font-bold text-gray-400 uppercase tracking-wider")
+                        ui.label(f"{profile.get('order_count', 0)} orders • {profile.get('total_spent') or '0.00'}").classes("text-xs font-semibold text-gray-800")
+                    with ui.column().classes("gap-0.5"):
+                        ui.label("ADDRESS").classes("text-[10px] font-bold text-gray-400 uppercase tracking-wider")
+                        ui.label(str(profile.get("addresses") or "N/A")[:30]).classes("text-xs font-semibold text-gray-800")
+
+                # Orders section
+                orders_list = profile.get("recent_orders") or profile.get("orders_data") or []
+                if isinstance(orders_list, str):
+                    try:
+                        orders_list = json.loads(orders_list)
+                    except Exception:
+                        orders_list = []
+
+                ui.label(f"Orders ({len(orders_list)})").classes("text-base font-bold text-gray-900 -mb-2")
+                if orders_list:
+                    with ui.column().classes("w-full gap-2"):
+                        for ord_info in orders_list[:10]:
+                            with ui.row().classes("w-full items-center justify-between p-3 rounded-lg border border-gray-100 bg-white hover:bg-gray-50"):
+                                with ui.row().classes("items-center gap-3"):
+                                    ui.label(f"#{ord_info.get('order_number')}").classes("text-xs font-bold text-gray-900")
+                                    ui.label(str(ord_info.get('created_at', ''))[:10]).classes("text-xs text-gray-400")
+                                    f_st = ord_info.get("fulfillment_status") or "unfulfilled"
+                                    ui.badge(f_st).props(f"color={'green' if f_st=='delivered' else 'orange' if f_st=='shipped' else 'grey'}").classes("text-[10px]")
+                                with ui.row().classes("items-center gap-3"):
+                                    ui.label(f"{ord_info.get('total_price', '0.00')} {ord_info.get('currency', 'INR')}").classes("text-xs font-semibold text-gray-800")
+                                    trks = ord_info.get("tracking") or []
+                                    if trks and trks[0].get("url"):
+                                        ui.link("Track", trks[0]["url"], new_tab=True).classes("text-xs text-blue-600 font-semibold")
+                else:
+                    ui.label("No orders on file yet.").classes("text-xs text-gray-400 italic")
+
+                # Chat transcript section
+                chat_turns = profile.get("chat_history") or []
+                if isinstance(chat_turns, str):
+                    try:
+                        chat_turns = json.loads(chat_turns)
+                    except Exception:
+                        chat_turns = []
+
+                ui.label(f"Chat Transcript ({len(chat_turns)} turns)").classes("text-base font-bold text-gray-900 -mb-2")
+                if chat_turns:
+                    with ui.column().classes("w-full gap-3 p-4 rounded-xl bg-gray-50 border border-gray-100").style("max-height:350px;overflow-y:auto;"):
+                        for turn in chat_turns:
+                            is_user = turn.get("role") == "user"
+                            with ui.row().classes(f"w-full {'justify-end' if is_user else 'justify-start'}"):
+                                with ui.column().classes(f"max-w-[80%] p-3 rounded-2xl {'bg-gray-900 text-white' if is_user else 'bg-white border text-gray-800 shadow-sm'}"):
+                                    ui.label(turn.get("message", "")).classes("text-xs")
+                                    if turn.get("time"):
+                                        ui.label(str(turn.get("time"))).classes(f"text-[9px] {'text-gray-400' if is_user else 'text-gray-400'} mt-1 self-end")
+                else:
+                    ui.label("No chat messages recorded yet.").classes("text-xs text-gray-400 italic")
+
+            detail_dialog.open()
+
+        # Customer List Table Card
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-4"):
+            search_input = ui.input(placeholder="Search by name, email, or customer ID...").classes("w-full md:w-96").props("dense outlined")
+            search_input.add_slot("prepend", '<i class="q-icon material-icons">search</i>')
+
+            table_container = ui.column().classes("w-full gap-2")
+
+            def render_table(query=""):
+                table_container.clear()
+                q = (query or "").strip().lower()
+                filtered = [
+                    p for p in profiles
+                    if not q or (
+                        q in str(p.get("name", "")).lower()
+                        or q in str(p.get("email", "")).lower()
+                        or q in str(p.get("customer_id", "")).lower()
+                    )
+                ]
+
+                if not filtered:
+                    with table_container:
+                        ui.label("No customer records found yet. Customers will appear here automatically when they browse or chat on your store.").classes("text-xs text-gray-400 italic py-6 text-center w-full")
+                    return
+
+                with table_container:
+                    # Header row
+                    with ui.row().classes("w-full items-center justify-between px-3 py-2 text-[11px] font-bold text-gray-400 uppercase tracking-wider border-b"):
+                        ui.label("Customer").classes("w-1/4")
+                        ui.label("Contact").classes("w-1/4")
+                        ui.label("Orders / Spent").classes("w-1/6")
+                        ui.label("Chats / Last Active").classes("w-1/6")
+                        ui.label("Action").classes("w-16 text-right")
+
+                    for p in filtered:
+                        with ui.row().classes("w-full items-center justify-between px-3 py-3 rounded-xl border border-gray-100 hover:bg-gray-50 transition-colors"):
+                            # Name & Avatar
+                            with ui.row().classes("w-1/4 items-center gap-3"):
+                                with ui.element("div").classes("w-8 h-8 rounded-full flex items-center justify-center shrink-0").style("background:#F3F4F6;color:#374151;font-weight:600;font-size:12px;"):
+                                    ui.label((p.get("name") or p.get("first_name") or p.get("email") or "C")[:1].upper())
+                                with ui.column().classes("gap-0"):
+                                    ui.label(p.get("name") or f"{p.get('first_name', '')} {p.get('last_name', '')}".strip() or "Customer").classes("text-xs font-semibold text-gray-900")
+                                    if p.get("customer_id"):
+                                        ui.label(f"ID: {p.get('customer_id')}").classes("text-[10px] text-gray-400")
+
+                            # Contact
+                            with ui.column().classes("w-1/4 gap-0"):
+                                ui.label(p.get("email") or "—").classes("text-xs text-gray-700 truncate")
+                                if p.get("phone"):
+                                    ui.label(p.get("phone")).classes("text-[10px] text-gray-400")
+
+                            # Orders
+                            with ui.column().classes("w-1/6 gap-0"):
+                                ui.label(f"{p.get('order_count', 0)} orders").classes("text-xs font-semibold text-gray-800")
+                                ui.label(str(p.get("total_spent") or "0.00")).classes("text-[10px] text-gray-500")
+
+                            # Chat activity
+                            with ui.column().classes("w-1/6 gap-0"):
+                                ui.label(f"{p.get('total_chats', 0)} messages").classes("text-xs font-semibold text-gray-800")
+                                l_seen = p.get("last_seen")
+                                if l_seen:
+                                    try:
+                                        ui.label(time.strftime("%b %d, %H:%M", time.localtime(int(l_seen)))).classes("text-[10px] text-gray-400")
+                                    except Exception:
+                                        pass
+
+                            # Action button
+                            with ui.row().classes("w-16 justify-end"):
+                                ui.button("View", on_click=lambda prof=p: open_details(prof)).props("no-caps flat dense").classes("text-xs font-semibold text-blue-600 hover:bg-blue-50 px-2 py-1 rounded-lg")
+
+            search_input.on("update:model-value", lambda e: render_table(e.args))
+            render_table()
 
 
 # --------------------------------------------------------------------

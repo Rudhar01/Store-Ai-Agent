@@ -394,14 +394,16 @@ async def get_customer(store, customer_id: str) -> dict | None:
     query = """
     query Customer($id: ID!) {
       customer(id: $id) {
-        id firstName lastName displayName
+        id firstName lastName displayName phone tags
         defaultEmailAddress { emailAddress }
+        defaultAddress { address1 city province country zip }
         numberOfOrders
         orders(first: 20, sortKey: CREATED_AT, reverse: true) {
           nodes {
             id name createdAt displayFinancialStatus displayFulfillmentStatus cancelledAt
             totalPriceSet { shopMoney { amount currencyCode } }
             lineItems(first: 20) { nodes { name quantity } }
+            fulfillments { trackingInfo { number url company } }
           }
         }
       }

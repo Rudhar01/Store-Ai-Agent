@@ -895,11 +895,27 @@ async def chat(req: ChatRequest):
     result = await _chat_impl(req)
     try:
         text = (req.message or "").strip()
-        if text and isinstance(result, dict):
-            cid = req.customer_id or _session_customer(req.shop, req.session_id)
-            _remember_turn(_pkey(req.shop, req.session_id), text, result.get("reply") or "", customer_id=cid, visitor_id=req.visitor_id)
+        bot_reply = (result.get("reply") or "") if isinstance(result, dict) else ""
+        if text:
+            cid = req.customer_id or _session_customer(req.shop, req.session_id) or None
+            cemail = req.customer_email or _session_customer_email(req.shop, req.session_id) or None
+            cname = req.customer_name or _session_customer_name(req.shop, req.session_id) or None
+            _remember_turn(_pkey(req.shop, req.session_id), text, bot_reply, customer_id=cid, visitor_id=req.visitor_id)
+            if cid or cemail:
+                asyncio.create_task(
+                    customer_profiles.append_chat_turn(
+                        shop=req.shop,
+                        customer_id=cid,
+                        email=cemail,
+                        name=cname,
+                        user_message=text,
+                        bot_reply=bot_reply,
+                        session_id=req.session_id,
+                        visitor_id=req.visitor_id,
+                    )
+                )
     except Exception as e:
-        print(f"chatbot_widget: history update failed: {e!r}")
+        print(f"chatbot_widget: history/customer chat update failed: {e!r}")
     return result
 
 
@@ -1670,12 +1686,15 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
             query CustomerByEmail($query: String!) {
               customers(first: 1, query: $query) {
                 nodes {
-                  id firstName lastName displayName
+                  id firstName lastName displayName phone tags
                   defaultEmailAddress { emailAddress }
+                  defaultAddress { address1 city province country zip }
                   numberOfOrders
-                  orders(first: 5, sortKey: CREATED_AT, reverse: true) {
+                  orders(first: 20, sortKey: CREATED_AT, reverse: true) {
                     nodes {
                       id name createdAt displayFinancialStatus displayFulfillmentStatus cancelledAt
+                      totalPriceSet { shopMoney { amount currencyCode } }
+                      lineItems(first: 20) { nodes { name quantity } }
                       fulfillments { trackingInfo { number url company } }
                     }
                   }
@@ -1698,20 +1717,60 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
 
     orders_count = 0
     active_order = None
+    recent_orders_list = []
+    total_spent_val = 0.0
+    curr_code = "INR"
+    phone = ""
+    tags = ""
+    address_str = ""
+
     if target_node:
         try:
             orders_count = int(target_node.get("numberOfOrders") or 0)
         except Exception:
             orders_count = 0
+        phone = (target_node.get("phone") or "").strip()
+        tags = target_node.get("tags") or ""
+        addr_obj = target_node.get("defaultAddress") or {}
+        address_str = ", ".join(filter(None, [addr_obj.get("address1"), addr_obj.get("city"), addr_obj.get("province"), addr_obj.get("country"), addr_obj.get("zip")]))
+
         ord_nodes = ((target_node.get("orders") or {}).get("nodes")) or []
         if not orders_count and ord_nodes:
             orders_count = len(ord_nodes)
         for o in ord_nodes:
-            if o.get("cancelledAt"):
-                continue
+            ord_name = str(o.get("name") or "").lstrip("#")
             f_status = (o.get("displayFulfillmentStatus") or "").lower()
-            if f_status != "delivered":
-                ord_name = str(o.get("name") or "").lstrip("#")
+            fin_status = (o.get("displayFinancialStatus") or "").lower()
+            created_at = o.get("createdAt") or ""
+            money = ((o.get("totalPriceSet") or {}).get("shopMoney") or {}) if isinstance(o.get("totalPriceSet"), dict) else {}
+            amt_str = money.get("amount") or "0.00"
+            curr_code = money.get("currencyCode") or curr_code
+            if not o.get("cancelledAt"):
+                try:
+                    total_spent_val += float(amt_str)
+                except Exception:
+                    pass
+
+            items = [{"name": it.get("name"), "quantity": it.get("quantity")} for it in ((o.get("lineItems") or {}).get("nodes") or [])]
+            tracking = []
+            for ful in o.get("fulfillments") or []:
+                for trk in ful.get("trackingInfo") or []:
+                    if trk.get("number") or trk.get("url"):
+                        tracking.append({"number": trk.get("number"), "url": trk.get("url"), "company": trk.get("company")})
+
+            recent_orders_list.append({
+                "order_number": ord_name,
+                "order_id": str(o.get("id") or "").split("/")[-1],
+                "created_at": created_at,
+                "fulfillment_status": f_status,
+                "financial_status": fin_status,
+                "total_price": amt_str,
+                "currency": curr_code,
+                "items": items,
+                "tracking": tracking,
+            })
+
+            if not active_order and not o.get("cancelledAt") and f_status != "delivered":
                 progress = 40
                 stage = "ordered"
                 stage_label = "Confirmed"
@@ -1730,7 +1789,6 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
                     "stage_label": stage_label,
                     "progress": progress,
                 }
-                break
 
     # Fallback name derivation from email handle if customer record in Shopify lacks firstName
     if not fn and mail:
@@ -1738,6 +1796,28 @@ async def get_customer_profile(request: Request, shop: str = "", customer_id: st
         if derived_fn:
             fn = derived_fn
             name = name or derived_full
+
+    # Persist customer profile with orders & personal data to Appwrite immediately
+    effective_cid = cid or str(verified_id or "")
+    if effective_cid or mail:
+        asyncio.create_task(
+            customer_profiles.save_customer_profile(
+                shop=shop,
+                customer_id=effective_cid or None,
+                email=mail or None,
+                first_name=fn,
+                last_name=ln,
+                name=name or fn,
+                phone=phone,
+                order_count=orders_count,
+                total_spent=f"{total_spent_val:.2f} {curr_code}" if total_spent_val else f"0.00 {curr_code}",
+                recent_orders=recent_orders_list,
+                active_orders=[active_order] if active_order else [],
+                addresses=address_str,
+                tags=tags,
+                currency=curr_code,
+            )
+        )
 
     if fn or name:
         if session_id:

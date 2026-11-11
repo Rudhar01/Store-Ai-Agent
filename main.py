@@ -80,8 +80,18 @@ def _probe_appwrite_storage():
             print(f"[Appwrite Storage probe] ℹ️  Storage bucket check notice: {e!r}")
 
 
+def _probe_appwrite_customer_profiles():
+    try:
+        import customer_profiles
+        customer_profiles.ensure_customer_profiles_collection()
+        print("[Appwrite Customer Profiles] ✅  Schema checked and initialized.")
+    except Exception as e:
+        print(f"[Appwrite Customer Profiles] ℹ️  Notice: {e!r}")
+
+
 _probe_appwrite()
 _probe_appwrite_storage()
+_probe_appwrite_customer_profiles()
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
