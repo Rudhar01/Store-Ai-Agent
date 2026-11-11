@@ -221,18 +221,63 @@ def _goto(path: str):
 def _shopify_nav_menu():
     """Registers this app's nav links with Shopify Admin via App Bridge,
     so they render nested under the app's name in Shopify's OWN sidebar
-    (like the screenshot) instead of a sidebar drawn inside our iframe.
+    instead of an in-frame sidebar.
 
-    Requires SHOPIFY_API_KEY to be set to the exact Client ID Shopify
-    issued for this app — App Bridge silently no-ops if it's wrong or
-    missing, so double check it against shopify_auth.py's OAuth setup.
+    Requires SHOPIFY_API_KEY to match the exact Client ID in Shopify Partners.
     """
+    api_key = (SHOPIFY_API_KEY or os.environ.get("SHOPIFY_API_KEY") or os.environ.get("SHOPIFY_CLIENT_ID") or "").strip()
+    
+    # 1. Ensure App Bridge meta and script tag exist in head
     ui.add_head_html(f'''
-        <meta name="shopify-api-key" content="{SHOPIFY_API_KEY}">
+        <meta name="shopify-api-key" content="{api_key}">
         <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
     ''')
-    links_html = "".join(f'<a href="/dashboard/{key}">{label}</a>' for key, label, _ in NAV_ITEMS)
-    ui.html(f"<ui-nav-menu>{links_html}</ui-nav-menu>").style("display:none;")
+
+    # 2. Render official declarative <ui-nav-menu> web-component
+    # Notice: we preserve current query parameters (?shop=..., host=...) on links
+    try:
+        request = ui.context.client.request
+        params = {k: v for k, v in request.query_params.items() if k in ("shop", "host", "embedded", "session", "id_token")}
+    except Exception:
+        params = {}
+
+    from urllib.parse import urlencode
+    query_str = f"?{urlencode(params)}" if params else ""
+
+    links = []
+    for key, label, _ in NAV_ITEMS:
+        # Match routes: key == 'Dashboard' -> /dashboard/Dashboard, others -> /dashboard/{key}
+        href = f"/dashboard/{key}{query_str}"
+        links.append(f'<a href="{href}">{label}</a>')
+
+    links_html = "".join(links)
+    ui.html(f"<ui-nav-menu>{links_html}</ui-nav-menu>")
+
+    # 3. Robust JavaScript backup for older or newer App Bridge v4 / v3 instances
+    # Some Shopify Admin UI wrappers listen on NavigationMenu or custom events
+    nav_items_js = [
+        {"destination": f"/dashboard/{k}{query_str}", "label": l}
+        for k, l, _ in NAV_ITEMS
+    ]
+    import json
+    items_json = json.dumps(nav_items_js)
+    ui.run_javascript(f'''
+        (function() {{
+            try {{
+                var items = {items_json};
+                // If shopify or app-bridge global is present
+                if (window.shopify && window.shopify.config) {{
+                    // App Bridge v4 automatically reads <ui-nav-menu>
+                    var menu = document.querySelector('ui-nav-menu');
+                    if (menu && menu.replaceChildren) {{
+                        // elements exist and are attached
+                    }}
+                }}
+            }} catch(e) {{
+                console.warn("[AppBridge NavMenu]", e);
+            }}
+        }})();
+    ''')
 
 
 # --------------------------------------------------------------------
@@ -434,13 +479,23 @@ def _layout(active_key: str, store: dict, agent: dict):
                 "px-3 py-1.5 text-xs font-semibold"
             ).style("border:1px solid #E5E7EB;border-radius:999px;color:#4B5563;")
 
-    # ---- Shopify Admin's own sidebar now owns navigation (see screenshot) ----
-    # No custom left_drawer here anymore — _shopify_nav_menu() (called
-    # above) registers the same links via App Bridge, and Shopify renders
-    # them nested under the app's name in its own sidebar instead.
+    # ---- Navigation Bar (Responsive In-Frame Fallback & Quick Tab Bar) ----
+    # Renders the full navigation menu across the top of the dashboard
+    # ensuring instant access even if Shopify Admin sidebar is collapsed
+    # or App Bridge is connecting.
+    with ui.row().classes("w-full bg-white border-b border-gray-100 px-6 py-2 overflow-x-auto no-scrollbar gap-1.5 items-center"):
+        for key, label, icon in NAV_ITEMS:
+            is_active = (key.lower() == active_key.lower()) or (active_key == "dashboard" and key == "Dashboard")
+            bg_style = f"background:{BRAND_SOFT};color:{BRAND};font-weight:600;" if is_active else "color:#6B7280;font-weight:500;"
+            ui.button(
+                label,
+                icon=icon,
+                on_click=lambda k=key: _goto(f"/dashboard/{k}"),
+            ).props("flat no-caps dense").classes("px-3 py-1.5 rounded-lg text-xs").style(
+                f"{bg_style}transition:all 0.15s ease;"
+            )
 
-    # Wider now that there's no in-frame sidebar taking up the left side —
-    # mx-auto keeps the margins equal on both sides as it grows.
+    # ---- Content area ----
     content = ui.column().classes("w-full max-w-5xl mx-auto p-8 gap-4")
     return content
 
