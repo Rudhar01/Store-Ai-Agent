@@ -253,3 +253,44 @@ def store_stats(store: str) -> dict:
 def delete_store(store: str) -> dict:
     """Call from your uninstall and shop/redact webhooks."""
     return _admin("DELETE", f"/v1/tenants/{_tenant(store)}")
+
+
+def extract_text_from_file_bytes(filename: str, content: bytes) -> str:
+    """Extracts plain text / markdown from uploaded document bytes.
+    Supports .txt, .md, .markdown, .html, .htm, .json, .csv, and .pdf.
+    """
+    ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
+    if ext == "pdf":
+        try:
+            import io
+            import pypdf
+            reader = pypdf.PdfReader(io.BytesIO(content))
+            pages = []
+            for i, page in enumerate(reader.pages):
+                page_text = page.extract_text() or ""
+                if page_text.strip():
+                    pages.append(f"## Page {i + 1}\n\n{page_text.strip()}")
+            return "\n\n".join(pages).strip()
+        except Exception as e:
+            raise ValueError(f"Failed to parse PDF '{filename}': {e}")
+    else:
+        # Text-based formats: .txt, .md, .html, .csv, .json, etc.
+        for enc in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
+            try:
+                return content.decode(enc).strip()
+            except UnicodeDecodeError:
+                continue
+        return content.decode("utf-8", errors="replace").strip()
+
+
+def ingest_file_document(store: str, filename: str, content: bytes, doc_title: str = "", doc_kind: str = "document") -> dict:
+    """Extracts text from uploaded file bytes and sends it to the remote RAG service."""
+    text = extract_text_from_file_bytes(filename, content)
+    if not text:
+        raise ValueError(f"File '{filename}' contains no extractable text.")
+    clean_name = re.sub(r"[^\w\-.]", "_", filename).strip("_")
+    doc_id = f"file:{clean_name}"
+    title = (doc_title or "").strip() or filename
+    ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
+    fmt = "html" if ext in ("html", "htm") else "markdown"
+    return ingest_text(store, doc_id=doc_id, text=text, title=title, kind=doc_kind, format=fmt)

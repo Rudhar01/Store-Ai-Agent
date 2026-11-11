@@ -28,6 +28,7 @@ from nicegui import ui, app, run
 import repository_appwrite as repo
 import email_utils
 import shopify_actions
+import rag_retriever
 
 logger = logging.getLogger("renderlink.dashboard")
 
@@ -2745,12 +2746,166 @@ def knowledge_page():
     if not store:
         return
     cfg = repo.ensure_customization(store["$id"])
+    shop_domain = store.get("shop_domain", "")
 
     content = _layout("knowledge", store, cfg)
     with content:
-        _page_header("Knowledge (FAQs)", "Answers your agent can pull from directly.")
+        _page_header(
+            "Knowledge Base & Documents",
+            "Upload files or add FAQs for the AI assistant to embed and use during customer conversations.",
+        )
 
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
+        # ================================================================
+        # SECTION 1: DOCUMENT UPLOAD & RAG VECTOR PIPELINE
+        # ================================================================
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-3 mb-4"):
+            with ui.row().classes("w-full items-center justify-between"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("cloud_upload", size="22px").style(f"color:{BRAND};")
+                    ui.label("Upload Documents for RAG Knowledge").classes("text-base font-bold text-gray-900")
+                rag_status_badge = ui.label("").classes("text-xs font-semibold px-2.5 py-1 rounded-full")
+
+            ui.label(
+                "Upload your store policies, product guides, warranty information, or catalogs (PDF, Markdown, Text, HTML, CSV). "
+                "Uploaded files are processed and sent to your independently deployed RAG service, where they are embedded and stored in Qdrant."
+            ).classes("text-xs text-gray-500 leading-relaxed")
+
+            # Document Category selector
+            with ui.row().classes("w-full items-center gap-3"):
+                kind_select = ui.select(
+                    options={
+                        "document": "General Document",
+                        "policy": "Store Policy (Return, Shipping, Privacy, etc.)",
+                        "product": "Product Guide / Catalog",
+                        "faq": "FAQ List / Answers",
+                    },
+                    value="document",
+                    label="Document Category",
+                ).classes("w-64").props("dense outlined")
+
+            upload_status = ui.label("").classes("text-xs font-medium")
+
+            # Multi-file upload component
+            def handle_doc_upload(e):
+                filename = e.name
+                content_bytes = e.content.read()
+                doc_kind = kind_select.value or "document"
+                upload_status.text = f"Embedding & indexing '{filename}' in Qdrant vector database..."
+                upload_status.style("color:#2563EB;")
+                try:
+                    res = rag_retriever.ingest_file_document(
+                        shop_domain,
+                        filename=filename,
+                        content=content_bytes,
+                        doc_title=filename,
+                        doc_kind=doc_kind,
+                    )
+                    chunks = res.get("chunks", 0)
+                    upload_status.text = f"✓ Successfully indexed '{filename}' ({chunks} chunks embedded in Qdrant)."
+                    upload_status.style("color:#059669;")
+                    ui.notify(f"'{filename}' embedded and ready for AI retrieval!", type="positive")
+                    render_docs()
+                except Exception as ex:
+                    logger.exception("Failed to ingest file into RAG service: %s", ex)
+                    upload_status.text = f"Upload failed: {ex}"
+                    upload_status.style("color:#DC2626;")
+                    ui.notify(f"Error indexing '{filename}': {ex}", type="negative")
+
+            ui.upload(
+                on_upload=handle_doc_upload,
+                multiple=True,
+                auto_upload=True,
+            ).props(
+                'accept=".pdf,.txt,.md,.markdown,.html,.htm,.json,.csv" max-files=10'
+            ).classes("w-full")
+
+            ui.label(
+                "Supported formats: .pdf, .md, .txt, .html, .csv, .json (Max 10MB per file)"
+            ).classes("text-[11px] text-gray-400 italic")
+
+        # ================================================================
+        # SECTION 2: INDEXED RAG DOCUMENTS LIST
+        # ================================================================
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-3 mb-6"):
+            with ui.row().classes("w-full items-center justify-between"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("layers", size="20px").style(f"color:{BRAND};")
+                    ui.label("Indexed RAG Documents in Qdrant").classes("text-sm font-bold text-gray-900")
+                refresh_btn = ui.button(
+                    "Refresh List", icon="refresh", on_click=lambda: render_docs()
+                ).props("flat dense no-caps text-xs").style(f"color:{BRAND};")
+
+            docs_container = ui.column().classes("w-full gap-2")
+
+            def render_docs():
+                docs_container.clear()
+                try:
+                    docs = rag_retriever.list_documents(shop_domain)
+                    rag_status_badge.text = f"RAG Service: Connected ({len(docs)} docs in Qdrant)"
+                    rag_status_badge.style("background:#ECFDF5;color:#059669;border:1px solid #A7F3D0;")
+                except Exception as ex:
+                    docs = []
+                    rag_status_badge.text = "RAG Service: Offline / Not Configured"
+                    rag_status_badge.style("background:#FEF2F2;color:#DC2626;border:1px solid #FECACA;")
+                    with docs_container:
+                        ui.label(
+                            f"Unable to connect to RAG service ({ex}). Please verify RAG_SERVICE_URL and RAG_API_KEY."
+                        ).classes("text-xs text-red-500 italic")
+                    return
+
+                with docs_container:
+                    if not docs:
+                        ui.label(
+                            "No documents indexed in your vector database yet. Upload files above to build your AI knowledge base."
+                        ).classes("text-xs text-gray-400 italic py-2")
+                        return
+
+                    for doc in docs:
+                        doc_id = doc.get("doc_id", "")
+                        title = doc.get("title") or doc_id
+                        chunks = doc.get("n_chunks", 0)
+                        kind = doc.get("kind", "document")
+                        with ui.row().classes(
+                            "w-full items-center justify-between p-3.5 rounded-xl border border-gray-100 bg-gray-50/70 hover:bg-gray-50 transition-colors"
+                        ):
+                            with ui.row().classes("items-center gap-3"):
+                                ui.icon("description", size="20px").style("color:#6B7280;")
+                                with ui.column().classes("gap-0.5"):
+                                    ui.label(title).classes("text-xs font-semibold text-gray-800")
+                                    with ui.row().classes("items-center gap-2"):
+                                        ui.label(f"ID: {doc_id}").classes("text-[10px] text-gray-400 font-mono")
+                                        ui.label(f"• {chunks} chunk(s) embedded").classes("text-[10px] text-emerald-600 font-medium")
+                                        if kind:
+                                            ui.label(f"[{kind}]").classes("text-[10px] text-indigo-500 uppercase font-semibold")
+
+                            def make_delete_doc(target_id=doc_id, target_title=title):
+                                def _del():
+                                    try:
+                                        rag_retriever.delete_document(shop_domain, target_id)
+                                        ui.notify(f"Deleted '{target_title}' from vector index.", type="info")
+                                        render_docs()
+                                    except Exception as ex:
+                                        ui.notify(f"Failed to delete: {ex}", type="negative")
+                                return _del
+
+                            ui.button(
+                                icon="delete",
+                                on_click=make_delete_doc(doc_id, title),
+                            ).props("flat round dense").style("color:#EF4444;").tooltip("Remove from vector database")
+
+            render_docs()
+
+        # ================================================================
+        # SECTION 3: QUICK FAQS (EXACT MATCHES)
+        # ================================================================
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-2 mb-4"):
+            with ui.row().classes("items-center gap-2 mb-1"):
+                ui.icon("question_answer", size="20px").style(f"color:{BRAND};")
+                ui.label("Quick FAQs (Direct Answers)").classes("text-base font-bold text-gray-900")
+            ui.label(
+                "Add common questions and explicit answers that your agent can pull from directly."
+            ).classes("text-xs text-gray-500 mb-2")
+
             question = ui.input("Question", placeholder="How long does shipping take?").classes("w-full")
             answer = ui.input("Answer", placeholder="3-5 business days.").classes("w-full")
             error_label = ui.label("").classes("text-xs text-gray-500")
