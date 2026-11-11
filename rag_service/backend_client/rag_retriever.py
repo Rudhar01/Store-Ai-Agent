@@ -20,9 +20,18 @@ import time
 
 import httpx
 
-try:
-    from langfuse import observe, get_client
-except ImportError:
+if (os.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip() and (os.environ.get("LANGFUSE_SECRET_KEY") or "").strip():
+    try:
+        from langfuse import observe, get_client
+    except ImportError:
+        def observe(*args, **kwargs):
+            def decorator(f):
+                return f
+            return decorator
+
+        def get_client(*args, **kwargs):
+            return None
+else:
     def observe(*args, **kwargs):
         def decorator(f):
             return f

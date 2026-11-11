@@ -72,6 +72,7 @@ _probe_appwrite()
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.responses import Response
 from nicegui import ui
 
 import shopify_auth
@@ -159,7 +160,12 @@ class ForceCookieSameSiteNone:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
-            await self.asgi_app(scope, receive, send)
+            try:
+                await self.asgi_app(scope, receive, send)
+            except KeyError as e:
+                if "Session is disconnected" in str(e):
+                    return
+                raise
             return
 
         async def send_wrapper(message):
@@ -177,7 +183,18 @@ class ForceCookieSameSiteNone:
                 message["headers"] = new_headers
             await send(message)
 
-        await self.asgi_app(scope, receive, send_wrapper)
+        try:
+            await self.asgi_app(scope, receive, send_wrapper)
+        except KeyError as e:
+            if "Session is disconnected" in str(e):
+                response = Response(
+                    content=b'{"code": 1, "message": "Session is disconnected"}',
+                    status_code=400,
+                    media_type="application/json",
+                )
+                await response(scope, receive, send)
+                return
+            raise
 
 
 app.add_middleware(ForceCookieSameSiteNone)

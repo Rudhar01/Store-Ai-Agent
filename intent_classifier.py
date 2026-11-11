@@ -24,9 +24,17 @@ from pathlib import Path
 
 import llm_selector
 
-try:
-    from langfuse import observe
-except ImportError:
+import os
+
+if (os.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip() and (os.environ.get("LANGFUSE_SECRET_KEY") or "").strip():
+    try:
+        from langfuse import observe
+    except ImportError:
+        def observe(*args, **kwargs):
+            def decorator(f):
+                return f
+            return decorator
+else:
     def observe(*args, **kwargs):
         def decorator(f):
             return f

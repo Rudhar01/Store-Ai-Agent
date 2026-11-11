@@ -31,9 +31,17 @@ from types import SimpleNamespace
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 
-try:
-    from langfuse import observe, get_client
-except ImportError:
+if (os.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip() and (os.environ.get("LANGFUSE_SECRET_KEY") or "").strip():
+    try:
+        from langfuse import observe, get_client
+    except ImportError:
+        def observe(*args, **kwargs):
+            def decorator(f):
+                return f
+            return decorator
+        def get_client(*args, **kwargs):
+            return None
+else:
     def observe(*args, **kwargs):
         def decorator(f):
             return f
@@ -362,6 +370,14 @@ def _feature_enabled(store_id: str, intent: str, action: str, entities: dict) ->
     return True
 
 
+async def _safe_reply_async(action: str, data: dict, language: str, original_message: str, fallback: str, **extra) -> str:
+    try:
+        return await asyncio.to_thread(generate_reply, action, data, language, original_message, **extra)
+    except Exception as e:
+        print(f"chatbot_widget: generate_reply failed: {e!r}")
+        return fallback
+
+
 def _safe_reply(action: str, data: dict, language: str, original_message: str, fallback: str, **extra) -> str:
     try:
         return generate_reply(action, data, language, original_message, **extra)
@@ -661,7 +677,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
         if isinstance(data, dict) and data.get("message")
         else ("Here's what I found:" if products else ("Done." if widget_action else "Sorry, I couldn't complete that."))
     )
-    reply = _safe_reply(
+    reply = await _safe_reply_async(
         action, _llm_view(data), language, original_message, fallback,
         store_identifier=store.shop_domain,
         needs_rag=(action == "answer_policy_question" or action == "search_products"),
@@ -831,7 +847,7 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
                    asked=asked + 1)
         _log(shop, message, "awaiting_item", intent, action, None, out["reply"])
         return out
-    reply = _safe_reply("add_item", {"error": "not_found", "query": message.strip(),
+    reply = await _safe_reply_async("add_item", {"error": "not_found", "query": message.strip(),
                                      "instruction": "Say you couldn't find that item and suggest trying the exact product name."},
                         language, message, f'I couldn\'t find "{message.strip()}" — could you try the exact product name?')
     _log(shop, message, "not_found", intent, action, {"product_name_or_id": message.strip()}, reply)
@@ -953,8 +969,8 @@ async def _chat_impl(req: ChatRequest):
             _log(req.shop, message, result.get("status", "done"), pending["intent"], pending["action"], pending["entities"], result.get("reply", ""))
             return result
         if text in _NEGATIVE:
-            cancel_reply = _safe_reply("cancelled", {"message": "The shopper decided not to proceed."}, pending["language"], message,
-                                       fallback="No problem — that request was not submitted.")
+            cancel_reply = await _safe_reply_async("cancelled", {"message": "The shopper decided not to proceed."}, pending["language"], message,
+                                                   fallback="No problem — that request was not submitted.")
             _log(req.shop, message, "cancelled", pending["intent"], pending["action"], pending["entities"], cancel_reply)
             return {"status": "cancelled", "reply": cancel_reply, "language": pending["language"]}
 
@@ -1014,7 +1030,7 @@ async def _chat_impl(req: ChatRequest):
     else:
         # Nuanced intent classification via schema & LLM
         try:
-            classification = classify_intent(message, SCHEMA, history=_history_for(key))
+            classification = await asyncio.to_thread(classify_intent, message, SCHEMA, _history_for(key))
         except Exception as e:
             _span_error(str(e))
             print(f"chatbot_widget: classify_intent error: {e!r}")
@@ -1234,8 +1250,8 @@ async def _chat_impl(req: ChatRequest):
 
         # Feature checks
         if not _feature_enabled(store.id, intent, action, entities):
-            reply = _safe_reply("feature_disabled", {"message": "This store has turned this feature off."}, language, message,
-                                fallback="Sorry, I can't help with that on this store.")
+            reply = await _safe_reply_async("feature_disabled", {"message": "This store has turned this feature off."}, language, message,
+                                            fallback="Sorry, I can't help with that on this store.")
             _log(req.shop, message, "feature_disabled", intent, action, entities, reply)
             return {"status": "done", "reply": reply, "language": language}
 
@@ -1247,7 +1263,7 @@ async def _chat_impl(req: ChatRequest):
 
     if classification.get("requires_confirmation"):
         _set_pending(key, type="confirm", intent=intent, action=action, entities=entities, language=language)
-        confirm_reply = _safe_reply(
+        confirm_reply = await _safe_reply_async(
             action,
             {"pending_action": action, "details": entities,
              "instruction": "Ask the shopper to reply yes to confirm or no to cancel before this action is taken."},
@@ -1301,8 +1317,8 @@ async def confirm(req: ConfirmRequest):
         return {"status": "expired", "reply": "That request has expired — please ask again."}
 
     if not req.confirmed:
-        cancel_reply = _safe_reply("cancelled", {"message": "The shopper declined."}, pending["language"], "cancel",
-                                   fallback="No problem — that request was not submitted.")
+        cancel_reply = await _safe_reply_async("cancelled", {"message": "The shopper declined."}, pending["language"], "cancel",
+                                               fallback="No problem — that request was not submitted.")
         _log(req.shop, "confirmed=false", "cancelled", pending["intent"], pending["action"], pending["entities"], cancel_reply)
         return {"status": "cancelled", "reply": cancel_reply, "language": pending["language"]}
 
@@ -1310,7 +1326,7 @@ async def confirm(req: ConfirmRequest):
         result = await _execute_and_reply(store, pending["intent"], pending["action"], pending["entities"], pending["language"], "confirmed", req.session_id, customer_id=customer_id)
         _arm_verification_if_needed(_pkey(req.shop, req.session_id), pending["intent"], pending["action"], pending["entities"], pending["language"], result)
     except Exception as e:
-        get_client().update_current_span(level="ERROR", status_message=str(e))
+        _span_error(str(e))
         print(f"chatbot_widget: confirm dispatch error: {e}")
         _log(req.shop, "confirmed=true", "error", pending["intent"], pending["action"], pending["entities"])
         return {"reply": "Sorry, something went wrong completing that. Please try again."}

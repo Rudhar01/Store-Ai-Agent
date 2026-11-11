@@ -26,9 +26,17 @@ try:
 except ImportError:
     rag_retriever = None
 
-try:
-    from langfuse import observe, get_client
-except ImportError:
+if (os.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip() and (os.environ.get("LANGFUSE_SECRET_KEY") or "").strip():
+    try:
+        from langfuse import observe, get_client
+    except ImportError:
+        def observe(*args, **kwargs):
+            def decorator(f):
+                return f
+            return decorator
+        def get_client(*args, **kwargs):
+            return None
+else:
     def observe(*args, **kwargs):
         def decorator(f):
             return f
@@ -238,28 +246,32 @@ def generate_reply(
     user_prompt_parts.append(f"Write the reply in {language_name}.")
     user_prompt = "\n\n".join(user_prompt_parts)
 
-    response = llm_selector.create_chat_completion(
-        temperature=0.4,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    )
-
-    #  Before adding llm_selector.py and its create_chat_completion function
-
-    # response = _get_client().chat.completions.create(
-    #     model=MODEL,
-    #     temperature=0.4,
-    #     messages=[
-    #         {"role": "system", "content": system_prompt},
-    #         {"role": "user", "content": user_prompt},
-    #     ],
-    #     extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    # )
-
-    return _strip_thinking(response.choices[0].message.content)
+    try:
+        response = llm_selector.create_chat_completion(
+            temperature=0.4,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        return _strip_thinking(response.choices[0].message.content)
+    except Exception as e:
+        print(f"reply_generator: LLM generation failed ({e!r}) — using resilient template")
+        if isinstance(data, dict):
+            if data.get("message"):
+                return str(data["message"])
+            if data.get("results") and isinstance(data["results"], list):
+                count = len(data["results"])
+                return f"I found {count} product{'s' if count != 1 else ''} that might match what you're looking for:"
+            if data.get("orders") and isinstance(data["orders"], list):
+                count = len(data["orders"])
+                return f"Here {'are' if count != 1 else 'is'} your {count} recent order{'s' if count != 1 else ''}:"
+            if data.get("order_number") or data.get("order_id"):
+                oid = data.get("order_number") or data.get("order_id")
+                st = data.get("status") or "processing"
+                return f"Order #{oid} is currently {st}."
+        return "I'm here to help, but I'm having a brief issue generating a detailed reply. Please check back shortly or let me know what you need."
 
 
 if __name__ == "__main__":

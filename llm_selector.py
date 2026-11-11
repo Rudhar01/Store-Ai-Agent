@@ -36,9 +36,17 @@ shape) — true for anything you can point the `openai` Python SDK's
 import json
 import os
 
-try:
-    from langfuse.openai import OpenAI
-except ImportError:
+# Only wrap with Langfuse tracing if valid Langfuse keys are configured,
+# preventing OpenTelemetry batch export timeout errors and thread freezes.
+if (os.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip() and (os.environ.get("LANGFUSE_SECRET_KEY") or "").strip():
+    try:
+        from langfuse.openai import OpenAI
+    except ImportError:
+        try:
+            from openai import OpenAI
+        except ImportError:
+            OpenAI = None
+else:
     try:
         from openai import OpenAI
     except ImportError:
@@ -47,6 +55,8 @@ except ImportError:
 PRIMARY_API_KEY = os.environ.get("PRIMARY_LLM_API_KEY", "")
 PRIMARY_BASE_URL = os.environ.get("PRIMARY_LLM_BASE_URL") or None
 PRIMARY_MODEL = os.environ.get("PRIMARY_LLM_MODEL", "Qwen/Qwen3-8B-AWQ")
+PRIMARY_TIMEOUT = float(os.environ.get("PRIMARY_LLM_TIMEOUT", "6.0"))
+FALLBACK_TIMEOUT = float(os.environ.get("FALLBACK_LLM_TIMEOUT", "8.0"))
 
 
 def _load_fallback_providers() -> list[dict]:
@@ -90,8 +100,8 @@ def _get_primary() -> OpenAI:
         _primary_client = OpenAI(
             api_key=PRIMARY_API_KEY,
             base_url=PRIMARY_BASE_URL,
-            max_retries=2,
-            timeout=10,
+            max_retries=0,  # Do not retry 502/down endpoints; immediately try fallback
+            timeout=PRIMARY_TIMEOUT,
         )
     return _primary_client
 
@@ -104,8 +114,8 @@ def _get_fallback_client(index: int) -> OpenAI:
         _fallback_clients[index] = OpenAI(
             api_key=provider["api_key"],
             base_url=provider["base_url"],
-            max_retries=2,
-            timeout=20,
+            max_retries=0,
+            timeout=FALLBACK_TIMEOUT,
         )
     return _fallback_clients[index]
 
