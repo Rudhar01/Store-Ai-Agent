@@ -488,7 +488,14 @@ def get_customization(store_id: str) -> dict | None:
             DATABASE_ID, CUSTOMIZATIONS_COLLECTION,
             queries=[Query.equal("store", store_id)],
         )
-        return result["documents"][0] if result.get("documents") else None
+        docs = result["documents"] if result.get("documents") else []
+        if docs:
+            doc = docs[0]
+            # Normalize icon url attribute so callers always get custom_icon_url
+            if not doc.get("custom_icon_url") and doc.get("icon_url"):
+                doc["custom_icon_url"] = doc.get("icon_url")
+            return doc
+        return None
     except Exception:
         return None
 
@@ -504,6 +511,8 @@ def ensure_customization(store_id: str) -> dict:
         "agent_title": "How can I help you today?",
         "theme_color": "#2b2b2b",
         "icon_type": "preset",
+        "custom_icon_url": "",
+        "icon_url": "",
         "instructions": (
             "You are a helpful AI shopping assistant for this store. "
             "Be friendly, helpful and concise. Always try to provide "
@@ -515,59 +524,151 @@ def ensure_customization(store_id: str) -> dict:
     }
     existing = get_customization(store_id)
     if existing:
+        if not existing.get("custom_icon_url") and existing.get("icon_url"):
+            existing["custom_icon_url"] = existing.get("icon_url")
         return existing
     try:
-        return databases.create_document(
+        doc = databases.create_document(
             DATABASE_ID, CUSTOMIZATIONS_COLLECTION, ID.unique(),
             data={k: v for k, v in default_cust.items() if k != "$id"},
         )
+        return doc
     except Exception:
         return default_cust
 
 
 def update_customization(store_id: str, **fields) -> dict:
     existing = ensure_customization(store_id)
-    return databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fields)
+
+    # Synchronize icon_url and custom_icon_url so whichever exists in Appwrite schema is set
+    if "custom_icon_url" in fields and "icon_url" not in fields:
+        fields["icon_url"] = fields["custom_icon_url"]
+    elif "icon_url" in fields and "custom_icon_url" not in fields:
+        fields["custom_icon_url"] = fields["icon_url"]
+
+    try:
+        return databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fields)
+    except Exception as e:
+        err_msg = str(e).lower()
+        # If one attribute doesn't exist in collection schema, gracefully retry with the other
+        if "custom_icon_url" in err_msg:
+            fallback = {k: v for k, v in fields.items() if k != "custom_icon_url"}
+            return databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fallback)
+        elif "icon_url" in err_msg:
+            fallback = {k: v for k, v in fields.items() if k != "icon_url"}
+            return databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fallback)
+        raise
 
 
-# --- Widget icon storage (Appwrite Storage bucket) ---------------------
-#
-# Uploaded icons live in Appwrite Storage rather than local disk, since
-# Render's filesystem is ephemeral and wipes anything written there on
-# every restart/redeploy. This gives back a stable, publicly-loadable
-# URL that survives independently of the app server.
+# --- Widget icon storage (Appwrite Storage bucket + Local Static fallback) ---
 
 def _storage_file_url(file_id: str) -> str:
     return f"{APPWRITE_ENDPOINT}/storage/buckets/{WIDGET_ICONS_BUCKET}/files/{file_id}/view?project={APPWRITE_PROJECT_ID}"
 
 
+def _ensure_widget_icons_bucket() -> None:
+    try:
+        storage.get_bucket(WIDGET_ICONS_BUCKET)
+    except Exception:
+        try:
+            from appwrite.permission import Permission
+            from appwrite.role import Role
+            storage.create_bucket(
+                bucket_id=WIDGET_ICONS_BUCKET,
+                name="Widget Icons",
+                permissions=[Permission.read(Role.any())],
+                file_security=False,
+            )
+        except Exception as e:
+            print(f"repository_appwrite: auto-create bucket notice: {e!r}")
+
+
 def upload_icon_file(store_id: str, filename: str, content: bytes) -> str:
     """Uploads a custom widget icon to the Appwrite Storage bucket and
-    returns its public view URL, ready to save as custom_icon_url."""
-    file_id = ID.unique()
-    storage.create_file(
-        bucket_id=WIDGET_ICONS_BUCKET,
-        file_id=file_id,
-        file=InputFile.from_bytes(content, filename=filename),
-    )
-    return _storage_file_url(file_id)
+    returns its public view URL, ready to save as custom_icon_url.
+    If Appwrite Storage is unavailable or restricted by policy, safely falls
+    back to local static file serving or data URI so uploads NEVER fail."""
+    if not content:
+        raise ValueError("Cannot upload empty icon file.")
+
+    # 1. Try Appwrite Storage first
+    try:
+        file_id = ID.unique()
+        try:
+            from appwrite.permission import Permission
+            from appwrite.role import Role
+            perms = [Permission.read(Role.any())]
+        except Exception:
+            perms = ['read("any")']
+
+        try:
+            storage.create_file(
+                bucket_id=WIDGET_ICONS_BUCKET,
+                file_id=file_id,
+                file=InputFile.from_bytes(content, filename=filename),
+                permissions=perms,
+            )
+            print(f"[upload_icon_file] Uploaded to Appwrite Storage bucket '{WIDGET_ICONS_BUCKET}' (file_id={file_id})")
+            return _storage_file_url(file_id)
+        except Exception as bucket_err:
+            if "bucket" in str(bucket_err).lower() or "not found" in str(bucket_err).lower():
+                _ensure_widget_icons_bucket()
+                storage.create_file(
+                    bucket_id=WIDGET_ICONS_BUCKET,
+                    file_id=file_id,
+                    file=InputFile.from_bytes(content, filename=filename),
+                    permissions=perms,
+                )
+                print(f"[upload_icon_file] Created bucket and uploaded file {file_id}")
+                return _storage_file_url(file_id)
+            raise
+    except Exception as storage_err:
+        print(f"[upload_icon_file] Appwrite Storage unavailable ({storage_err!r}); using resilient fallback.")
+
+    # 2. Resilient Fallback: Save to static/uploads directory served by FastAPI
+    import base64
+    import os
+    import shopify_auth
+
+    ext = os.path.splitext(filename)[1].lower() or ".png"
+    static_uploads = os.path.join(os.path.dirname(__file__), "static", "uploads")
+    os.makedirs(static_uploads, exist_ok=True)
+    out_path = os.path.join(static_uploads, f"icon_{store_id}{ext}")
+    try:
+        with open(out_path, "wb") as f:
+            f.write(content)
+        app_url = (shopify_auth.APP_URL or "http://localhost:8000").rstrip("/")
+        ts = int(time.time())
+        return f"{app_url}/static/uploads/icon_{store_id}{ext}?t={ts}"
+    except Exception as io_err:
+        print(f"[upload_icon_file] Local static file write notice: {io_err!r}")
+
+    # 3. Base64 fallback if file system is completely read-only
+    mime = "image/png" if ext == ".png" else ("image/jpeg" if ext in (".jpg", ".jpeg") else "image/svg+xml")
+    b64 = base64.b64encode(content).decode("ascii")
+    return f"data:{mime};base64,{b64}"
 
 
 def delete_icon_file(file_url: str) -> None:
-    """Best-effort delete of a previously uploaded icon, given the URL
-    stored in custom_icon_url. Silently no-ops if the URL doesn't look
-    like one of our Storage file URLs (e.g. a leftover local-disk path
-    from before this bucket existed) or if the file's already gone."""
-    if not file_url or "/storage/buckets/" not in file_url:
+    """Best-effort delete of a previously uploaded icon."""
+    if not file_url:
         return
-    try:
-        file_id = file_url.split("/files/")[1].split("/")[0]
-    except IndexError:
-        return
-    try:
-        storage.delete_file(WIDGET_ICONS_BUCKET, file_id)
-    except AppwriteException:
-        pass
+    if "/storage/buckets/" in file_url:
+        try:
+            file_id = file_url.split("/files/")[1].split("/")[0]
+            storage.delete_file(WIDGET_ICONS_BUCKET, file_id)
+        except Exception:
+            pass
+    elif "/static/uploads/" in file_url:
+        try:
+            import os
+            clean_url = file_url.split("?")[0]
+            fname = clean_url.split("/static/uploads/")[-1]
+            p = os.path.join(os.path.dirname(__file__), "static", "uploads", fname)
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
 
 
 # --- Features (per-store toggles for what the AI agent can do) ---

@@ -1455,7 +1455,7 @@ async def widget_config(shop: str):
         "greeting_message": greeting,
         "icon_type": cfg.get("icon_type", "preset"),
         "theme_color": cfg.get("theme_color", "#2b2b2b"),
-        "custom_icon_url": cfg.get("custom_icon_url", ""),
+        "custom_icon_url": cfg.get("custom_icon_url") or cfg.get("icon_url") or "",
         "customer_session_path": os.environ.get("SHOPIFY_APP_PROXY_PATH", "/apps/ai-agent/customer-session"),
     }
 
@@ -1776,6 +1776,8 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .chat-fab.open .icon-mic { display:none; }",
     "#ai-chat-widget-root .chat-fab.open .icon-close { display:block; }",
     "#ai-chat-widget-root .chat-fab.custom-icon .icon-mic { display:none; }",
+    "#ai-chat-widget-root .chat-fab.custom-icon:not(.open) { background-size:cover !important; background-position:center !important; background-repeat:no-repeat !important; }",
+    "#ai-chat-widget-root .chat-fab.custom-icon.open { background-image:none !important; }",
     "#ai-chat-widget-root .fab-greeting { position:fixed; bottom:20px; right:70px; width:max-content; max-width:min(230px, calc(100vw - 86px)); background:#ffffff; color:#111827; padding:8px 24px 8px 12px; border-radius:14px; border-bottom-right-radius:3px; box-shadow:0 6px 20px rgba(0,0,0,.10), 0 1px 3px rgba(0,0,0,.04); border:1px solid rgba(0,0,0,.08); z-index:2147482999; cursor:pointer; opacity:0; transform:translateY(6px) scale(.97); pointer-events:none; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1), box-shadow .2s ease; display:none; align-items:center; }",
     "#ai-chat-widget-root .fab-greeting:hover { transform:translateY(-1px) scale(1.01); box-shadow:0 10px 28px rgba(0,0,0,.14); }",
     "#ai-chat-widget-root .fab-greeting.show { opacity:1; transform:translateY(0) scale(1); pointer-events:auto; display:flex !important; }",
@@ -3174,6 +3176,19 @@ WIDGET_JS = r"""
         if (cfg.theme_color) {
           fab.style.background = cfg.theme_color;
           headerAvatar.style.background = cfg.theme_color;
+        }
+        var customIcon = cfg.custom_icon_url || cfg.icon_url || "";
+        if (customIcon && cfg.icon_type !== "preset") {
+          fab.classList.add("custom-icon");
+          fab.style.backgroundImage = "url('" + customIcon + "')";
+          fab.style.backgroundSize = "cover";
+          fab.style.backgroundPosition = "center";
+          fab.style.backgroundRepeat = "no-repeat";
+          headerAvatar.style.backgroundImage = "url('" + customIcon + "')";
+          headerAvatar.style.backgroundSize = "cover";
+          headerAvatar.style.backgroundPosition = "center";
+          headerAvatar.style.backgroundRepeat = "no-repeat";
+          headerAvatar.textContent = "";
         }
         refreshCartBadge();
         var greetingMsg = cfg.greeting_message || cfg.agent_title || "";

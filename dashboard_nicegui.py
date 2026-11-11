@@ -2256,11 +2256,15 @@ def agent_page():
                             ):
                                 preview_msg_label = ui.label(cfg.get("agent_title", "")).classes("text-xs text-gray-800")
                                 ui.label("10:30 AM").classes("text-[10px] text-gray-400")
-                            with ui.element("div").classes("flex items-center justify-center").style(
+                            with ui.element("div").classes("flex items-center justify-center overflow-hidden").style(
                                 f"position:absolute;bottom:10px;right:10px;width:36px;height:36px;border-radius:50%;"
                                 f"background:{agent_color};box-shadow:0 4px 10px rgba(0,0,0,0.15);"
                             ):
-                                ui.icon("forum", size="15px").style("color:white;")
+                                current_icon = cfg.get("custom_icon_url") or cfg.get("icon_url") or ""
+                                if current_icon and cfg.get("icon_type") != "preset":
+                                    ui.image(current_icon).classes("w-full h-full object-cover")
+                                else:
+                                    ui.icon("forum", size="15px").style("color:white;")
                         ui.button(
                             "Open full preview", icon="arrow_forward", on_click=lambda: _open_preview(store)
                         ).props("no-caps flat icon-right=arrow_forward").classes("text-xs font-semibold mt-1 text-gray-700")
@@ -2463,30 +2467,62 @@ def appearance_page():
         with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
             ui.label("Custom icon image").classes("text-xs font-semibold text-gray-600")
             icon_preview_row = ui.row().classes("items-center gap-3")
-            with icon_preview_row:
-                if cfg.get("custom_icon_url"):
-                    ui.image(cfg["custom_icon_url"]).classes("w-10 h-10 rounded-full")
 
-                    def delete_icon():
-                        repo.delete_icon_file(cfg.get("custom_icon_url", ""))
-                        repo.update_customization(store["$id"], custom_icon_url="", icon_type="preset")
-                        icon_preview_row.clear()
-                        ui.notify("Icon removed — refresh to see it applied.", type="positive")
+            def render_icon_preview():
+                icon_preview_row.clear()
+                current_icon = cfg.get("custom_icon_url") or cfg.get("icon_url") or ""
+                with icon_preview_row:
+                    if current_icon and cfg.get("icon_type") != "preset":
+                        ui.image(current_icon).classes("w-12 h-12 rounded-full object-cover border border-gray-200")
 
-                    ui.button("Remove icon", icon="delete", on_click=delete_icon).props(
-                        "no-caps flat dense"
-                    ).style("color:#DC2626;")
+                        def delete_icon():
+                            repo.delete_icon_file(current_icon)
+                            repo.update_customization(store["$id"], custom_icon_url="", icon_url="", icon_type="preset")
+                            cfg["custom_icon_url"] = ""
+                            cfg["icon_url"] = ""
+                            cfg["icon_type"] = "preset"
+                            render_icon_preview()
+                            _trigger_widget_install_async(store)
+                            ui.notify("Custom icon removed — reverted to default preset.", type="positive")
 
-            def handle_upload(e):
-                content = e.content.read()
-                new_url = repo.upload_icon_file(store["$id"], e.name, content)
-                old_url = cfg.get("custom_icon_url", "")
-                repo.update_customization(store["$id"], custom_icon_url=new_url, icon_type="custom")
-                if old_url:
-                    repo.delete_icon_file(old_url)
-                ui.notify("Icon uploaded — refresh to see it applied.", type="positive")
+                        ui.button("Remove icon", icon="delete", on_click=delete_icon).props(
+                            "no-caps flat dense"
+                        ).style("color:#DC2626;")
+                    else:
+                        ui.label("Using default preset icon").classes("text-xs text-gray-400 italic")
 
-            ui.upload(on_upload=handle_upload, auto_upload=True).props("accept=image/*").classes("w-full")
+            render_icon_preview()
+
+            async def handle_upload(e):
+                try:
+                    file_obj = getattr(e, "file", None)
+                    filename = getattr(file_obj, "name", None) or getattr(e, "name", "icon.png")
+                    if file_obj and hasattr(file_obj, "read"):
+                        res = file_obj.read()
+                        content = await res if inspect.isawaitable(res) else res
+                    elif hasattr(e, "content") and hasattr(e.content, "read"):
+                        res = e.content.read()
+                        content = await res if inspect.isawaitable(res) else res
+                    else:
+                        ui.notify("Upload failed: could not read file data.", type="negative")
+                        return
+
+                    new_url = repo.upload_icon_file(store["$id"], filename, content)
+                    old_url = cfg.get("custom_icon_url") or cfg.get("icon_url") or ""
+                    repo.update_customization(store["$id"], custom_icon_url=new_url, icon_url=new_url, icon_type="custom")
+                    cfg["custom_icon_url"] = new_url
+                    cfg["icon_url"] = new_url
+                    cfg["icon_type"] = "custom"
+                    if old_url and old_url != new_url:
+                        repo.delete_icon_file(old_url)
+                    render_icon_preview()
+                    _trigger_widget_install_async(store)
+                    ui.notify("Custom icon uploaded and applied successfully!", type="positive")
+                except Exception as err:
+                    logger.error("Failed to upload custom icon: %s", err, exc_info=True)
+                    ui.notify(f"Upload failed: {err}", type="negative")
+
+            ui.upload(on_upload=handle_upload, auto_upload=True).props("accept=image/* max-file-size=5000000").classes("w-full")
 
 
 # --------------------------------------------------------------------
