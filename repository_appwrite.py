@@ -569,11 +569,16 @@ def _storage_file_url(file_id: str, bucket_id: str | None = None) -> str:
 
 def _ensure_widget_icons_bucket() -> str:
     """Ensures a storage bucket exists for widget icons and returns its bucket_id.
-    Discovers existing buckets in Appwrite project or creates WIDGET_ICONS_BUCKET."""
+    Discovers existing buckets in Appwrite project or creates WIDGET_ICONS_BUCKET.
+    Also ensures public read permissions (Role.any) on the bucket."""
+    from appwrite.permission import Permission
+    from appwrite.role import Role
+
+    bucket_id = None
     # 1. Check if configured WIDGET_ICONS_BUCKET exists
     try:
         storage.get_bucket(WIDGET_ICONS_BUCKET)
-        return WIDGET_ICONS_BUCKET
+        bucket_id = WIDGET_ICONS_BUCKET
     except Exception as e:
         if "policy" in str(e).lower():
             raise AppwriteException(
@@ -582,44 +587,60 @@ def _ensure_widget_icons_bucket() -> str:
             ) from e
 
     # 2. Try to list buckets to see if user created one with a different ID or name
-    try:
-        res = storage.list_buckets()
-        buckets = res.get("buckets", []) if isinstance(res, dict) else getattr(res, "buckets", [])
-        for b in buckets:
-            bid = b.get("$id") if isinstance(b, dict) else getattr(b, "id", None)
-            bname = (b.get("name") or "").lower() if isinstance(b, dict) else getattr(b, "name", "").lower()
-            if bid == WIDGET_ICONS_BUCKET or "icon" in bname or "widget" in bname:
-                return bid
-        if buckets:
-            bid = buckets[0].get("$id") if isinstance(buckets[0], dict) else getattr(buckets[0], "id", None)
-            if bid:
-                return bid
-    except Exception as e:
-        if "policy" in str(e).lower():
-            raise AppwriteException(
-                f"Appwrite Storage blocked by policy: Your API Key does not have 'buckets.read' scope on {APPWRITE_ENDPOINT}."
-            ) from e
+    if not bucket_id:
+        try:
+            res = storage.list_buckets()
+            buckets = res.get("buckets", []) if isinstance(res, dict) else getattr(res, "buckets", [])
+            for b in buckets:
+                bid = b.get("$id") if isinstance(b, dict) else getattr(b, "id", None)
+                bname = (b.get("name") or "").lower() if isinstance(b, dict) else getattr(b, "name", "").lower()
+                if bid == WIDGET_ICONS_BUCKET or "icon" in bname or "widget" in bname:
+                    bucket_id = bid
+                    break
+            if not bucket_id and buckets:
+                bid = buckets[0].get("$id") if isinstance(buckets[0], dict) else getattr(buckets[0], "id", None)
+                if bid:
+                    bucket_id = bid
+        except Exception as e:
+            if "policy" in str(e).lower():
+                raise AppwriteException(
+                    f"Appwrite Storage blocked by policy: Your API Key does not have 'buckets.read' scope on {APPWRITE_ENDPOINT}."
+                ) from e
 
-    # 3. Create bucket
+    # 3. Create bucket if none exists
+    if not bucket_id:
+        try:
+            storage.create_bucket(
+                bucket_id=WIDGET_ICONS_BUCKET,
+                name="Widget Icons",
+                permissions=[Permission.read(Role.any())],
+                file_security=False,
+                enabled=True,
+            )
+            bucket_id = WIDGET_ICONS_BUCKET
+        except Exception as e:
+            print(f"repository_appwrite: auto-create bucket notice: {e!r}")
+            if "policy" in str(e).lower():
+                raise AppwriteException(
+                    "Appwrite Storage blocked by policy: Your Appwrite API key lacks 'buckets.write' scope. "
+                    "Enable 'files.*' and 'buckets.*' in Appwrite Console -> API Keys."
+                ) from e
+            bucket_id = WIDGET_ICONS_BUCKET
+
+    # 4. Guarantee bucket has public read permissions enabled
     try:
-        from appwrite.permission import Permission
-        from appwrite.role import Role
-        storage.create_bucket(
-            bucket_id=WIDGET_ICONS_BUCKET,
+        storage.update_bucket(
+            bucket_id=bucket_id,
             name="Widget Icons",
             permissions=[Permission.read(Role.any())],
             file_security=False,
             enabled=True,
         )
-        return WIDGET_ICONS_BUCKET
-    except Exception as e:
-        print(f"repository_appwrite: auto-create bucket notice: {e!r}")
-        if "policy" in str(e).lower():
-            raise AppwriteException(
-                "Appwrite Storage blocked by policy: Your Appwrite API key lacks 'buckets.write' scope. "
-                "Enable 'files.*' and 'buckets.*' in Appwrite Console -> API Keys."
-            ) from e
-        return WIDGET_ICONS_BUCKET
+        print(f"[_ensure_widget_icons_bucket] ✅ Enabled public read (Role.any) on bucket '{bucket_id}'")
+    except Exception as up_err:
+        print(f"[_ensure_widget_icons_bucket] Bucket permission update notice: {up_err!r}")
+
+    return bucket_id
 
 
 def upload_icon_file(store_id: str, filename: str, content: bytes) -> str:
@@ -643,6 +664,15 @@ def upload_icon_file(store_id: str, filename: str, content: bytes) -> str:
             )
             cdn_url = _storage_file_url(file_id, bucket_id)
             print(f"[upload_icon_file] ✅ Uploaded to Appwrite Storage bucket '{bucket_id}' (file_id={file_id})")
+            try:
+                import os
+                ext = os.path.splitext(filename)[1].lower() or ".png"
+                static_uploads = os.path.join(os.path.dirname(__file__), "static", "uploads")
+                os.makedirs(static_uploads, exist_ok=True)
+                with open(os.path.join(static_uploads, f"icon_{store_id}{ext}"), "wb") as f:
+                    f.write(content)
+            except Exception:
+                pass
             return cdn_url
         except Exception as upload_err:
             # Second attempt: with explicit public read permissions
@@ -657,6 +687,15 @@ def upload_icon_file(store_id: str, filename: str, content: bytes) -> str:
             )
             cdn_url = _storage_file_url(file_id, bucket_id)
             print(f"[upload_icon_file] ✅ Uploaded to Appwrite Storage with permissions (file_id={file_id})")
+            try:
+                import os
+                ext = os.path.splitext(filename)[1].lower() or ".png"
+                static_uploads = os.path.join(os.path.dirname(__file__), "static", "uploads")
+                os.makedirs(static_uploads, exist_ok=True)
+                with open(os.path.join(static_uploads, f"icon_{store_id}{ext}"), "wb") as f:
+                    f.write(content)
+            except Exception:
+                pass
             return cdn_url
     except Exception as storage_err:
         print(f"[upload_icon_file] ⚠️ Appwrite Storage unavailable ({storage_err!r}); using resilient fallback.")

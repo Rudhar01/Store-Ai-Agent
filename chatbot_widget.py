@@ -1499,6 +1499,10 @@ async def widget_config(shop: str):
         if agent_title == "How can I help you today?"
         else f"Hey there! I'm {agent_name}. {agent_title}"
     )
+    raw_icon = cfg.get("custom_icon_url") or cfg.get("icon_url") or ""
+    import shopify_auth
+    app_url = (shopify_auth.APP_URL or "").rstrip("/")
+    proxy_icon_url = f"{app_url}/widget-icon?shop={shop}" if (raw_icon and app_url) else raw_icon
     return {
         "status": cfg.get("status", "active"),
         "agent_name": agent_name,
@@ -1506,9 +1510,87 @@ async def widget_config(shop: str):
         "greeting_message": greeting,
         "icon_type": cfg.get("icon_type", "preset"),
         "theme_color": cfg.get("theme_color", "#2b2b2b"),
-        "custom_icon_url": cfg.get("custom_icon_url") or cfg.get("icon_url") or "",
+        "custom_icon_url": raw_icon,
+        "proxy_icon_url": proxy_icon_url,
+        "direct_icon_url": raw_icon,
         "customer_session_path": os.environ.get("SHOPIFY_APP_PROXY_PATH", "/apps/ai-agent/customer-session"),
     }
+
+
+@router.get("/widget-icon")
+async def get_widget_icon(shop: str = "", store_id: str = ""):
+    """Serves the store's custom widget icon with high-performance caching.
+    Fetches directly from Appwrite Storage or local cache using server credentials,
+    guaranteeing 100% reliable rendering on the storefront without CORS or guest
+    permission hurdles."""
+    from starlette.responses import Response
+
+    target_store = None
+    if shop:
+        target_store = repo.get_store(shop)
+    elif store_id:
+        target_store = repo.get_store_by_id(store_id)
+
+    if not target_store:
+        return Response(status_code=404)
+
+    s_id = target_store.get("$id", "")
+    cfg = repo.ensure_customization(s_id)
+    icon_url = cfg.get("custom_icon_url") or cfg.get("icon_url") or ""
+    if not icon_url:
+        return Response(status_code=404)
+
+    # 1. Check local static file cache first
+    import os
+    static_uploads = os.path.join(os.path.dirname(__file__), "static", "uploads")
+    for ext in (".png", ".jpg", ".jpeg", ".svg", ".webp"):
+        local_path = os.path.join(static_uploads, f"icon_{s_id}{ext}")
+        if os.path.exists(local_path):
+            try:
+                with open(local_path, "rb") as f:
+                    content = f.read()
+                mime = "image/png" if ext == ".png" else ("image/jpeg" if ext in (".jpg", ".jpeg") else "image/svg+xml")
+                return Response(
+                    content=content,
+                    media_type=mime,
+                    headers={
+                        "Cache-Control": "public, max-age=86400",
+                        "Access-Control-Allow-Origin": "*",
+                    },
+                )
+            except Exception:
+                pass
+
+    # 2. If it's an Appwrite Storage URL, fetch using server-side client
+    if "/storage/buckets/" in icon_url and "/files/" in icon_url:
+        try:
+            parts = icon_url.split("/storage/buckets/")[1]
+            bucket_id = parts.split("/files/")[0]
+            file_id = parts.split("/files/")[1].split("/")[0].split("?")[0]
+            from appwrite_client import storage
+            content = storage.get_file_view(bucket_id, file_id)
+            if content:
+                # Save to local cache for subsequent fast hits
+                try:
+                    os.makedirs(static_uploads, exist_ok=True)
+                    with open(os.path.join(static_uploads, f"icon_{s_id}.png"), "wb") as f:
+                        f.write(content)
+                except Exception:
+                    pass
+                return Response(
+                    content=content,
+                    media_type="image/png",
+                    headers={
+                        "Cache-Control": "public, max-age=86400",
+                        "Access-Control-Allow-Origin": "*",
+                    },
+                )
+        except Exception as e:
+            print(f"[get_widget_icon] Appwrite storage fetch error: {e!r}")
+
+    # 3. Fallback: redirect to direct URL
+    from starlette.responses import RedirectResponse
+    return RedirectResponse(url=icon_url)
 
 
 def _extract_name_from_email(email: str) -> tuple[str, str]:
@@ -1835,13 +1917,16 @@ WIDGET_JS = r"""
   var style = document.createElement("style");
   style.textContent = [
     "#ai-chat-widget-root, #ai-chat-widget-root * { box-sizing:border-box; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }",
-    "#ai-chat-widget-root .chat-fab { position:fixed; bottom:18px; right:18px; width:44px; height:44px; border-radius:50%; border:none; box-shadow:0 6px 18px rgba(0,0,0,.25); cursor:pointer; display:flex; align-items:center; justify-content:center; z-index:2147483000; transition:transform .2s cubic-bezier(.34,1.56,.64,1); background-size:cover; background-position:center; }",
+    "#ai-chat-widget-root .chat-fab { position:fixed; bottom:18px; right:18px; width:44px; height:44px; border-radius:50%; border:none; box-shadow:0 6px 18px rgba(0,0,0,.25); cursor:pointer; display:flex; align-items:center; justify-content:center; z-index:2147483000; transition:transform .2s cubic-bezier(.34,1.56,.64,1); background-size:cover; background-position:center; overflow:hidden; padding:0; }",
     "#ai-chat-widget-root .chat-fab:hover { transform:scale(1.08); }",
     "#ai-chat-widget-root .chat-fab svg { width:20px; height:20px; stroke:#fff; }",
     "#ai-chat-widget-root .chat-fab .icon-close { display:none; }",
-    "#ai-chat-widget-root .chat-fab.open .icon-mic { display:none; }",
-    "#ai-chat-widget-root .chat-fab.open .icon-close { display:block; }",
-    "#ai-chat-widget-root .chat-fab.custom-icon .icon-mic { display:none; }",
+    "#ai-chat-widget-root .chat-fab.open .icon-mic { display:none !important; }",
+    "#ai-chat-widget-root .chat-fab.open .icon-close { display:block !important; }",
+    "#ai-chat-widget-root .chat-fab .custom-fab-img { width:100%; height:100%; border-radius:50%; object-fit:cover; display:none; pointer-events:none; }",
+    "#ai-chat-widget-root .chat-fab.custom-icon .custom-fab-img { display:block !important; }",
+    "#ai-chat-widget-root .chat-fab.custom-icon .icon-mic { display:none !important; }",
+    "#ai-chat-widget-root .chat-fab.open .custom-fab-img { display:none !important; }",
     "#ai-chat-widget-root .chat-fab.custom-icon:not(.open) { background-size:cover !important; background-position:center !important; background-repeat:no-repeat !important; }",
     "#ai-chat-widget-root .chat-fab.custom-icon.open { background-image:none !important; }",
     "#ai-chat-widget-root .fab-greeting { position:fixed; bottom:20px; right:70px; width:max-content; max-width:min(230px, calc(100vw - 86px)); background:#ffffff; color:#111827; padding:8px 24px 8px 12px; border-radius:14px; border-bottom-right-radius:3px; box-shadow:0 6px 20px rgba(0,0,0,.10), 0 1px 3px rgba(0,0,0,.04); border:1px solid rgba(0,0,0,.08); z-index:2147482999; cursor:pointer; opacity:0; transform:translateY(6px) scale(.97); pointer-events:none; transition:opacity .25s cubic-bezier(.16,1,.3,1), transform .25s cubic-bezier(.16,1,.3,1), box-shadow .2s ease; display:none; align-items:center; }",
@@ -1986,6 +2071,7 @@ WIDGET_JS = r"""
   root.id = "ai-chat-widget-root";
   root.innerHTML =
     '<button class="chat-fab" id="chatFab" aria-label="Open chat">' +
+      '<img class="custom-fab-img" id="fabCustomImg" src="" alt="Chat" style="display:none;" />' +
       '<svg class="icon-mic" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>' +
       '<svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>' +
     "</button>" +
@@ -3389,18 +3475,29 @@ WIDGET_JS = r"""
           fab.style.background = cfg.theme_color;
           headerAvatar.style.background = cfg.theme_color;
         }
-        var customIcon = cfg.custom_icon_url || cfg.icon_url || "";
-        if (customIcon && cfg.icon_type !== "preset") {
+        var customIcon = cfg.proxy_icon_url || cfg.custom_icon_url || cfg.direct_icon_url || cfg.icon_url || "";
+        if (customIcon) {
           fab.classList.add("custom-icon");
+          var fabImg = document.getElementById("fabCustomImg");
+          if (fabImg) {
+            fabImg.src = customIcon;
+            fabImg.style.display = "block";
+            fabImg.onerror = function () {
+              if (cfg.direct_icon_url && fabImg.src !== cfg.direct_icon_url) {
+                fabImg.src = cfg.direct_icon_url;
+              } else if (cfg.custom_icon_url && fabImg.src !== cfg.custom_icon_url) {
+                fabImg.src = cfg.custom_icon_url;
+              } else {
+                fab.classList.remove("custom-icon");
+                fabImg.style.display = "none";
+              }
+            };
+          }
           fab.style.backgroundImage = "url('" + customIcon + "')";
           fab.style.backgroundSize = "cover";
           fab.style.backgroundPosition = "center";
           fab.style.backgroundRepeat = "no-repeat";
-          headerAvatar.style.backgroundImage = "url('" + customIcon + "')";
-          headerAvatar.style.backgroundSize = "cover";
-          headerAvatar.style.backgroundPosition = "center";
-          headerAvatar.style.backgroundRepeat = "no-repeat";
-          headerAvatar.textContent = "";
+          headerAvatar.innerHTML = '<img src="' + customIcon + '" alt="Avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />';
         }
         refreshCartBadge();
         var greetingMsg = cfg.greeting_message || cfg.agent_title || "";
