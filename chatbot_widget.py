@@ -3159,55 +3159,16 @@ WIDGET_JS = r"""
         });
         if (conversation) {
           conversation.insertBefore(box, conversation.firstChild);
+          var divider = document.createElement("div");
+          divider.className = "history-divider";
+          divider.textContent = "— Previous conversation history —";
+          conversation.insertBefore(divider, box.nextSibling);
+          autoResizeConversation();
         }
       })
       .catch(function () {
         if (historyBtn) historyBtn.classList.remove("spinning");
-      });
-  }
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (data) {
-        if (historyBtn) historyBtn.classList.remove("spinning");
-        if (!data || !data.chats || data.chats.length === 0) return;
-        // Build history context box above greeting bubble
-        var box = document.createElement("div");
-        box.className = "history-context-box";
-        box.id = "chatHistoryBox";
-        var header = document.createElement("div");
-        header.className = "history-context-header";
-        var indicator = document.createElement("span");
-        indicator.className = "history-indicator";
-        indicator.innerHTML = "&#x2713; Previous chats";
-        var closeBtn = document.createElement("button");
-        closeBtn.textContent = "\u00d7";
-        closeBtn.style.cssText = "background:none;border:none;cursor:pointer;font-size:14px;color:#94a3b8;line-height:1;padding:0;";
-        closeBtn.addEventListener("click", function () { box.remove(); });
-        header.appendChild(indicator);
-        header.appendChild(closeBtn);
-        box.appendChild(header);
-        data.chats.forEach(function (chat) {
-          var item = document.createElement("div");
-          item.className = "history-item";
-          var q = document.createElement("div");
-          q.className = "history-q";
-          q.textContent = chat.user_message || "";
-          var a = document.createElement("div");
-          a.className = "history-a";
-          a.textContent = (chat.bot_response || "").slice(0, 160) + ((chat.bot_response || "").length > 160 ? "…" : "");
-          item.appendChild(q);
-          item.appendChild(a);
-          box.appendChild(item);
-        });
-        var divider = document.createElement("div");
-        divider.className = "history-divider";
-        divider.textContent = "— Start of new conversation —";
-        conversation.insertBefore(box, conversation.firstChild);
-        conversation.insertBefore(divider, greetingBubble || conversation.firstChild);
-        autoResizeConversation();
-      })
-      .catch(function () {
-        if (historyBtn) historyBtn.classList.remove("spinning");
-        _historyLoaded = false; // allow retry on next open
+        _historyLoaded = false;
       });
   }
 
