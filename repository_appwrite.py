@@ -456,12 +456,27 @@ def has_dashboard_user(store_id: str) -> bool:
 def get_dashboard_user_by_email(email: str) -> dict | None:
     try:
         normalized = (email or "").strip().lower()
+        if not normalized:
+            return None
         result = databases.list_documents(
             DATABASE_ID, DASHBOARD_USERS_COLLECTION,
             queries=[Query.equal("email", normalized)],
         )
-        return result["documents"][0] if result.get("documents") else None
-    except Exception:
+        docs = result.get("documents", [])
+        if docs:
+            return docs[0]
+        # Fallback with raw casing
+        raw = (email or "").strip()
+        if raw != normalized:
+            res_raw = databases.list_documents(
+                DATABASE_ID, DASHBOARD_USERS_COLLECTION,
+                queries=[Query.equal("email", raw)],
+            )
+            if res_raw.get("documents"):
+                return res_raw["documents"][0]
+        return None
+    except Exception as e:
+        print(f"[get_dashboard_user_by_email] Error: {e}")
         return None
 
 
@@ -933,31 +948,66 @@ def mark_setup_complete(store_id: str) -> dict:
     )
 
 
-def create_password_reset_token(email: str) -> str | None:
-    """Returns a fresh reset token if the email matches a real dashboard
-    user, or None if it doesn't. Callers should show the SAME message
-    either way ("if that email exists, we sent a link") — never reveal
-    whether an email is registered, that's a real security leak."""
-    user = get_dashboard_user_by_email(email)
+def create_password_reset_token_for_user(ident: str) -> tuple[str | None, str | None]:
+    """Returns (token, user_email) if ident matches a real dashboard user
+    (by email or linked store domain), or (None, None) if not found.
+    Callers should show the same message either way — never reveal whether
+    an email is registered, that's a security risk."""
+    cleaned = (ident or "").strip().lower()
+    if not cleaned:
+        return None, None
+
+    user = get_dashboard_user_by_email(cleaned)
     if not user:
-        return None
+        # Fallback to store domain lookup
+        try:
+            store = get_store(cleaned) or get_store_by_id(ident.strip())
+            if store:
+                res = databases.list_documents(
+                    DATABASE_ID, DASHBOARD_USERS_COLLECTION,
+                    queries=[Query.equal("store", store["$id"])],
+                )
+                if res.get("documents"):
+                    user = res["documents"][0]
+        except Exception:
+            pass
+
+    if not user:
+        return None, None
+
     token = secrets.token_urlsafe(32)
     expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-    databases.update_document(
-        DATABASE_ID, DASHBOARD_USERS_COLLECTION, user["$id"],
-        data={"reset_token": token, "reset_token_expires": expires},
-    )
+    try:
+        databases.update_document(
+            DATABASE_ID, DASHBOARD_USERS_COLLECTION, user["$id"],
+            data={"reset_token": token, "reset_token_expires": expires},
+        )
+        return token, user.get("email") or cleaned
+    except Exception as e:
+        print(f"[create_password_reset_token] Appwrite update failed: {e}")
+        return None, None
+
+
+def create_password_reset_token(email: str) -> str | None:
+    token, _ = create_password_reset_token_for_user(email)
     return token
 
 
 def get_dashboard_user_by_reset_token(token: str) -> dict | None:
     """Returns the user if the token is valid AND not expired. A token
     older than 1 hour is treated as if it doesn't exist at all."""
-    result = databases.list_documents(
-        DATABASE_ID, DASHBOARD_USERS_COLLECTION,
-        queries=[Query.equal("reset_token", token)],
-    )
-    docs = result["documents"]
+    if not token or not str(token).strip():
+        return None
+    try:
+        result = databases.list_documents(
+            DATABASE_ID, DASHBOARD_USERS_COLLECTION,
+            queries=[Query.equal("reset_token", str(token).strip())],
+        )
+    except Exception as e:
+        print(f"[get_dashboard_user_by_reset_token] Appwrite list failed: {e}")
+        return None
+
+    docs = result.get("documents", [])
     if not docs:
         return None
     user = docs[0]
@@ -965,9 +1015,14 @@ def get_dashboard_user_by_reset_token(token: str) -> dict | None:
     if not expires:
         return None
     try:
-        if datetime.fromisoformat(expires) < datetime.now(timezone.utc):
+        exp_dt = datetime.fromisoformat(expires)
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+        if exp_dt < datetime.now(timezone.utc):
+            print(f"[get_dashboard_user_by_reset_token] Token expired ({expires})")
             return None  # expired
-    except ValueError:
+    except (ValueError, TypeError) as e:
+        print(f"[get_dashboard_user_by_reset_token] Failed to parse expiration {expires!r}: {e}")
         return None
     return user
 
@@ -975,10 +1030,14 @@ def get_dashboard_user_by_reset_token(token: str) -> dict | None:
 def reset_password(user_id: str, new_password_hash: str) -> None:
     """Sets the new password AND invalidates the reset token — a token
     must only ever be usable once."""
-    databases.update_document(
-        DATABASE_ID, DASHBOARD_USERS_COLLECTION, user_id,
-        data={"password_hash": new_password_hash, "reset_token": None, "reset_token_expires": None},
-    )
+    try:
+        databases.update_document(
+            DATABASE_ID, DASHBOARD_USERS_COLLECTION, user_id,
+            data={"password_hash": new_password_hash, "reset_token": "", "reset_token_expires": ""},
+        )
+    except Exception as e:
+        print(f"[reset_password] Appwrite update failed: {e}")
+        raise
 
 
 # ====================================================================

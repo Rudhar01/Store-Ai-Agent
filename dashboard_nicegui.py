@@ -18,6 +18,7 @@ import inspect
 import logging
 import os
 import time
+import urllib.parse
 from datetime import date, datetime, timedelta, timezone
 
 from types import SimpleNamespace
@@ -643,6 +644,86 @@ def login_page():
             "error": "",
         }
 
+        # Forgot password modal dialog popup
+        forgot_dialog = ui.dialog()
+        with forgot_dialog, ui.card().classes("p-6 w-full max-w-sm gap-2 rounded-2xl shadow-xl bg-white border border-gray-100"):
+            dialog_content = ui.column().classes("w-full gap-2")
+
+        def open_forgot_dialog(initial_val: str = ""):
+            dialog_content.clear()
+            with dialog_content:
+                with ui.row().classes("w-full items-center justify-between mb-1"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon("lock_reset", size="22px").style(f"color:{BRAND};")
+                        ui.label("Reset Password").classes("text-base font-bold text-gray-900")
+                    ui.button(icon="close", on_click=forgot_dialog.close).props("flat round dense").style("color:#9CA3AF;")
+
+                ui.label("Enter your account email or store domain and we'll send you a password reset link.").classes("text-xs text-gray-500 mb-1 leading-relaxed")
+
+                email_input_field = ui.input("Email or Store", value=initial_val, placeholder="you@example.com").classes("w-full").props("autofocus")
+                err_label = ui.label("").classes("text-xs text-red-500 min-h-[14px]")
+
+                async def handle_submit():
+                    raw_val = (email_input_field.value or "").strip()
+                    if not raw_val:
+                        err_label.text = "Please enter your email or store domain."
+                        return
+                    err_label.text = ""
+
+                    token, target_email = repo.create_password_reset_token_for_user(raw_val)
+
+                    shop_param = ""
+                    try:
+                        shop_param = ui.context.client.request.query_params.get("shop", "")
+                    except Exception:
+                        pass
+
+                    reset_link = ""
+                    email_sent = False
+                    if token:
+                        reset_link = f"{APP_URL}/dashboard/reset-password?token={token}"
+                        if shop_param:
+                            reset_link += f"&shop={urllib.parse.quote(shop_param)}"
+                        try:
+                            email_sent = email_utils.send_password_reset_email(target_email or raw_val, reset_link)
+                        except Exception as e:
+                            print(f"[forgot_dialog] Error sending reset email: {e}")
+                            email_sent = False
+
+                    dialog_content.clear()
+                    with dialog_content:
+                        if email_sent:
+                            with ui.column().classes("w-full items-center text-center gap-1 py-2"):
+                                ui.icon("mark_email_read", size="36px").style(f"color:{BRAND};")
+                                ui.label("Reset link sent!").classes("text-base font-bold text-gray-900 mt-1")
+                                ui.label(f"We've sent a password reset link to {target_email or raw_val}. Please check your inbox and spam folder (expires in 1 hour).").classes("text-xs text-gray-600 leading-relaxed")
+                            ui.button("Done", on_click=forgot_dialog.close).props("no-caps").classes("w-full mt-2").style(f"background:{BRAND};color:white;border-radius:10px;")
+                        elif token and reset_link:
+                            with ui.column().classes("w-full items-center text-center gap-1 py-1"):
+                                ui.icon("vpn_key", size="36px").style("color:#F59E0B;")
+                                ui.label("Reset link ready").classes("text-base font-bold text-gray-900 mt-1")
+                                ui.label("SMTP email is not configured on this server. You can open or copy your reset link directly below:").classes("text-xs text-gray-600 leading-relaxed")
+
+                            target_url = f"/dashboard/reset-password?token={token}" + (f"&shop={shop_param}" if shop_param else "")
+                            ui.button("Reset Password Now", on_click=lambda: _goto(target_url)).props("no-caps").classes("w-full mt-2").style(f"background:{BRAND};color:white;border-radius:10px;font-weight:600;")
+
+                            def copy_link():
+                                ui.run_javascript(f'navigator.clipboard.writeText("{reset_link}");')
+                                ui.notify("Reset link copied to clipboard ✓", type="positive")
+                            ui.button("Copy Link", icon="content_copy", on_click=copy_link).props("flat dense no-caps text-color=grey-8").classes("w-full text-xs mt-1")
+                        else:
+                            with ui.column().classes("w-full items-center text-center gap-1 py-1"):
+                                ui.icon("mark_email_read", size="36px").style(f"color:{BRAND};")
+                                ui.label("Check your email").classes("text-base font-bold text-gray-900 mt-1")
+                                ui.label("If that account is registered in our database, a reset link has been processed. It expires in 1 hour.").classes("text-xs text-gray-600 leading-relaxed")
+                            ui.button("Close", on_click=forgot_dialog.close).props("no-caps").classes("w-full mt-2").style(f"background:{BRAND};color:white;border-radius:10px;")
+
+                email_input_field.on("keydown.enter", handle_submit)
+                ui.button("Send reset link", on_click=handle_submit).props("no-caps").classes("w-full mt-2").style(f"background:{BRAND};color:white;border-radius:10px;font-weight:600;")
+                ui.button("Cancel", on_click=forgot_dialog.close).props("flat dense no-caps text-color=grey-7").classes("w-full text-xs")
+
+            forgot_dialog.open()
+
         def render_form():
             card.clear()
             with card:
@@ -689,7 +770,9 @@ def login_page():
                     )
 
                     with ui.row().classes("w-full justify-center mt-2"):
-                        ui.link("Forgot password?", "/dashboard/forgot-password").classes("text-xs text-gray-500 hover:text-gray-800")
+                        ui.link("Forgot password?", "/dashboard/forgot-password").classes(
+                            "text-xs text-gray-500 hover:text-gray-800"
+                        ).on("click.prevent", lambda: open_forgot_dialog(email_input.value or state.get("email", "")))
                     with ui.row().classes("w-full justify-center mt-1"):
                         ui.label("New here?").classes("text-xs text-gray-500")
                         ui.link("Create an account", "/dashboard/signup").classes("text-xs font-semibold text-gray-800 ml-1")
@@ -772,7 +855,9 @@ def login_page():
                             state["error"] = ""
                             render_form()
                         ui.button("← Back", on_click=go_back).props("flat dense no-caps text-color=grey-7").classes("text-xs")
-                        ui.link("Forgot password?", "/dashboard/forgot-password").classes("text-xs text-gray-500 hover:text-gray-800")
+                        ui.link("Forgot password?", "/dashboard/forgot-password").classes(
+                            "text-xs text-gray-500 hover:text-gray-800"
+                        ).on("click.prevent", lambda: open_forgot_dialog(state.get("email", "")))
 
         render_form()
 
@@ -785,35 +870,85 @@ def forgot_password_page():
                 ui.icon("forum", size="20px").style("color:white;")
             ui.label("RenderLink").classes("text-xl font-bold text-gray-900")
 
-        card = ui.card().classes("p-7 w-full max-w-sm gap-1")
+        card = ui.card().classes("p-7 w-full max-w-sm gap-1 shadow-sm rounded-2xl border border-gray-100 bg-white")
 
         def render_form():
             card.clear()
             with card:
                 ui.label("Reset your password").classes("text-lg font-bold text-gray-900")
-                ui.label("Enter your email and we'll send you a reset link.").classes("text-sm text-gray-500 mb-3")
+                ui.label("Enter your email or store domain and we'll send you a reset link.").classes("text-xs text-gray-500 mb-3 leading-relaxed")
 
-                email = ui.input("Email").classes("w-full")
+                ident_input = ui.input("Email or Store Domain", placeholder="you@example.com").classes("w-full").props("autofocus")
+                err_label = ui.label("").classes("text-xs text-red-500 min-h-[14px]")
 
-                def submit():
-                    token = repo.create_password_reset_token(email.value.strip())
+                async def submit():
+                    raw_val = (ident_input.value or "").strip()
+                    if not raw_val:
+                        err_label.text = "Please enter your email or store domain."
+                        return
+                    err_label.text = ""
+
+                    token, target_email = repo.create_password_reset_token_for_user(raw_val)
+
+                    shop_param = ""
+                    try:
+                        shop_param = ui.context.client.request.query_params.get("shop", "")
+                    except Exception:
+                        pass
+
+                    reset_link = ""
+                    email_sent = False
                     if token:
                         reset_link = f"{APP_URL}/dashboard/reset-password?token={token}"
-                        email_utils.send_password_reset_email(email.value.strip(), reset_link)
-                    # Same message either way — never reveal whether an
-                    # email is actually registered.
+                        if shop_param:
+                            reset_link += f"&shop={urllib.parse.quote(shop_param)}"
+                        try:
+                            email_sent = email_utils.send_password_reset_email(target_email or raw_val, reset_link)
+                        except Exception as e:
+                            print(f"[forgot_password_page] Error sending reset email: {e}")
+                            email_sent = False
+
                     card.clear()
                     with card:
-                        ui.icon("mark_email_read", size="32px").style(f"color:{BRAND};")
-                        ui.label("Check your email").classes("text-lg font-bold text-gray-900 mt-1")
-                        ui.label(
-                            "If that email is registered, a password reset link is on its way. "
-                            "It expires in 1 hour."
-                        ).classes("text-sm text-gray-500")
-                        ui.link("Back to login", "/dashboard/login").classes("text-xs font-semibold text-gray-800 mt-3")
+                        if email_sent:
+                            with ui.column().classes("w-full items-center text-center gap-1"):
+                                ui.icon("mark_email_read", size="36px").style(f"color:{BRAND};").classes("mt-1")
+                                ui.label("Check your email").classes("text-lg font-bold text-gray-900 mt-1")
+                                ui.label(
+                                    f"A password reset link was sent to {target_email or raw_val}. "
+                                    "It expires in 1 hour."
+                                ).classes("text-xs text-gray-500 leading-relaxed")
+                            with ui.row().classes("w-full justify-center mt-3"):
+                                ui.link("Back to login", "/dashboard/login").classes("text-xs font-semibold text-gray-800")
+                        elif token and reset_link:
+                            with ui.column().classes("w-full items-center text-center gap-1"):
+                                ui.icon("vpn_key", size="36px").style("color:#F59E0B;").classes("mt-1")
+                                ui.label("Reset link ready").classes("text-lg font-bold text-gray-900 mt-1")
+                                ui.label("SMTP email is not configured on this server. You can open or copy your reset link directly below:").classes("text-xs text-gray-600 leading-relaxed")
 
+                            target_url = f"/dashboard/reset-password?token={token}" + (f"&shop={shop_param}" if shop_param else "")
+                            ui.button("Reset Password Now", on_click=lambda: _goto(target_url)).props("no-caps").classes("w-full mt-3").style(f"background:{BRAND};color:white;border-radius:10px;font-weight:600;")
+
+                            def copy_link():
+                                ui.run_javascript(f'navigator.clipboard.writeText("{reset_link}");')
+                                ui.notify("Reset link copied to clipboard ✓", type="positive")
+                            ui.button("Copy Link", icon="content_copy", on_click=copy_link).props("flat dense no-caps text-color=grey-8").classes("w-full text-xs mt-1")
+                            with ui.row().classes("w-full justify-center mt-2"):
+                                ui.link("Back to login", "/dashboard/login").classes("text-xs font-semibold text-gray-800")
+                        else:
+                            with ui.column().classes("w-full items-center text-center gap-1"):
+                                ui.icon("mark_email_read", size="36px").style(f"color:{BRAND};").classes("mt-1")
+                                ui.label("Check your email").classes("text-lg font-bold text-gray-900 mt-1")
+                                ui.label(
+                                    "If that account is registered, a password reset link is on its way. "
+                                    "It expires in 1 hour."
+                                ).classes("text-xs text-gray-500 leading-relaxed")
+                            with ui.row().classes("w-full justify-center mt-3"):
+                                ui.link("Back to login", "/dashboard/login").classes("text-xs font-semibold text-gray-800")
+
+                ident_input.on("keydown.enter", submit)
                 ui.button("Send reset link", on_click=submit).props("no-caps").classes("w-full mt-3").style(
-                    f"background:{BRAND};color:white;border-radius:10px;"
+                    f"background:{BRAND};color:white;border-radius:10px;font-weight:600;"
                 )
                 with ui.row().classes("w-full justify-center mt-2"):
                     ui.link("Back to login", "/dashboard/login").classes("text-xs font-semibold text-gray-800")
@@ -829,35 +964,58 @@ def reset_password_page(token: str = ""):
                 ui.icon("forum", size="20px").style("color:white;")
             ui.label("RenderLink").classes("text-xl font-bold text-gray-900")
 
-        with ui.card().classes("p-7 w-full max-w-sm gap-1") as card:
-            user = repo.get_dashboard_user_by_reset_token(token) if token else None
+        with ui.card().classes("p-7 w-full max-w-sm gap-1 shadow-sm rounded-2xl border border-gray-100 bg-white") as card:
+            # Safe token extraction from parameter or query string
+            effective_token = token
+            if not effective_token:
+                try:
+                    effective_token = ui.context.client.request.query_params.get("token", "")
+                except Exception:
+                    pass
+            effective_token = (effective_token or "").strip()
+
+            user = repo.get_dashboard_user_by_reset_token(effective_token) if effective_token else None
 
             if not user:
-                ui.icon("error_outline", size="32px").style("color:#DC2626;")
-                ui.label("This reset link is invalid or has expired.").classes("text-sm text-gray-700 mt-1")
-                ui.link("Request a new link", "/dashboard/forgot-password").classes("text-xs font-semibold text-gray-800 mt-3")
+                with ui.column().classes("w-full items-center text-center gap-1"):
+                    ui.icon("error_outline", size="36px").style("color:#DC2626;").classes("mt-1")
+                    ui.label("Invalid or expired link").classes("text-base font-bold text-gray-900 mt-1")
+                    ui.label("This password reset link is invalid, already used, or has expired (links are valid for 1 hour).").classes("text-xs text-gray-500 leading-relaxed")
+                with ui.row().classes("w-full justify-center mt-3"):
+                    ui.link("Request a new link", "/dashboard/forgot-password").classes("text-xs font-semibold text-gray-800")
             else:
                 ui.label("Choose a new password").classes("text-lg font-bold text-gray-900")
-                ui.label(f"Resetting password for {user['email']}").classes("text-sm text-gray-500 mb-3")
+                ui.label(f"Resetting password for {user.get('email', 'your account')}").classes("text-xs text-gray-500 mb-3")
 
                 new_password = ui.input("New password", password=True, password_toggle_button=True, placeholder="At least 8 characters").classes("w-full")
-                confirm_password = ui.input("Confirm password", password=True, password_toggle_button=True).classes("w-full")
-                error_label = ui.label("").classes("text-xs text-gray-500")
+                confirm_password = ui.input("Confirm password", password=True, password_toggle_button=True, placeholder="Repeat your new password").classes("w-full")
+                error_label = ui.label("").classes("text-xs text-red-500 min-h-[16px]")
 
                 def submit():
-                    if len(new_password.value) < 8:
+                    p1 = (new_password.value or "").strip()
+                    p2 = (confirm_password.value or "").strip()
+                    if len(p1) < 8:
                         error_label.text = "Password needs at least 8 characters."
                         return
-                    if new_password.value != confirm_password.value:
+                    if p1 != p2:
                         error_label.text = "Passwords don't match."
                         return
-                    repo.reset_password(user["$id"], bcrypt.hashpw(new_password.value.encode(), bcrypt.gensalt()).decode())
-                    ui.notify("Password updated — please log in.", type="positive")
-                    _goto("/dashboard/login")
+                    try:
+                        hashed = bcrypt.hashpw(p1.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                        repo.reset_password(user["$id"], hashed)
+                        ui.notify("Password updated successfully ✓ — please log in.", type="positive")
+                        _goto("/dashboard/login")
+                    except Exception as e:
+                        error_label.text = f"Failed to update password: {e}"
+
+                new_password.on("keydown.enter", submit)
+                confirm_password.on("keydown.enter", submit)
 
                 ui.button("Update password", on_click=submit).props("no-caps").classes("w-full mt-3").style(
-                    f"background:{BRAND};color:white;border-radius:10px;"
+                    f"background:{BRAND};color:white;border-radius:10px;font-weight:600;"
                 )
+                with ui.row().classes("w-full justify-center mt-2"):
+                    ui.link("Back to login", "/dashboard/login").classes("text-xs font-semibold text-gray-800")
 
 
 @ui.page("/dashboard")
