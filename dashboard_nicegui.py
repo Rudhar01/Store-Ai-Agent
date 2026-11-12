@@ -234,6 +234,9 @@ def _shopify_nav_menu():
     ui.add_head_html(f'''
         <meta name="shopify-api-key" content="{api_key}">
         <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+        <style>
+            ui-nav-menu {{ display: none !important; }}
+        </style>
     ''')
 
     # 2. Render official declarative <ui-nav-menu> web-component
@@ -254,7 +257,7 @@ def _shopify_nav_menu():
         links.append(f'<a href="{href}">{label}</a>')
 
     links_html = "".join(links)
-    ui.html(f"<ui-nav-menu>{links_html}</ui-nav-menu>")
+    ui.html(f'<ui-nav-menu style="display:none !important;" hidden>{links_html}</ui-nav-menu>')
 
     # 3. Robust JavaScript backup for older or newer App Bridge v4 / v3 instances
     # Some Shopify Admin UI wrappers listen on NavigationMenu or custom events
