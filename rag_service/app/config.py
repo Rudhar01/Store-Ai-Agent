@@ -4,7 +4,8 @@ import os
 
 
 def _s(name: str, default: str = "") -> str:
-    return os.environ.get(name, default)
+    v = os.environ.get(name)
+    return v.strip() if v is not None and v.strip() else default
 
 
 def _i(name: str, default: int) -> int:
@@ -29,7 +30,7 @@ RAG_API_KEY = _s("RAG_API_KEY")
 QDRANT_URL = _s("QDRANT_URL")                      # Qdrant Cloud / server. Empty -> embedded (dev only)
 QDRANT_API_KEY = _s("QDRANT_API_KEY") or None
 QDRANT_PATH = _s("QDRANT_PATH", "./qdrant_data")
-COLLECTION = _s("QDRANT_COLLECTION", "store_knowledge")
+COLLECTION = _s("QDRANT_COLLECTION", "store_knowledge") or "store_knowledge"
 
 # --- dense embeddings (any OpenAI-compatible /embeddings endpoint)
 EMBED_BASE_URL = _s("EMBEDDING_BASE_URL", "https://api.openai.com/v1").rstrip("/")

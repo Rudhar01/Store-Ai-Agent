@@ -31,3 +31,7 @@ desktop.ini
 
 # Render / Log files
 *.log
+
+# Local knowledge cache
+local_knowledge_cache.json
+

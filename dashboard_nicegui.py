@@ -3000,6 +3000,86 @@ def knowledge_page():
         )
 
         # ================================================================
+        # SECTION 0: RAG RETRIEVAL ENGINE TOGGLE (REMOTE vs LOCAL FALLBACK)
+        # ================================================================
+        with ui.card().classes(CARD_CLASSES + " p-5 gap-3 mb-4"):
+            with ui.row().classes("w-full items-center justify-between"):
+                with ui.row().classes("items-center gap-2.5"):
+                    with ui.element("div").classes("w-9 h-9 rounded-xl flex items-center justify-center bg-blue-50 text-blue-600"):
+                        ui.icon("storage", size="20px")
+                    with ui.column().classes("gap-0"):
+                        ui.label("Knowledge Retrieval Mode").classes("text-sm font-bold text-gray-900")
+                        engine_desc = ui.label("").classes("text-xs text-gray-500")
+                engine_badge = ui.label("").classes("text-xs font-semibold px-2.5 py-1 rounded-full")
+
+            with ui.row().classes("w-full items-center justify-between pt-2 border-t border-gray-100"):
+                def update_engine_ui():
+                    is_remote = rag_retriever.is_remote_rag_enabled()
+                    engine_switch.value = is_remote
+                    if is_remote:
+                        engine_badge.text = "Remote RAG: Active (Qdrant Service)"
+                        engine_badge.style("background:#ECFDF5;color:#059669;border:1px solid #A7F3D0;")
+                        engine_desc.text = "Retrieval requests are sent to your independently deployed Qdrant RAG service (with automatic local fallback)."
+                    else:
+                        engine_badge.text = "Local Knowledge Base: Active (Standalone Mode)"
+                        engine_badge.style("background:#FEF3C7;color:#D97706;border:1px solid #FDE68A;")
+                        engine_desc.text = "Retrieval requests query internal store policies & uploaded sample documents directly (zero external server needed)."
+
+                def toggle_engine(e):
+                    rag_retriever.set_use_remote_rag(e.value)
+                    update_engine_ui()
+                    ui.notify(
+                        "Switched to Remote Qdrant RAG" if e.value else "Switched to Local Knowledge Base mode",
+                        type="positive" if e.value else "info"
+                    )
+                    render_docs()
+
+                engine_switch = ui.switch(
+                    "Use Remote Qdrant RAG Service",
+                    value=rag_retriever.is_remote_rag_enabled(),
+                    on_change=toggle_engine,
+                ).props("dense")
+                update_engine_ui()
+
+                # Interactive Test Retrieval button
+                def open_test_dialog():
+                    with ui.dialog() as test_dialog, ui.card().classes("p-6 w-full max-w-lg gap-3 rounded-2xl shadow-xl"):
+                        with ui.row().classes("w-full items-center justify-between"):
+                            with ui.row().classes("items-center gap-2"):
+                                ui.icon("search", size="20px").style(f"color:{BRAND};")
+                                ui.label("Test Knowledge Retrieval").classes("text-sm font-bold text-gray-900")
+                            ui.button(icon="close", on_click=test_dialog.close).props("flat round dense text-color=grey-6")
+
+                        ui.label("Ask any question to preview what knowledge chunks the AI assistant retrieves for this store:").classes("text-xs text-gray-500")
+                        q_input = ui.input("Question / Query", placeholder="e.g. What is your return policy?").classes("w-full")
+                        results_col = ui.column().classes("w-full gap-2 mt-2")
+
+                        def run_test():
+                            query_str = (q_input.value or "").strip()
+                            if not query_str:
+                                return
+                            results_col.clear()
+                            chunks = rag_retriever.retrieve_context(shop_domain, query_str, top_k=3)
+                            with results_col:
+                                if not chunks:
+                                    ui.label("No relevant chunks found.").classes("text-xs text-gray-400 italic")
+                                else:
+                                    curr = "Remote RAG" if rag_retriever.is_remote_rag_enabled() else "Local Knowledge Base"
+                                    ui.label(f"Retrieved {len(chunks)} chunks via {curr}:").classes("text-xs font-semibold text-gray-700")
+                                    for i, ch in enumerate(chunks, 1):
+                                        with ui.card().classes("w-full p-3 bg-gray-50 rounded-xl border border-gray-200 gap-1"):
+                                            with ui.row().classes("w-full items-center justify-between"):
+                                                ui.label(f"#{i} {ch.get('document', ch.get('title', 'Document'))}").classes("text-xs font-bold text-gray-800")
+                                                ui.label(f"Score: {ch.get('score', 0)}").classes("text-[10px] text-gray-500 font-mono")
+                                            ui.label(ch.get("content", "")[:350] + ("..." if len(ch.get("content", "")) > 350 else "")).classes("text-xs text-gray-600 font-mono whitespace-pre-wrap")
+
+                        q_input.on("keydown.enter", run_test)
+                        ui.button("Search Knowledge", icon="search", on_click=run_test).props("no-caps").classes("w-full").style(f"background:{BRAND};color:white;border-radius:10px;font-weight:600;")
+                    test_dialog.open()
+
+                ui.button("Test Retrieval Live", icon="quiz", on_click=open_test_dialog).props("outline dense no-caps text-color=grey-8").classes("text-xs px-3 py-1.5 rounded-lg")
+
+        # ================================================================
         # SECTION 1: DOCUMENT UPLOAD & RAG VECTOR PIPELINE
         # ================================================================
         with ui.card().classes(CARD_CLASSES + " p-6 gap-3 mb-4"):
