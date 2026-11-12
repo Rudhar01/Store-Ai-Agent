@@ -86,7 +86,7 @@
       "actions": [
         {
           "name": "track_order",
-          "description": "Where is ONE specific order, its delivery status, tracking number, carrier status, checkpoints or ETA. Use this for 'where is my order' / 'track package' questions.",
+          "description": "Where is ONE specific order, its delivery status, tracking number, carrier status, checkpoints or ETA. Use this for 'where is my order' / 'track package' questions. DO NOT use this if the user is asking to return, cancel, edit address, or check return policy for an order.",
           "requires_confirmation": false,
           "required_entities": [],
           "optional_entities": [
@@ -105,13 +105,19 @@
         },
         {
           "name": "list_recent_orders",
-          "description": "Show a list of ALL the shopper's orders (all, past, current, active or pending) or their order history, not the status of one specific order.",
+          "description": "Show a list of the shopper's orders. If the shopper asks for 'active orders', 'pending orders', or 'orders in progress', filter to show ONLY active orders. Otherwise show recent orders.",
           "requires_confirmation": false,
           "required_entities": [],
           "optional_entities": [
-            "email"
+            "email",
+            "filter"
           ],
           "example_utterances": [
+            "list active orders",
+            "show my active orders",
+            "what are my active orders?",
+            "show orders in progress",
+            "active orders only",
             "Show all my orders",
             "Show me my orders",
             "Show my orders for test@example.com",
@@ -134,12 +140,111 @@
         "Track order #1042",
         "When will my package arrive?",
         "mera order kahan hai",
+        "list active orders",
+        "show my active orders",
         "Show all my orders",
         "Show me my orders",
         "What have I ordered before?",
         "Show my order history",
         "mere saare orders dikhao",
         "mere orders dikhao"
+      ]
+    },
+    {
+      "name": "order_management",
+      "description": "User wants to check return eligibility, initiate an order return, cancel an order, or edit shipping address for an order.",
+      "actions": [
+        {
+          "name": "check_return_eligibility",
+          "description": "Check if an order is eligible for return based on the store return policy and order delivery status/fulfillment date. Use this for conversational inquiries like 'can I return my order #1003', 'whether I can return my order number 1003 or not', 'is order 1003 eligible for return', 'check return policy for order 1003'.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "order_number",
+            "order_id",
+            "email"
+          ],
+          "example_utterances": [
+            "whether i can return my order number 1003 or not",
+            "can I return order #1003?",
+            "can I return my order 1003?",
+            "is order 1003 eligible for return?",
+            "can I return my order?",
+            "check return policy for order 1003",
+            "check return eligibility for #1003",
+            "kya main order 1003 return kar sakta hoon"
+          ]
+        },
+        {
+          "name": "request_order_return",
+          "description": "Initiate or submit a return request for an order. Use when customer explicitly commands or asks to start/submit a return.",
+          "requires_confirmation": false,
+          "required_entities": [
+            "order_number"
+          ],
+          "optional_entities": [
+            "reason",
+            "email"
+          ],
+          "example_utterances": [
+            "return order #1003",
+            "I want to return order 1003",
+            "please start a return for order #1003",
+            "return my order 1003",
+            "mujhe order 1003 return karna hai"
+          ]
+        },
+        {
+          "name": "cancel_order",
+          "description": "Cancel an unfulfilled or pending order before it ships.",
+          "requires_confirmation": false,
+          "required_entities": [
+            "order_number"
+          ],
+          "optional_entities": [
+            "email",
+            "reason"
+          ],
+          "example_utterances": [
+            "cancel order #1003",
+            "I want to cancel my order",
+            "please cancel order 1001",
+            "cancel my order"
+          ]
+        },
+        {
+          "name": "edit_address",
+          "description": "Update shipping delivery address for an unfulfilled order.",
+          "requires_confirmation": false,
+          "required_entities": [
+            "order_number",
+            "address"
+          ],
+          "optional_entities": [
+            "email"
+          ],
+          "example_utterances": [
+            "change address for order #1003",
+            "update shipping address for order 1003"
+          ]
+        }
+      ],
+      "required_entities": [],
+      "optional_entities": [
+        "order_number",
+        "order_id",
+        "email",
+        "address",
+        "reason"
+      ],
+      "example_utterances": [
+        "whether i can return my order number 1003 or not",
+        "can I return order #1003?",
+        "is order 1003 eligible for return?",
+        "return order #1003",
+        "I want to return order 1003",
+        "cancel order #1003",
+        "change address for order #1003"
       ]
     },
     {

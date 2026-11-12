@@ -21,6 +21,7 @@ EXAMPLES: dict[tuple[str, str], list[str]] = {
     ],
     ("order_tracking", "list_recent_orders"): [
         "show all my orders", "show my orders", "list all my orders", "show all orders for test@example.com",
+        "list active orders", "show my active orders", "what are my active orders", "orders in progress", "active orders only",
         "what are my past orders", "my order history", "show my purchases",
         "mere saare orders dikhao", "mere orders dikhao", "order history dikhao",
         "मेरे सभी ऑर्डर दिखाओ", "ਮੇਰੇ ਸਾਰੇ ਆਰਡਰ ਦਿਖਾਓ",
@@ -69,11 +70,30 @@ EXAMPLES: dict[tuple[str, str], list[str]] = {
         "empty my cart", "remove everything from my cart", "clear my basket", "cart khali karo", "कार्ट खाली करो",
     ],
     ("warranty_claim", "submit_claim"): [
-        "this arrived broken and I want a replacement", "I want to return my order", "the item is damaged, how do I claim warranty",
+        "this arrived broken and I want a replacement", "the item is damaged, how do I claim warranty",
         "I want to claim warranty for order #1001", "earphones stopped working, file warranty claim",
-        "my zipper is broken, need warranty replacement", "I received the wrong size, I want my money back",
-        "mujhe return karna hai", "product kharab aaya hai", "warranty claim karni hai",
+        "my zipper is broken, need warranty replacement", "I received a defective product, need warranty claim",
+        "product kharab aaya hai", "warranty claim karni hai",
         "प्रोडक्ट खराब आया है", "ਸਮਾਨ ਖਰਾਬ ਆਇਆ ਹੈ",
+    ],
+    ("order_management", "check_return_eligibility"): [
+        "whether i can return my order number 1003 or not", "can I return order #1003",
+        "can I return my order 1003", "is order 1003 eligible for return", "can I return my order",
+        "check return policy for order 1003", "is order #1003 returnable", "kya main order 1003 return kar sakta hoon",
+        "order 1003 return ho sakta hai kya", "check return eligibility for 1003",
+    ],
+    ("order_management", "request_order_return"): [
+        "return order #1003", "I want to return order 1003", "please start return for order #1003",
+        "return my order 1003", "initiate return for order 1003", "mujhe order 1003 return karna hai",
+        "order 1003 return karo",
+    ],
+    ("order_management", "cancel_order"): [
+        "cancel order #1003", "I want to cancel my order 1003", "please cancel order 1001", "cancel my order",
+        "order cancel kardo",
+    ],
+    ("order_management", "edit_address"): [
+        "change address for order #1003", "update shipping address for order 1003", "edit delivery address for order 1001",
+        "delivery address change karo",
     ],
     ("warranty_claim", "check_claim_status"): [
         "what's the status of my warranty claim", "has my return been approved", "any update on my replacement request",

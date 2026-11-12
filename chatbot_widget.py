@@ -106,6 +106,9 @@ _RESCUABLE = {
     ("product_search", "search_products"),
     ("order_tracking", "track_order"),
     ("order_tracking", "list_recent_orders"),
+    ("order_management", "check_return_eligibility"),
+    ("order_management", "request_order_return"),
+    ("order_management", "cancel_order"),
     ("cart_management", "view_cart"),
     ("policy_query", "answer_policy_question"),
     ("payment_checkout", "initiate_payment"),
@@ -115,6 +118,12 @@ _RESCUABLE = {
 def _rescue_entities(intent: str, action: str, message: str) -> dict:
     if action == "search_products":
         return {"query": extract_search_term(message) or message.strip()}
+    if action in ("check_return_eligibility", "request_order_return", "cancel_order", "track_order"):
+        m = _ORDER_NO_RE.search(message)
+        if m:
+            return {"order_number": m.group(1)}
+    if action == "list_recent_orders" and any(w in message.lower() for w in ["active", "progress", "pending", "open"]):
+        return {"filter": "active", "active_only": True}
     return {}
 
 
@@ -703,7 +712,9 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
             entities["matched_product"] = first_prod["name"]
     orders = None
     if action in {"list_recent_orders", "get_my_orders"} and isinstance(data, dict):
-        if isinstance(data.get("orders"), list):
+        if data.get("active_only") or entities.get("filter") == "active":
+            orders = data.get("orders") or data.get("active_orders") or []
+        elif isinstance(data.get("orders"), list):
             orders = data["orders"]
         elif isinstance(data.get("active_orders"), list):
             orders = [{**o, "group": "active"} for o in (data.get("active_orders") or [])] + [{**o, "group": "past"} for o in (data.get("past_orders") or [])]
@@ -1145,6 +1156,53 @@ async def _chat_impl(req: ChatRequest):
         entities = {"order_number": m_ord.group(1) if m_ord else "", "address": message, "email": customer_email}
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif any(p in _msg_lower for p in ["can i return", "whether i can return", "eligible for return", "is my order returnable", "return policy for order", "return eligibility", "returnable or not", "can we return", "allowed to return", "possible to return"]) or ("return" in _msg_lower and any(w in _msg_lower for w in ["whether", "can i", "if i can", "possible", "policy", "allowed", "eligible", "or not"])):
+        intent, action = "order_management", "check_return_eligibility"
+        m_ord = _ORDER_NO_RE.search(message)
+        entities = {"order_number": m_ord.group(1) if m_ord else ""}
+        if customer_email:
+            entities["email"] = customer_email
+        language = "en"
+        classification = {
+            "intent": intent,
+            "action": action,
+            "entities": entities,
+            "language": language,
+            "requires_confirmation": False,
+            "message_type": "normal",
+            "is_action": False,
+        }
+    elif any(p in _msg_lower for p in ["return my order", "return order", "start return", "initiate return", "request return", "submit return", "want to return", "please return", "process return", "mujhe return karna hai"]):
+        intent, action = "order_management", "request_order_return"
+        m_ord = _ORDER_NO_RE.search(message)
+        entities = {"order_number": m_ord.group(1) if m_ord else ""}
+        if customer_email:
+            entities["email"] = customer_email
+        language = "en"
+        classification = {
+            "intent": intent,
+            "action": action,
+            "entities": entities,
+            "language": language,
+            "requires_confirmation": False,
+            "message_type": "action",
+            "is_action": True,
+        }
+    elif any(p in _msg_lower for p in ["active order", "active orders", "orders in progress", "pending order", "pending orders", "open order", "open orders", "in progress orders"]):
+        intent, action = "order_tracking", "list_recent_orders"
+        entities = {"filter": "active", "active_only": True}
+        if customer_email:
+            entities["email"] = customer_email
+        language = "en"
+        classification = {
+            "intent": intent,
+            "action": action,
+            "entities": entities,
+            "language": language,
+            "requires_confirmation": False,
+            "message_type": "normal",
+            "is_action": False,
+        }
     elif any(p in _msg_lower for p in ["swap with", "swap to", "swap item", "replace with", "swap in cart"]):
         intent, action = "cart_management", "swap_item"
         clean_target = re.sub(r"\b(swap with|swap to|swap item|replace with|swap in cart|swap)\b", "", message, flags=re.IGNORECASE).strip()
@@ -1223,10 +1281,20 @@ async def _chat_impl(req: ChatRequest):
     entities["message_type"] = message_type
     entities["is_action"] = is_action
 
-    if intent == "order_tracking" and not (entities.get("order_number") or entities.get("order_id")):
+    if intent == "order_tracking" and action == "track_order" and not (entities.get("order_number") or entities.get("order_id")):
+        if not any(w in _msg_lower for w in ["return", "cancel", "refund", "address"]):
+            m = _ORDER_NO_RE.search(message)
+            if m:
+                entities["order_number"] = m.group(1)
+
+    if intent == "order_management" and not (entities.get("order_number") or entities.get("order_id")):
         m = _ORDER_NO_RE.search(message)
         if m:
             entities["order_number"] = m.group(1)
+
+    if action == "list_recent_orders" and any(w in _msg_lower for w in ["active", "progress", "pending", "open"]):
+        entities["filter"] = "active"
+        entities["active_only"] = True
 
     if (intent, action) == ("product_search", "search_products") and not entities.get("query"):
         extracted = extract_search_term(message)

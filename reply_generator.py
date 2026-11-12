@@ -150,8 +150,25 @@ def generate_reply(
     extra_clause = ""
     if action_name in ("list_recent_orders", "get_my_orders"):
         extra_clause = (
-            " When listing orders, summarize them clearly with order number (e.g. #1001), "
+            " When listing orders, if active_only is true or the user asked for active orders, introduce them specifically as their active orders in progress and summarize only those active orders. Summarize them clearly with order number (e.g. #1001), "
             "date, status, items with quantities, and total price. If no orders exist, mention that politely."
+        )
+    elif action_name == "check_return_eligibility":
+        extra_clause = (
+            " When checking return eligibility: "
+            "Speak conversationally in simple, friendly words like an in-store assistant. "
+            "If status is 'order_number_required', kindly ask for the order number and explain that our store has a 30-day return policy for unused items in original packaging. "
+            "If status is 'unfulfilled', explain clearly that this order hasn't been delivered yet, so returns are not possible yet, but offer to cancel the order or update the shipping address before it ships. "
+            "If status is 'in_transit', explain that the order is on its way, and they can easily initiate a return as soon as it arrives at their door. "
+            "If status is 'eligible', warmly confirm that the order is within the 30-day return window, explain the condition requirements (unused, in original packaging with tags), and ask if they would like you to start the return process for them. "
+            "If status is 'expired', kindly explain that the 30-day return window has passed, but let them know that if the item arrived defective or damaged, they can file a warranty claim instead. "
+            "If status is 'order_not_found', politely ask them to check the order number."
+        )
+    elif action_name in ("request_order_return", "return_order"):
+        extra_clause = (
+            " When submitting an order return request: "
+            "Reassure the shopper warmly and confirm their return request has been submitted for order number (order_number). "
+            "Mention that our team will send prepaid return instructions to their email, and ask if there is anything else they need help with."
         )
     elif action_name == "submit_claim":
         extra_clause = (
@@ -267,6 +284,8 @@ def generate_reply(
                 return f"I found {count} product{'s' if count != 1 else ''} that might match what you're looking for:"
             if data.get("orders") and isinstance(data["orders"], list):
                 count = len(data["orders"])
+                if data.get("active_only"):
+                    return f"Here {'are' if count != 1 else 'is'} your {count} active order{'s' if count != 1 else ''} in progress:"
                 return f"Here {'are' if count != 1 else 'is'} your {count} recent order{'s' if count != 1 else ''}:"
             if data.get("order_number") or data.get("order_id"):
                 oid = data.get("order_number") or data.get("order_id")

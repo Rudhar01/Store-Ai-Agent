@@ -69,6 +69,8 @@ ACTION_ACTIONS = {
     # order modification
     "cancel_order",
     "edit_address",
+    "request_order_return",
+    "return_order",
     # alerts & scheduled tasks
     "create_instruction",
     # claims & account
@@ -93,21 +95,27 @@ CONVERSATIONAL_ACTIONS = {
     "nudge_abandoned_cart",
     "check_claim_status",
     "list_my_alerts",
+    "check_return_eligibility",
     "clarify",
 }
 
 
 def determine_message_type(intent: str, action: str, user_message: str = "") -> str:
     """Classifies user message as either 'action' or 'normal' (conversational).
-    - 'action': User commands a state mutation (add/remove from cart, checkout, cancel, update address, subscribe alert).
-    - 'normal': User is chatting, asking questions, checking product availability, browsing, or asking policies."""
+    - 'action': User commands a state mutation (add/remove from cart, checkout, cancel, update address, subscribe alert, initiate return).
+    - 'normal': User is chatting, asking questions, checking product availability, checking return eligibility, browsing, or asking policies."""
     msg_low = str(user_message or "").strip().lower()
 
-    # Product availability questions are always normal conversational messages
-    if action == "check_availability" or any(w in msg_low for w in [
-        "available or not", "whether this product is available", "is it available", "in stock", "is this available"
+    # Product availability & return eligibility questions are always normal conversational messages
+    if action in ("check_availability", "check_return_eligibility") or any(w in msg_low for w in [
+        "available or not", "whether this product is available", "is it available", "in stock", "is this available",
+        "can i return", "whether i can return", "eligible for return", "is my order returnable", "return policy for",
+        "check return", "return eligibility"
     ]):
         return "normal"
+
+    if action in ("request_order_return", "return_order"):
+        return "action"
 
     if action in ACTION_ACTIONS:
         return "action"
@@ -160,7 +168,7 @@ def build_system_prompt(schema: dict) -> str:
         "Pick the action whose description fits best; descriptions say when NOT to use an action.",
         "Judge by MEANING, not exact wording: shoppers use slang, typos, short or indirect phrasing, and may mix languages (for example Hinglish). Pick the closest action even when the wording differs from every example.",
         "Engage the shopper: Every user message in an online store reflects an intent to browse, buy, track, or ask. Greetings, store questions, and 'what can you do' map to 'general_chat.assistant_help'. Interest in any product, category, or 'tell me about X' maps to 'product_search.search_products'. Questions checking if an item is available or in stock map to 'product_search.check_availability'. Recommendation requests map to 'general_chat.recommend_products' or 'product_search.get_recommendations'.",
-        "Determine the message_type: Flag 'action' (is_action=true) ONLY when the user explicitly commands a state mutation (add/remove from cart, checkout, cancel order, update address, subscribe alert). Flag 'normal' (is_action=false) for conversational inquiries, checking product availability, browsing products, asking policies, chatting, or asking general questions.",
+        "Determine the message_type: Flag 'action' (is_action=true) ONLY when the user explicitly commands a state mutation (add/remove from cart, checkout, cancel order, update address, subscribe alert, initiate return). Flag 'normal' (is_action=false) for conversational inquiries, checking product availability, checking return eligibility or policy, browsing products, asking policies, chatting, or asking general questions.",
         "Use 'fallback.clarify' whenever the message is ambiguous, unclear, or does not map confidently to any intent — do not guess. Reserve it for both uninterpretable gibberish AND short vague messages that could mean many things.",
         "If a 'Recent conversation' block is given, use it only to resolve references such as 'that one' or 'the second one'; classify ONLY the latest message.",
         "",
@@ -363,6 +371,41 @@ def _extract_availability_product(user_message: str) -> str:
     return clean_p
 
 
+def _extract_order_number(text: str) -> str | None:
+    m = re.search(r"#?\s*(\d{3,8})\b", text)
+    return m.group(1) if m else None
+
+
+def _is_return_inquiry(msg_low: str) -> bool:
+    return any(p in msg_low for p in [
+        "can i return", "whether i can return", "eligible for return", "is my order returnable",
+        "return policy for", "check return", "return eligibility", "returnable or not", "can we return",
+        "allowed to return", "am i allowed to return", "possible to return"
+    ]) or ("return" in msg_low and any(w in msg_low for w in ["whether", "can i", "if i can", "possible", "policy", "allowed", "eligible", "or not"]))
+
+
+def _is_return_request(msg_low: str) -> bool:
+    if _is_return_inquiry(msg_low):
+        return False
+    return any(p in msg_low for p in [
+        "return my order", "return order", "start return", "initiate return", "request return",
+        "submit return", "want to return", "please return", "process return", "mujhe return karna hai"
+    ])
+
+
+def _is_active_orders_query(msg_low: str) -> bool:
+    return any(p in msg_low for p in [
+        "active order", "active orders", "orders in progress", "pending order", "pending orders",
+        "open order", "open orders", "in progress orders"
+    ])
+
+
+def _is_cancel_order_query(msg_low: str) -> bool:
+    return any(p in msg_low for p in [
+        "cancel order", "cancel my order", "want to cancel", "cancel #", "please cancel"
+    ])
+
+
 def _fallback(confidence: float = 0.0, language: str = "en", user_message: str = "") -> dict:
     msg_low = str(user_message or "").strip().lower()
     if _is_availability_inquiry(msg_low):
@@ -377,6 +420,60 @@ def _fallback(confidence: float = 0.0, language: str = "en", user_message: str =
             "language": language,
             "message_type": "normal",
             "is_action": False,
+        }
+
+    if _is_return_inquiry(msg_low):
+        ord_no = _extract_order_number(user_message)
+        entities = {"order_number": ord_no} if ord_no else {}
+        return {
+            "intent": "order_management",
+            "action": "check_return_eligibility",
+            "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
+        }
+
+    if _is_return_request(msg_low):
+        ord_no = _extract_order_number(user_message)
+        entities = {"order_number": ord_no} if ord_no else {}
+        return {
+            "intent": "order_management",
+            "action": "request_order_return",
+            "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    if _is_active_orders_query(msg_low):
+        return {
+            "intent": "order_tracking",
+            "action": "list_recent_orders",
+            "entities": {"filter": "active", "active_only": True},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
+        }
+
+    if _is_cancel_order_query(msg_low):
+        ord_no = _extract_order_number(user_message)
+        entities = {"order_number": ord_no} if ord_no else {}
+        return {
+            "intent": "order_management",
+            "action": "cancel_order",
+            "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
         }
 
     return {
@@ -402,8 +499,9 @@ def classify_intent(user_message: str, schema: dict | None = None, history: list
     and message_type/is_action tagging whether it's an action or normal message."""
     schema = schema or load_schema()
 
-    # Fast heuristic check for product availability inquiries
     msg_low = str(user_message or "").strip().lower()
+
+    # Fast heuristic check for product availability inquiries
     if _is_availability_inquiry(msg_low):
         clean_p = _extract_availability_product(user_message)
         entities = {"product_title": clean_p} if clean_p else {}
@@ -416,6 +514,61 @@ def classify_intent(user_message: str, schema: dict | None = None, history: list
             "language": "en",
             "message_type": "normal",
             "is_action": False,
+        }
+
+    # Contextual order heuristics to avoid greedy/blind tracking
+    if _is_return_inquiry(msg_low):
+        ord_no = _extract_order_number(user_message)
+        entities = {"order_number": ord_no} if ord_no else {}
+        return {
+            "intent": "order_management",
+            "action": "check_return_eligibility",
+            "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": "en",
+            "message_type": "normal",
+            "is_action": False,
+        }
+
+    if _is_return_request(msg_low):
+        ord_no = _extract_order_number(user_message)
+        entities = {"order_number": ord_no} if ord_no else {}
+        return {
+            "intent": "order_management",
+            "action": "request_order_return",
+            "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": "en",
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    if _is_active_orders_query(msg_low):
+        return {
+            "intent": "order_tracking",
+            "action": "list_recent_orders",
+            "entities": {"filter": "active", "active_only": True},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": "en",
+            "message_type": "normal",
+            "is_action": False,
+        }
+
+    if _is_cancel_order_query(msg_low):
+        ord_no = _extract_order_number(user_message)
+        entities = {"order_number": ord_no} if ord_no else {}
+        return {
+            "intent": "order_management",
+            "action": "cancel_order",
+            "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": "en",
+            "message_type": "action",
+            "is_action": True,
         }
 
     # Optional context: the last few (role, text) turns, so follow-ups like

@@ -56,7 +56,7 @@ import random
 import secrets
 import hashlib
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import httpx
 import difflib
 import semantic
@@ -909,6 +909,19 @@ async def list_recent_orders(store, entities: dict, session_id: str, customer_id
 
     active = [o for o in orders_list if o.get("status") not in {"fulfilled", "delivered", "cancelled"}]
     past = [o for o in orders_list if o.get("status") in {"fulfilled", "delivered", "cancelled"}]
+
+    is_active_only = bool(entities.get("filter") == "active" or entities.get("active_only"))
+    if is_active_only:
+        return {
+            "orders": active,
+            "active_orders": active,
+            "past_orders": [],
+            "count": len(active),
+            "email": email or "",
+            "active_only": True,
+            "message": f"Here {'are' if len(active) != 1 else 'is'} your {len(active)} active order{'s' if len(active) != 1 else ''} in progress:" if active else "You don't have any active orders in progress right now.",
+        }
+
     return {
         "orders": orders_list,
         "active_orders": active,
@@ -2854,6 +2867,176 @@ async def edit_order_address(store, entities: dict, session_id: str, customer_id
 
 
 # ==========================================================================
+# ORDER RETURNS & ELIGIBILITY VERIFICATION
+# ==========================================================================
+async def check_return_eligibility(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    """Checks whether an order can be returned based on the store return policy and order fulfillment date/status.
+    - If unfulfilled: explains return is only after delivery, but offers cancellation or address change.
+    - If delivered <= 30 days: confirms eligibility, states return terms, offers to start return.
+    - If delivered > 30 days: explains 30-day window has expired, offers warranty claim if defective.
+    - If order not found / missing: prompts for order number politely.
+    """
+    order_number = str(entities.get("order_number") or entities.get("order_id") or "").lstrip("#").strip()
+    if not order_number:
+        return {
+            "status": "order_number_required",
+            "message": "Please provide your order number (for example #1003) so I can look up its status and check the return eligibility for you.",
+            "policy_summary": "Our standard store policy offers returns within 30 days of delivery for items in their original condition and packaging.",
+        }
+
+    orders_data = await _get_order_by_number(store, order_number)
+    if not orders_data:
+        return {
+            "status": "order_not_found",
+            "order_number": order_number,
+            "message": f"I couldn't locate order #{order_number}. Please double-check your order number or let me know if it was placed under a different email.",
+        }
+
+    # Check if already cancelled
+    if orders_data.get("cancelled_at") or orders_data.get("cancelledAt"):
+        return {
+            "status": "already_cancelled",
+            "order_number": order_number,
+            "message": f"Order #{order_number} was already cancelled, so it cannot be returned.",
+        }
+
+    f_status = (orders_data.get("fulfillment_status") or orders_data.get("displayFulfillmentStatus") or "unfulfilled").lower().replace("_", " ")
+
+    # Not yet fulfilled/delivered
+    if f_status in {"unfulfilled", "pending", "open", "processing", "null", ""}:
+        return {
+            "status": "unfulfilled",
+            "order_number": order_number,
+            "fulfillment_status": f_status,
+            "can_return": False,
+            "can_cancel": True,
+            "message": f"Order #{order_number} is currently {f_status} and has not shipped or been delivered yet. Returns are only available once you receive your items. However, since it hasn't shipped yet, would you like me to help you cancel this order or update your shipping address?",
+        }
+
+    # In transit / out for delivery
+    if f_status in {"in transit", "shipped", "out for delivery", "partially fulfilled"}:
+        return {
+            "status": "in_transit",
+            "order_number": order_number,
+            "fulfillment_status": f_status,
+            "can_return": False,
+            "message": f"Order #{order_number} is currently on its way ({f_status})! Returns can be initiated as soon as your package is delivered to your door within our 30-day return window.",
+        }
+
+    # Fulfilled / Delivered -> Check 30-day return window
+    date_str = None
+    fulfillments = orders_data.get("fulfillments") or []
+    if fulfillments and isinstance(fulfillments, list):
+        date_str = fulfillments[0].get("created_at") or fulfillments[0].get("updated_at")
+    if not date_str:
+        date_str = orders_data.get("created_at") or orders_data.get("createdAt")
+
+    days_elapsed = 0
+    if date_str:
+        try:
+            clean_date = date_str[:19].replace("Z", "")
+            order_dt = datetime.fromisoformat(clean_date).replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            days_elapsed = max(0, (now - order_dt).days)
+        except Exception as e:
+            print(f"[check_return_eligibility] date parse warning: {e!r}")
+            days_elapsed = 0
+
+    return_window_days = 30
+    items = []
+    for line in orders_data.get("line_items", []):
+        items.append({
+            "name": line.get("title") or line.get("name") or "Product",
+            "quantity": line.get("quantity", 1),
+            "price": line.get("price"),
+        })
+
+    if days_elapsed <= return_window_days:
+        return {
+            "status": "eligible",
+            "order_number": order_number,
+            "can_return": True,
+            "days_elapsed": days_elapsed,
+            "return_window_days": return_window_days,
+            "items": items,
+            "message": f"Great news! Order #{order_number} is eligible for return under our 30-day return policy (delivered {days_elapsed} day{'s' if days_elapsed != 1 else ''} ago). As long as items are unused with tags and original packaging intact, you can return them for a full refund or replacement. Would you like me to submit a return request for you?",
+        }
+    else:
+        return {
+            "status": "expired",
+            "order_number": order_number,
+            "can_return": False,
+            "days_elapsed": days_elapsed,
+            "return_window_days": return_window_days,
+            "items": items,
+            "suggest_warranty": True,
+            "message": f"Order #{order_number} was delivered {days_elapsed} days ago, which is past our standard 30-day return window. While standard returns are closed for this order, if you received an item that has a manufacturing defect or arrived damaged, you can still submit a warranty claim right here!",
+        }
+
+
+async def request_order_return(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    """Submits or initiates a return request for an eligible order and records it in repository."""
+    import repository_appwrite as _repo
+    import email_utils
+
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
+    store_id = getattr(store, "id", None) or getattr(store, "$id", None) or shop
+    store_name = _repo.get_store_display_name(shop)
+    store_owner_email = _repo.get_store_owner_email(shop)
+    order_number = str(entities.get("order_number") or entities.get("order_id") or "").lstrip("#").strip()
+    reason = str(entities.get("reason") or entities.get("issue_description") or "Customer requested return").strip()
+
+    if not order_number:
+        return {
+            "status": "order_number_required",
+            "message": "Please provide your order number (e.g. #1003) so I can initiate the return for you.",
+        }
+
+    # Verify eligibility first
+    eligibility = await check_return_eligibility(store, entities, session_id, customer_id=customer_id)
+    if eligibility.get("status") in ("unfulfilled", "in_transit", "already_cancelled", "expired", "order_not_found"):
+        return eligibility
+
+    orders_data = await _get_order_by_number(store, order_number)
+    order_email = (
+        (orders_data.get("email") or "").strip().lower()
+        if orders_data else (entities.get("email") or "").strip().lower()
+    ) or store_owner_email
+
+    # Save action request in database
+    rec = _repo.save_order_action_request(
+        store_id=store_id,
+        shop_domain=shop,
+        order_number=order_number,
+        customer_email=order_email,
+        action_type="return",
+        details=f"Customer requested return: {reason}",
+        status="pending",
+    )
+
+    # Notify store owner & customer
+    try:
+        email_utils.send_html_email(
+            to_email=store_owner_email,
+            subject=f"📦 Return Request: Order #{order_number}",
+            html_body=f"<p>Customer {order_email} requested a return for Order #{order_number}. Reason: {reason}. Request ID: {rec.get('id')}.</p>",
+            reply_to=order_email,
+            from_name=f"{store_name} Returns",
+        )
+    except Exception as _e:
+        print(f"[request_order_return] email notify error: {_e!r}")
+
+    return {
+        "status": "return_requested",
+        "order_number": order_number,
+        "request_id": rec.get("id"),
+        "customer_email": order_email,
+        "is_action": True,
+        "message": f"Your return request for order #{order_number} has been submitted! Our support team will review it and send prepaid return instructions to {order_email}. Is there anything else I can help you with today?",
+    }
+
+
+# ==========================================================================
 # ABANDONED CART RECOVERY NUDGE
 # ==========================================================================
 async def nudge_abandoned_cart(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
@@ -2954,6 +3137,9 @@ ACTION_MAP = {
     "standing_instruction.create_instruction": create_standing_instruction,
     "order_management.cancel_order": cancel_order,
     "order_management.edit_address": edit_order_address,
+    "order_management.check_return_eligibility": check_return_eligibility,
+    "order_management.request_order_return": request_order_return,
+    "order_management.return_order": request_order_return,
     "cart_recovery.nudge_abandoned_cart": nudge_abandoned_cart,
     "fallback.clarify": clarify,
 }
