@@ -143,6 +143,64 @@ app.include_router(webhooks.router)
 app.include_router(chatbot_widget.router)  # add back once migrated
 app.include_router(activity_tracker.router)
 
+
+@app.api_route("/api/test-abandoned-cart-email", methods=["GET", "POST"])
+async def test_abandoned_cart_email_endpoint(
+    to: str = "rudharthakur74@gmail.com",
+    reply_to: str = "collectioncars03@gmail.com",
+    store_name: str = "Dripire Apparel",
+):
+    import email_utils
+    host, port, user, password, from_addr = email_utils._get_smtp_config()
+    if not (host and user and password):
+        return {
+            "status": "error",
+            "message": "SMTP credentials are not configured in this environment. Please ensure SMTP_HOST, SMTP_USER, and SMTP_PASSWORD are set in the Render environment variables.",
+            "detected_config": {
+                "host": host or "NOT SET",
+                "port": port,
+                "user": user or "NOT SET",
+                "password_configured": bool(password),
+                "from_addr": from_addr,
+            },
+        }
+
+    sample_items = [
+        {
+            "title": "Oversized Streetwear Hoodie",
+            "quantity": 1,
+            "price": "₹2,499",
+            "image": "https://images.unsplash.com/photo-1556905055-8f358a7a47b2?auto=format&fit=crop&w=400&q=80",
+        },
+        {
+            "title": "Relaxed Fit Utility Cargo",
+            "quantity": 1,
+            "price": "₹1,899",
+            "image": "https://images.unsplash.com/photo-1517445312882-bc9910d016b7?auto=format&fit=crop&w=400&q=80",
+        },
+    ]
+
+    sent = email_utils.send_abandoned_cart_email(
+        to_email=to.strip(),
+        store_name=store_name.strip(),
+        cart_items=sample_items,
+        checkout_url=f"https://dripire.com/checkout/sample_recovery",
+        total_price="₹4,398",
+        reply_to=reply_to.strip(),
+    )
+
+    return {
+        "status": "success" if sent else "failed",
+        "email_sent": sent,
+        "to": to.strip(),
+        "from": from_addr,
+        "reply_to": reply_to.strip(),
+        "store_name": store_name.strip(),
+        "cart_items_count": len(sample_items),
+        "smtp_host": host,
+        "smtp_user": user,
+    }
+
 # --------------------------------------------------------------------
 # NiceGUI mount — must come LAST among routers/mounts above.
 # This attaches dashboard_nicegui.py's @ui.page("/dashboard/...") routes
