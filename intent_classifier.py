@@ -54,6 +54,80 @@ _INT_ENTITIES = ("quantity",)
 _ORDER_ENTITIES = ("order_number", "order_id")
 _EMAIL_RE = re.compile(r"^[\w.+\-]+@[\w\-]+\.[\w.\-]+$")
 
+ACTION_ACTIONS = {
+    # cart mutations
+    "add_item",
+    "add_all_to_cart",
+    "remove_item",
+    "edit_quantity",
+    "clear_cart",
+    "swap_item",
+    # checkout & payment
+    "initiate_payment",
+    "confirm_payment_otp",
+    "save_payment_credentials",
+    # order modification
+    "cancel_order",
+    "edit_address",
+    # alerts & scheduled tasks
+    "create_instruction",
+    # claims & account
+    "submit_claim",
+    "register",
+    "login",
+    "logout",
+    "forgot_password",
+}
+
+CONVERSATIONAL_ACTIONS = {
+    "search_products",
+    "check_availability",
+    "get_recommendations",
+    "recommend_products",
+    "assistant_help",
+    "answer_policy_question",
+    "track_order",
+    "list_recent_orders",
+    "get_my_orders",
+    "view_cart",
+    "nudge_abandoned_cart",
+    "check_claim_status",
+    "list_my_alerts",
+    "clarify",
+}
+
+
+def determine_message_type(intent: str, action: str, user_message: str = "") -> str:
+    """Classifies user message as either 'action' or 'normal' (conversational).
+    - 'action': User commands a state mutation (add/remove from cart, checkout, cancel, update address, subscribe alert).
+    - 'normal': User is chatting, asking questions, checking product availability, browsing, or asking policies."""
+    msg_low = str(user_message or "").strip().lower()
+
+    # Product availability questions are always normal conversational messages
+    if action == "check_availability" or any(w in msg_low for w in [
+        "available or not", "whether this product is available", "is it available", "in stock", "is this available"
+    ]):
+        return "normal"
+
+    if action in ACTION_ACTIONS:
+        return "action"
+    if action in CONVERSATIONAL_ACTIONS:
+        return "normal"
+
+    if action == "subscribe_restock":
+        if any(w in msg_low for w in ["notify me", "alert me", "email me when", "tell me when back", "subscribe"]):
+            return "action"
+        return "normal"
+
+    if intent in ("cart_management", "payment_checkout", "order_management"):
+        return "action"
+    return "normal"
+
+
+def is_action_message(intent: str, action: str, user_message: str = "") -> bool:
+    """Returns True if the message represents an executable action, False if conversational/normal."""
+    return determine_message_type(intent, action, user_message) == "action"
+
 
 def _strip_thinking(text: str) -> str:
     if not text:
@@ -85,7 +159,8 @@ def build_system_prompt(schema: dict) -> str:
         "Classify the user's message into exactly one intent and exactly one action of that intent.",
         "Pick the action whose description fits best; descriptions say when NOT to use an action.",
         "Judge by MEANING, not exact wording: shoppers use slang, typos, short or indirect phrasing, and may mix languages (for example Hinglish). Pick the closest action even when the wording differs from every example.",
-        "Engage the shopper: Every user message in an online store reflects an intent to browse, buy, track, or ask. Greetings, store questions, and 'what can you do' map to 'general_chat.assistant_help'. Interest in any product, category, or 'tell me about X' maps to 'product_search.search_products'. Recommendation requests map to 'general_chat.recommend_products' or 'product_search.get_recommendations'.",
+        "Engage the shopper: Every user message in an online store reflects an intent to browse, buy, track, or ask. Greetings, store questions, and 'what can you do' map to 'general_chat.assistant_help'. Interest in any product, category, or 'tell me about X' maps to 'product_search.search_products'. Questions checking if an item is available or in stock map to 'product_search.check_availability'. Recommendation requests map to 'general_chat.recommend_products' or 'product_search.get_recommendations'.",
+        "Determine the message_type: Flag 'action' (is_action=true) ONLY when the user explicitly commands a state mutation (add/remove from cart, checkout, cancel order, update address, subscribe alert). Flag 'normal' (is_action=false) for conversational inquiries, checking product availability, browsing products, asking policies, chatting, or asking general questions.",
         "Use 'fallback.clarify' whenever the message is ambiguous, unclear, or does not map confidently to any intent — do not guess. Reserve it for both uninterpretable gibberish AND short vague messages that could mean many things.",
         "If a 'Recent conversation' block is given, use it only to resolve references such as 'that one' or 'the second one'; classify ONLY the latest message.",
         "",
@@ -265,7 +340,45 @@ def _clean_entities(raw, intent: dict, action: dict) -> dict:
     return out
 
 
-def _fallback(confidence: float = 0.0, language: str = "en") -> dict:
+def _is_availability_inquiry(msg_low: str) -> bool:
+    if any(k in msg_low for k in ["notify", "alert", "email me", "remind me"]):
+        return False
+    return (
+        "available" in msg_low
+        or "in stock" in msg_low
+        or "out of stock" in msg_low
+        or any(w in msg_low for w in ["check availability", "whether this product is available", "is it available"])
+    )
+
+
+def _extract_availability_product(user_message: str) -> str:
+    clean_p = re.sub(
+        r"\b(tell me whether|tell me if|is it|is this|are these|whether this|check availability|available or not|in stock|out of stock|available in stock|is|are|available|product|this item|this|it|that|the|do you have|got)\b",
+        "",
+        user_message,
+        flags=re.IGNORECASE,
+    ).strip("?.,! ")
+    if clean_p.lower() in ("this", "it", "that", "item", "product", ""):
+        return ""
+    return clean_p
+
+
+def _fallback(confidence: float = 0.0, language: str = "en", user_message: str = "") -> dict:
+    msg_low = str(user_message or "").strip().lower()
+    if _is_availability_inquiry(msg_low):
+        clean_p = _extract_availability_product(user_message)
+        entities = {"product_title": clean_p} if clean_p else {}
+        return {
+            "intent": "product_search",
+            "action": "check_availability",
+            "entities": entities,
+            "confidence": 0.90,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
+        }
+
     return {
         "intent": "fallback",
         "action": "clarify",
@@ -273,6 +386,8 @@ def _fallback(confidence: float = 0.0, language: str = "en") -> dict:
         "confidence": confidence,
         "requires_confirmation": False,
         "language": language,
+        "message_type": "normal",
+        "is_action": False,
     }
 
 
@@ -283,8 +398,25 @@ def _fallback(confidence: float = 0.0, language: str = "en") -> dict:
 def classify_intent(user_message: str, schema: dict | None = None, history: list | None = None) -> dict:
     """Classify a single user message. Returns a dict matching
     classification_output_format from the schema, with requires_confirmation
-    filled in from the schema (never trusted from the model's own output)."""
+    filled in from the schema (never trusted from the model's own output),
+    and message_type/is_action tagging whether it's an action or normal message."""
     schema = schema or load_schema()
+
+    # Fast heuristic check for product availability inquiries
+    msg_low = str(user_message or "").strip().lower()
+    if _is_availability_inquiry(msg_low):
+        clean_p = _extract_availability_product(user_message)
+        entities = {"product_title": clean_p} if clean_p else {}
+        return {
+            "intent": "product_search",
+            "action": "check_availability",
+            "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": "en",
+            "message_type": "normal",
+            "is_action": False,
+        }
 
     # Optional context: the last few (role, text) turns, so follow-ups like
     # "the second one" can be resolved. Only the latest message is classified.
@@ -308,12 +440,12 @@ def classify_intent(user_message: str, schema: dict | None = None, history: list
         raw = _strip_thinking(response.choices[0].message.content)
     except Exception as e:
         print(f"intent_classifier: LLM classification failed: {e!r}")
-        return _fallback()
+        return _fallback(user_message=user_message)
 
     result = _parse_json(raw)
     if result is None:
         print(f"intent_classifier: model returned unparseable content; raw={raw!r}")
-        return _fallback()
+        return _fallback(user_message=user_message)
 
     confidence = _confidence(result.get("confidence"))
     language = _language(result.get("language"))
@@ -329,7 +461,15 @@ def classify_intent(user_message: str, schema: dict | None = None, history: list
         action = intent["actions"][0]
 
     if confidence < schema.get("confidence_threshold", 0.6) or intent is None or action is None:
-        return _fallback(confidence, language)
+        return _fallback(confidence, language, user_message=user_message)
+
+    msg_type = result.get("message_type")
+    if msg_type not in ("action", "normal", "conversational"):
+        msg_type = determine_message_type(intent["name"], action["name"], user_message)
+    else:
+        msg_type = "normal" if msg_type == "conversational" else msg_type
+
+    is_action = (msg_type == "action")
 
     return {
         "intent": intent["name"],
@@ -338,6 +478,8 @@ def classify_intent(user_message: str, schema: dict | None = None, history: list
         "confidence": confidence,
         "requires_confirmation": bool(action.get("requires_confirmation", False)),
         "language": language,
+        "message_type": msg_type,
+        "is_action": is_action,
     }
 
 

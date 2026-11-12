@@ -428,6 +428,30 @@
       "description": "User wants to find products or get product suggestions.",
       "actions": [
         {
+          "name": "check_availability",
+          "description": "Check whether a product is currently available or in stock in the store. A normal conversational inquiry, not an action.",
+          "requires_confirmation": false,
+          "required_entities": [],
+          "optional_entities": [
+            "product_title",
+            "product_name",
+            "product_name_or_id",
+            "query",
+            "size",
+            "color"
+          ],
+          "example_utterances": [
+            "tell me whether this product is available or not",
+            "is this product available",
+            "is this available in stock",
+            "is the oversized denim jacket available",
+            "do you have classic leather oxford shoes in stock",
+            "is it available or not",
+            "check if this is in stock",
+            "kya ye available hai"
+          ]
+        },
+        {
           "name": "search_products",
           "description": "Find products by name, category or attributes, optionally filtered by price, color or size.",
           "requires_confirmation": false,
@@ -670,7 +694,9 @@
     "entities": "key-value object of any entities extracted from the message, kept in the language the user wrote them in",
     "confidence": "float between 0 and 1",
     "requires_confirmation": "boolean, copied from the matched action definition",
-    "language": "ISO 639-1 code of the language the user's message was written or spoken in, e.g. 'en', 'hi', 'pa', 'es', 'fr', 'ar'"
+    "language": "ISO 639-1 code of the language the user's message was written or spoken in, e.g. 'en', 'hi', 'pa', 'es', 'fr', 'ar'",
+    "message_type": "'action' if the shopper is commanding an operation/mutation (e.g. cart modification, checkout, cancellation), or 'normal' for conversational questions, browsing, chatting, or checking availability",
+    "is_action": "boolean, true if message_type is 'action', false if 'normal'"
   },
   "confidence_threshold": 0.6,
   "below_threshold_behavior": "route to fallback.clarify instead of guessing"

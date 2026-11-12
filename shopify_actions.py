@@ -1567,6 +1567,101 @@ async def search_products(store, entities: dict, session_id: str) -> dict:
     return {"results": results, "filters_applied": entities}
 
 
+async def check_availability(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    """Conversational product availability check.
+    Informs the shopper in plain, natural human words whether the requested item is in stock,
+    what it costs, and offers next steps (adding to cart or in-stock alternatives if sold out)."""
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
+    prod_query = (
+        entities.get("product_title")
+        or entities.get("product_name")
+        or entities.get("product_name_or_id")
+        or entities.get("query")
+        or ""
+    ).strip()
+
+    if not prod_query:
+        return {
+            "status": "product_required",
+            "is_action": False,
+            "message_type": "normal",
+            "message": "I'd be happy to check availability for you! Which product or item are you looking for?",
+        }
+
+    prod, variant, in_stock, _ = await _find_store_product(store, prod_query)
+    if not prod:
+        search_res = await search_products(store, {"query": prod_query}, session_id)
+        alt_cards = (search_res.get("results") or []) if isinstance(search_res, dict) else []
+        if alt_cards:
+            top_card = alt_cards[0]
+            top_name = top_card.get("name") or prod_query
+            top_price = top_card.get("price") or ""
+            price_str = f"₹{top_price}" if "₹" not in str(top_price) else str(top_price)
+            return {
+                "status": "available",
+                "in_stock": True,
+                "is_action": False,
+                "message_type": "normal",
+                "product_title": top_name,
+                "price": price_str,
+                "results": alt_cards[:4],
+                "message": f"Yes! We have '{top_name}' available in stock right now for {price_str}! Would you like me to add it to your cart or help you choose a size?",
+            }
+        return {
+            "status": "not_found",
+            "is_action": False,
+            "message_type": "normal",
+            "product_query": prod_query,
+            "message": f"I couldn't find '{prod_query}' in our store catalog right now. Could you double-check the item name, or can I help you find something else?",
+        }
+
+    prod_title = prod.get("title") or prod_query
+    price_raw = (variant.get("price") if variant else (prod.get("variants", [{}])[0].get("price") if prod.get("variants") else "0.00")) or "0.00"
+    price_str = f"₹{price_raw}" if "₹" not in str(price_raw) else str(price_raw)
+    product_card = {
+        "id": str(variant.get("id")) if variant else str(prod.get("id", "")),
+        "product_id": str(prod.get("id", "")),
+        "name": prod_title,
+        "price": float(price_raw) if str(price_raw).replace(".", "").isdigit() else 0.0,
+        "image": (prod.get("image") or {}).get("src", "") if prod else "",
+        "handle": prod.get("handle", "") if prod else "",
+        "url": f"https://{shop}/products/{prod.get('handle', '')}" if (prod and prod.get("handle")) else "",
+        "in_stock": in_stock,
+    }
+
+    if in_stock:
+        size = entities.get("size")
+        size_label = f" (size {size})" if size else ""
+        return {
+            "status": "available",
+            "in_stock": True,
+            "is_action": False,
+            "message_type": "normal",
+            "product_title": prod_title,
+            "price": price_str,
+            "results": [product_card],
+            "message": f"Yes, good news! '{prod_title}'{size_label} is available and in stock right now for {price_str}! Would you like me to help you add it to your cart?",
+        }
+
+    # If out of stock, propose close alternatives in simple friendly words
+    alternatives = await _find_close_alternatives(store, prod, limit=3)
+    alt_text = ""
+    if alternatives:
+        alt_names = ", ".join(f"'{a['name']}'" for a in alternatives[:2])
+        alt_text = f" However, we have similar in-stock options like {alt_names} ready to ship!"
+
+    return {
+        "status": "out_of_stock",
+        "in_stock": False,
+        "is_action": False,
+        "message_type": "normal",
+        "product_title": prod_title,
+        "results": alternatives,
+        "alternatives": alternatives,
+        "message": f"'{prod_title}' is currently out of stock at the moment.{alt_text} Would you like to check one of those out, or should I notify you when fresh stock arrives?",
+    }
+
+
 # ==========================================================================
 # payment_checkout — storing payment credentials securely and autonomous
 # checkout by verifying a 6-digit OTP in chat.
@@ -2845,6 +2940,7 @@ ACTION_MAP = {
     "payment_checkout.initiate_payment": initiate_payment,
     "payment_checkout.confirm_payment_otp": confirm_payment_otp,
     "product_search.search_products": search_products,
+    "product_search.check_availability": check_availability,
     "policy_query.answer_policy_question": answer_policy_question,
     "customer_account.get_my_orders": get_my_orders,
     "customer_account.get_recommendations": get_recommendations,

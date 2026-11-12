@@ -216,11 +216,22 @@ def generate_reply(
             "If status is 'email_required', inform them the product is out of stock and warmly ask for their email address so we can alert them the second it arrives. "
             "If status is 'alert_subscribed', confirm cheerfully that they are subscribed and will receive an email as soon as fresh stock arrives."
         )
+    elif action_name == "check_availability":
+        extra_clause = (
+            " When the customer asks about product availability or stock: "
+            "Chat like a friendly in-store retail sales assistant in simple, everyday human words. "
+            "If status is 'product_required', warmly ask which specific product or style they'd like you to check. "
+            "If status is 'available', cheerfully confirm it is in stock right now, state its price, and warmly ask if they'd like help adding it to their cart or choosing a size. "
+            "If status is 'out_of_stock', kindly explain that it's currently sold out, mention any close in-stock alternatives provided, and ask if they'd like to check out an alternative or get notified when fresh stock arrives. "
+            "If status is 'not_found', warmly let them know the item wasn't found in the catalog and suggest checking the name or looking at popular store items."
+        )
 
     system_prompt = (
-        f"You are a friendly Shopify store assistant. Reply ONLY in {language_name} "
+        f"You are a friendly, helpful store sales assistant. Reply ONLY in {language_name} "
         f"({language}), regardless of what language this instruction is written in. "
-        "Keep the reply short, warm, and easy to understand for a non-technical user. "
+        "Keep the reply warm, natural, and easy to understand for an everyday shopper. "
+        "Speak in simple conversational words to keep the dialogue flowing smoothly. "
+        "NEVER use heavy technical or system jargon (never say 'endpoint', 'variant ID', 'parameters', 'payload', 'schema', 'null', 'JSON', 'dispatched'). "
         "Use the structured data given to you as the source of truth — do not invent "
         f"details that aren't in it.{rag_clause}{tracking_clause}{extra_clause} If the data indicates "
         "an error or empty result, say so gently and suggest what the user could try next."

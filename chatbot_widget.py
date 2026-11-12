@@ -59,7 +59,8 @@ def _span_error(msg: str) -> None:
         pass
 
 import repository_appwrite as repo
-from intent_classifier import classify_intent, load_schema
+import intent_classifier
+from intent_classifier import classify_intent, load_schema, determine_message_type, is_action_message
 from reply_generator import generate_reply
 import shopify_actions
 import customer_profiles
@@ -695,7 +696,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                 except Exception as e:
                     print(f"chatbot_widget: fallback products fetch failed: {e!r}")
 
-    products = data.get("results") if action in {"search_products", "get_recommendations", "recommend_products", "assistant_help", "clarify", "subscribe_restock"} and isinstance(data, dict) else None
+    products = data.get("results") if action in {"search_products", "check_availability", "get_recommendations", "recommend_products", "assistant_help", "clarify", "subscribe_restock"} and isinstance(data, dict) else None
     if products and isinstance(products, list) and len(products) > 0:
         first_prod = products[0]
         if isinstance(first_prod, dict) and first_prod.get("name"):
@@ -719,11 +720,20 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
     reply = await _safe_reply_async(
         action, _llm_view(data), language, original_message, fallback,
         store_identifier=store.shop_domain,
-        needs_rag=(action == "answer_policy_question" or action == "search_products"),
+        needs_rag=(action == "answer_policy_question" or action == "search_products" or action == "check_availability"),
         rag_query=rag_query,
     )
-    out = {"status": data.get("status", "done") if isinstance(data, dict) else "done",
-           "reply": reply, "language": language, "intent": intent, "action": action}
+    msg_type = entities.get("message_type") or intent_classifier.determine_message_type(intent, action, original_message)
+    is_act = (msg_type == "action")
+    out = {
+        "status": data.get("status", "done") if isinstance(data, dict) else "done",
+        "reply": reply,
+        "language": language,
+        "intent": intent,
+        "action": action,
+        "message_type": msg_type,
+        "is_action": is_act,
+    }
     if products:
         out["products"] = products
     if orders:
@@ -1154,6 +1164,27 @@ async def _chat_impl(req: ChatRequest):
             entities["email"] = customer_email
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif ("available" in _msg_lower or "in stock" in _msg_lower or "out of stock" in _msg_lower) and not any(k in _msg_lower for k in ["notify", "alert", "email"]):
+        intent, action = "product_search", "check_availability"
+        clean_prod = re.sub(
+            r"\b(tell me whether|tell me if|is it|is this|are these|whether this|check availability|available or not|in stock|out of stock|available in stock|is|are|available|product|this item|this|it|that|the|do you have|got)\b",
+            "",
+            message,
+            flags=re.IGNORECASE,
+        ).strip("?.,! ")
+        if clean_prod.lower() in ("this", "it", "that", "item", "product", ""):
+            clean_prod = ""
+        entities = {"product_title": clean_prod} if clean_prod else {}
+        language = "en"
+        classification = {
+            "intent": intent,
+            "action": action,
+            "entities": entities,
+            "language": language,
+            "requires_confirmation": False,
+            "message_type": "normal",
+            "is_action": False,
+        }
     elif _msg_lower in ["what restock alerts do i have", "my restock alerts", "show my restock alerts", "list my alerts"]:
         intent, action = "restock_alert", "list_my_alerts"
         entities = {"email": customer_email} if customer_email else {}
@@ -1186,6 +1217,11 @@ async def _chat_impl(req: ChatRequest):
         action = classification["action"]
         entities = classification.get("entities") or {}
         language = classification.get("language", "en")
+
+    message_type = classification.get("message_type") or intent_classifier.determine_message_type(intent, action, message)
+    is_action = classification.get("is_action") if "is_action" in classification else (message_type == "action")
+    entities["message_type"] = message_type
+    entities["is_action"] = is_action
 
     if intent == "order_tracking" and not (entities.get("order_number") or entities.get("order_id")):
         m = _ORDER_NO_RE.search(message)
@@ -1365,6 +1401,8 @@ async def _chat_impl(req: ChatRequest):
                     "status": "cart_empty",
                     "reply": reply,
                     "language": language,
+                    "message_type": "action",
+                    "is_action": True,
                 }
 
             # 2. If not empty: reply with short confirmation and redirect to checkout
@@ -1385,6 +1423,8 @@ async def _chat_impl(req: ChatRequest):
                 "language": language,
                 "checkout_url": checkout_url,
                 "widget_action": widget_action,
+                "message_type": "action",
+                "is_action": True,
             }
 
         # Feature checks
