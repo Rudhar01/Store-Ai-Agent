@@ -161,6 +161,10 @@ def send_restock_notification_email(
     price: str = "",
     reply_to: str = None,
 ) -> bool:
+    if not product_title or not str(product_title).strip():
+        print(f"[email_utils] Aborting restock email to {to_email}: missing product_title.")
+        return False
+
     subject = f"🎉 Good news! '{product_title}' is back in stock at {store_name}"
     text_body = (
         f"Hello,\n\n"
@@ -207,6 +211,10 @@ def send_price_drop_email(
     product_image: str = "",
     reply_to: str = None,
 ) -> bool:
+    if not product_title or not new_price:
+        print(f"[email_utils] Aborting price drop email to {to_email}: missing product_title or new_price.")
+        return False
+
     subject = f"📉 Price Drop Alert: '{product_title}' is now {new_price} at {store_name}!"
     text_body = (
         f"Great news!\n\n"
@@ -255,6 +263,10 @@ def send_reorder_reminder_email(
     product_image: str = "",
     reply_to: str = None,
 ) -> bool:
+    if not product_title or not str(product_title).strip():
+        print(f"[email_utils] Aborting reorder email to {to_email}: missing product_title.")
+        return False
+
     subject = f"⏰ Time to reorder '{product_title}' from {store_name}?"
     text_body = (
         f"Hi there,\n\n"
@@ -298,22 +310,28 @@ def send_abandoned_cart_email(
     total_price: str = "",
     reply_to: str = None,
 ) -> bool:
+    if not cart_items or not isinstance(cart_items, list):
+        print(f"[email_utils] Aborting abandoned cart email to {to_email}: cart_items is empty. Refusing to send dummy or empty data.")
+        return False
+
     subject = f"🛒 Did you leave something behind at {store_name}?"
     item_rows = ""
-    for it in cart_items[:5]:
+    for it in cart_items[:10]:
         title = it.get("title") or it.get("name") or "Product"
         qty = it.get("quantity") or 1
-        price = it.get("price") or ""
+        raw_price = str(it.get("price") or "").strip()
+        if raw_price and not any(raw_price.startswith(sym) for sym in ("₹", "$", "€", "£")):
+            raw_price = f"₹{raw_price}"
         img = it.get("image") or ""
-        img_html = f'<img src="{img}" style="width:48px;height:48px;border-radius:6px;object-fit:cover;margin-right:12px;">' if img else ""
+        img_html = f'<img src="{img}" alt="{title}" style="width:52px;height:52px;border-radius:8px;object-fit:cover;margin-right:14px;border:1px solid #E5E7EB;">' if img else ""
         item_rows += f"""
-        <div style="display:flex;align-items:center;padding:10px 0;border-bottom:1px solid #F3F4F6;">
+        <div style="display:flex;align-items:center;padding:12px 0;border-bottom:1px solid #F3F4F6;">
           {img_html}
           <div style="flex:1;">
-            <div style="font-size:13px;font-weight:600;color:#111827;">{title}</div>
-            <div style="font-size:12px;color:#6B7280;">Qty: {qty}</div>
+            <div style="font-size:14px;font-weight:600;color:#111827;">{title}</div>
+            <div style="font-size:12px;color:#6B7280;margin-top:2px;">Qty: {qty}</div>
           </div>
-          <div style="font-size:13px;font-weight:700;color:#111827;">{price}</div>
+          <div style="font-size:14px;font-weight:700;color:#111827;">{raw_price}</div>
         </div>
         """
 
@@ -325,6 +343,10 @@ def send_abandoned_cart_email(
         f"We've reserved them for a limited time. Complete your order here: {checkout_url}\n\n"
         f"Best,\n{store_name}"
     )
+
+    formatted_total = str(total_price or "").strip()
+    if formatted_total and not any(formatted_total.startswith(sym) for sym in ("₹", "$", "€", "£")):
+        formatted_total = f"₹{formatted_total}"
 
     html_body = f"""
     <!DOCTYPE html>
@@ -342,7 +364,7 @@ def send_abandoned_cart_email(
         <div style="margin:20px 0;">
           {item_rows}
         </div>
-        {'<div style="font-size:15px;font-weight:700;text-align:right;color:#111827;margin-bottom:10px;">Total: ' + total_price + '</div>' if total_price else ''}
+        {'<div style="font-size:15px;font-weight:700;text-align:right;color:#111827;margin-bottom:10px;">Total: ' + formatted_total + '</div>' if formatted_total else ''}
         {cta_btn}
         <hr style="border:none;border-top:1px solid #E5E7EB;margin:24px 0 16px;">
         <p style="font-size:11px;color:#9CA3AF;margin:0;">Reply to this email to contact {store_name} directly.</p>
@@ -350,6 +372,7 @@ def send_abandoned_cart_email(
     </body>
     </html>
     """
+    return send_html_email(to_email, subject, html_body, text_body, reply_to=reply_to, from_name=f"{store_name} via Dripire")
     return send_html_email(to_email, subject, html_body, text_body, reply_to=reply_to, from_name=f"{store_name} via Dripire")
 
 

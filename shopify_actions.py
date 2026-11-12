@@ -2246,6 +2246,21 @@ async def subscribe_restock(store, entities: dict, session_id: str, customer_id:
             "message": f"'{prod_title}' is currently out of stock. Please share your email address so I can email you the moment it's available again!{alt_text}",
         }
 
+    prod_handle = (prod.get("handle") if prod else "") or ""
+    prod_img = ""
+    if prod:
+        img_data = prod.get("image") or (prod.get("images", [{}])[0] if prod.get("images") else {})
+        if isinstance(img_data, dict):
+            prod_img = img_data.get("src", "")
+        elif isinstance(img_data, str):
+            prod_img = img_data
+
+    prod_price = ""
+    if prod and prod.get("variants"):
+        raw_p = prod["variants"][0].get("price")
+        if raw_p:
+            prod_price = f"₹{raw_p}" if "₹" not in str(raw_p) else str(raw_p)
+
     record = _repo.save_restock_alert(
         store_id=store_id,
         shop_domain=shop,
@@ -2256,6 +2271,10 @@ async def subscribe_restock(store, entities: dict, session_id: str, customer_id:
         size=size,
         target_price=target_price,
         alert_type=alert_type,
+        product_handle=prod_handle,
+        product_image=prod_img,
+        product_url=f"https://{shop}/products/{prod_handle}" if prod_handle else "",
+        price=prod_price,
     )
 
     size_text = f" (Size {size})" if size else ""
@@ -2412,6 +2431,21 @@ async def create_standing_instruction(store, entities: dict, session_id: str, cu
             "message": f"I'd be glad to schedule that for '{prod_title}'! Please share your email address so I can alert you as requested.",
         }
 
+    prod_handle = (prod.get("handle") if prod else "") or ""
+    prod_img = ""
+    if prod:
+        img_data = prod.get("image") or (prod.get("images", [{}])[0] if prod.get("images") else {})
+        if isinstance(img_data, dict):
+            prod_img = img_data.get("src", "")
+        elif isinstance(img_data, str):
+            prod_img = img_data
+
+    prod_price = ""
+    if prod and prod.get("variants"):
+        raw_p = prod["variants"][0].get("price")
+        if raw_p:
+            prod_price = f"₹{raw_p}" if "₹" not in str(raw_p) else str(raw_p)
+
     record = _repo.save_standing_instruction(
         store_id=store_id,
         shop_domain=shop,
@@ -2423,6 +2457,10 @@ async def create_standing_instruction(store, entities: dict, session_id: str, cu
         interval_days=interval_days,
         auto_add=auto_add,
         payload=entities,
+        product_handle=prod_handle,
+        product_image=prod_img,
+        product_url=f"https://{shop}/products/{prod_handle}" if prod_handle else "",
+        price=prod_price,
     )
 
     if instruction_type == "price_drop":
@@ -2595,6 +2633,7 @@ async def cancel_order(store, entities: dict, session_id: str, customer_id: str 
             }
 
     # 6. Mode 'ask' -> Request merchant review
+    store_name = _repo.get_store_display_name(shop)
     if mode == "ask":
         _repo.save_order_action_request(
             store_id=store_id,
@@ -2610,11 +2649,11 @@ async def cancel_order(store, entities: dict, session_id: str, customer_id: str 
             subject=f"⚠️ Cancellation Request: Order #{order_number}",
             html_body=f"<p>Verified customer {order_email} requested cancellation for unfulfilled Order #{order_number}. Please review in Shopify Admin.</p>",
             reply_to=order_email,
-            from_name="Dripire Order Manager",
+            from_name=f"{store_name} Order Manager",
         )
         email_utils.send_order_cancellation_email(
             to_email=order_email,
-            store_name=shop,
+            store_name=store_name,
             order_number=order_number,
             status="requested",
             details="Your cancellation request has been verified and submitted to the store owner for approval. You will receive an update shortly.",
@@ -2645,10 +2684,10 @@ async def cancel_order(store, entities: dict, session_id: str, customer_id: str 
     )
     email_utils.send_order_cancellation_email(
         to_email=order_email,
-        store_name=shop,
+        store_name=store_name,
         order_number=order_number,
         status="cancelled",
-        details="Your order #{order_number} has been successfully cancelled and all items have been released back into stock.",
+        details=f"Your order #{order_number} has been successfully cancelled and all items have been released back into stock.",
         reply_to=store_owner_email,
     )
     return {
@@ -2665,6 +2704,7 @@ async def edit_order_address(store, entities: dict, session_id: str, customer_id
 
     shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
     store_id = getattr(store, "id", None) or getattr(store, "$id", None) or shop
+    store_name = _repo.get_store_display_name(shop)
     order_number = str(entities.get("order_number") or entities.get("order_id") or "").lstrip("#").strip()
     new_address = str(entities.get("address") or entities.get("query") or "").strip()
     store_owner_email = _repo.get_store_owner_email(shop)
@@ -2709,7 +2749,7 @@ async def edit_order_address(store, entities: dict, session_id: str, customer_id
         subject=f"Delivery Address Update for Order #{order_number}",
         html_body=f"<p>The delivery notes for Order #{order_number} have been updated to: <strong>{new_address}</strong>.</p>",
         reply_to=store_owner_email,
-        from_name=f"{shop} Support",
+        from_name=f"{store_name} Support",
     )
     return {
         "status": "address_updated",
@@ -2722,18 +2762,57 @@ async def edit_order_address(store, entities: dict, session_id: str, customer_id
 # ABANDONED CART RECOVERY NUDGE
 # ==========================================================================
 async def nudge_abandoned_cart(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
-    """Handles in-widget abandoned cart recovery nudges."""
+    """Handles in-widget abandoned cart recovery nudges and direct email recovery with 100% real cart items."""
+    import repository_appwrite as _repo
+    import email_utils
+
     shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
+    store_id = getattr(store, "id", None) or getattr(store, "$id", None) or shop
+    store_name = _repo.get_store_display_name(shop)
+    store_owner_email = _repo.get_store_owner_email(shop)
     cart_data = entities.get("cart_data") or {}
     items = cart_data.get("items") or []
     checkout_url = f"https://{shop}/checkout"
+    total_price = cart_data.get("total") or ""
 
-    if items:
-        first_title = items[0].get("title") or items[0].get("name") or "item"
-        msg = f"I've saved your cart with {len(items)} items (including {first_title})! You can complete your order anytime with this direct link: {checkout_url}. Let me know if you have any questions or need assistance!"
-    else:
-        msg = f"I've reserved your cart items for you. Ready to complete your order? Here is your checkout link: {checkout_url}"
+    if not items:
+        return {
+            "status": "empty_cart",
+            "message": "Your cart is currently empty! Add items to your cart, and I'll gladly hold them for you or email you a recovery link anytime.",
+        }
 
+    first_title = items[0].get("title") or items[0].get("name") or "item"
+    email = (entities.get("email") or entities.get("customer_email") or "").strip().lower()
+
+    # If email provided or explicitly asked to send via email:
+    if email:
+        _repo.save_abandoned_checkout(
+            store_id=store_id,
+            shop_domain=shop,
+            customer_email=email,
+            cart_items=items,
+            total_price=str(total_price),
+            checkout_url=checkout_url,
+        )
+        email_utils.send_abandoned_cart_email(
+            to_email=email,
+            store_name=store_name,
+            cart_items=items,
+            checkout_url=checkout_url,
+            total_price=str(total_price),
+            reply_to=store_owner_email,
+        )
+        msg = f"I've saved your cart with {len(items)} items (including {first_title}) and emailed your direct recovery link to {email}! You can also complete your order right now here: {checkout_url}"
+        return {
+            "status": "cart_held_and_emailed",
+            "email": email,
+            "checkout_url": checkout_url,
+            "widget_action": {"type": "checkout", "url": checkout_url},
+            "message": msg,
+        }
+
+    # In-widget cart hold without email
+    msg = f"I've saved your cart with {len(items)} items (including {first_title})! You can complete your order anytime with this direct link: {checkout_url}. Let me know if you'd like me to email your cart to you!"
     return {
         "status": "cart_held",
         "checkout_url": checkout_url,

@@ -108,6 +108,7 @@ async def products_webhook(request: Request):
             img_src = (payload.get("image") or {}).get("src", "")
             prod_url = f"https://{shop}/products/{payload.get('handle', '')}" if payload.get("handle") else ""
             reply_to = repo.get_store_owner_email(shop)
+            store_name = repo.get_store_display_name(shop)
 
             # Check price-drop standing instructions
             for v in (payload.get("variants") or []):
@@ -130,9 +131,10 @@ async def products_webhook(request: Request):
                         if target and current_price <= target:
                             email_utils.send_price_drop_email(
                                 to_email=inst["customer_email"],
-                                store_name=shop,
+                                store_name=store_name,
                                 product_title=prod_title,
                                 new_price=f"₹{current_price:.2f}",
+                                old_price=f"₹{target:.2f}" if target else "",
                                 product_url=prod_url,
                                 product_image=img_src,
                                 reply_to=reply_to,
@@ -156,17 +158,36 @@ async def checkouts_webhook(request: Request):
         if shop and email and not payload.get("completed_at"):
             cust = payload.get("customer") or {}
             cname = f"{cust.get('first_name', '')} {cust.get('last_name', '')}".strip()
-            items = [
-                {
-                    "title": it.get("title") or it.get("name"),
+            currency = payload.get("currency") or "INR"
+            curr_sym = "₹" if currency == "INR" else ("$" if currency == "USD" else f"{currency} ")
+            items = []
+            for it in payload.get("line_items", []):
+                raw_p = it.get("price") or 0.0
+                try:
+                    p_formatted = f"{curr_sym}{float(raw_p):.2f}"
+                except Exception:
+                    p_formatted = f"{curr_sym}{raw_p}"
+
+                img_url = (
+                    it.get("image_url")
+                    or (it.get("image") or {}).get("src")
+                    or (it.get("featured_image") or {}).get("url")
+                    or ""
+                )
+                items.append({
+                    "title": it.get("title") or it.get("name") or "Product",
                     "quantity": it.get("quantity") or 1,
-                    "price": str(it.get("price") or ""),
-                    "image": it.get("image_url") or "",
-                }
-                for it in payload.get("line_items", [])
-            ]
+                    "price": p_formatted,
+                    "image": img_url,
+                })
+
             checkout_url = payload.get("abandoned_checkout_url") or payload.get("web_url") or f"https://{shop}/checkout"
-            total = str(payload.get("total_price") or "")
+            raw_tot = payload.get("total_price") or ""
+            try:
+                total = f"{curr_sym}{float(raw_tot):.2f}"
+            except Exception:
+                total = f"{curr_sym}{raw_tot}"
+
             repo.save_abandoned_checkout(
                 store_id=shop,
                 shop_domain=shop,
@@ -287,24 +308,37 @@ async def inventory_webhook(request: Request):
         behavioral_recommender.invalidate_catalog_cache(shop)
         try:
             reply_to = repo.get_store_owner_email(shop)
+            store_name = repo.get_store_display_name(shop)
             alerts = repo.list_restock_alerts(store_id=shop, status="active")
             for a in alerts:
+                p_title = a.get("product_title") or "Item"
+                p_url = a.get("product_url") or (f"https://{shop}/products/{a.get('product_handle')}" if a.get("product_handle") else f"https://{shop}")
+                p_img = a.get("product_image", "")
+                p_price = a.get("price") or a.get("target_price") or ""
                 email_utils.send_restock_notification_email(
                     to_email=a["customer_email"],
-                    store_name=shop,
-                    product_title=a.get("product_title", "Product"),
-                    product_url=f"https://{shop}",
+                    store_name=store_name,
+                    product_title=p_title,
+                    product_url=p_url,
+                    product_image=p_img,
+                    price=p_price,
                     reply_to=reply_to,
                 )
                 repo.mark_restock_alert_notified(a.get("$id"))
 
             insts = repo.list_standing_instructions(store_id=shop, instruction_type="auto_add_restock", status="active")
             for inst in insts:
+                p_title = inst.get("product_title") or "Item"
+                p_url = inst.get("product_url") or (f"https://{shop}/products/{inst.get('product_handle')}" if inst.get("product_handle") else f"https://{shop}")
+                p_img = inst.get("product_image", "")
+                p_price = inst.get("price") or ""
                 email_utils.send_restock_notification_email(
                     to_email=inst["customer_email"],
-                    store_name=shop,
-                    product_title=inst.get("product_title", "Product"),
-                    product_url=f"https://{shop}",
+                    store_name=store_name,
+                    product_title=p_title,
+                    product_url=p_url,
+                    product_image=p_img,
+                    price=p_price,
                     reply_to=reply_to,
                 )
                 repo.mark_standing_instruction_triggered(inst.get("$id"))

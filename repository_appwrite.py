@@ -1742,6 +1742,10 @@ def save_restock_alert(
     size: str = "",
     target_price: str = "",
     alert_type: str = "restock",
+    product_handle: str = "",
+    product_image: str = "",
+    product_url: str = "",
+    price: str = "",
 ) -> dict:
     """Stores a back-in-stock or price-drop subscription for a shopper."""
     clean_email = (customer_email or "").strip().lower()
@@ -1760,6 +1764,14 @@ def save_restock_alert(
             existing["product_title"] = product_title
             existing["size"] = size or existing.get("size", "")
             existing["target_price"] = target_price or existing.get("target_price", "")
+            if product_handle:
+                existing["product_handle"] = product_handle
+            if product_image:
+                existing["product_image"] = product_image
+            if product_url:
+                existing["product_url"] = product_url
+            if price:
+                existing["price"] = price
             existing["updated_at"] = now_iso
             return existing
 
@@ -1775,6 +1787,10 @@ def save_restock_alert(
         "size": str(size or ""),
         "target_price": str(target_price or ""),
         "alert_type": alert_type,
+        "product_handle": str(product_handle or ""),
+        "product_image": str(product_image or ""),
+        "product_url": str(product_url or ""),
+        "price": str(price or ""),
         "status": "active",
         "created_at": now_iso,
     }
@@ -1842,6 +1858,30 @@ def get_store_owner_email(store_id_or_shop: str) -> str:
     return "support@dripire.com"
 
 
+def get_store_display_name(store_id_or_shop: str) -> str:
+    """Retrieves the real business/display name of the store from Appwrite
+    or derives a human-friendly name, never a raw .myshopify.com domain."""
+    try:
+        store = _find_store_doc(store_id_or_shop)
+        store_id = (store.get("$id") if isinstance(store, dict) else getattr(store, "$id", None)) or str(store_id_or_shop)
+        info = get_store_info(store_id) or get_store_info(str(store_id_or_shop))
+        if info and info.get("business_name") and str(info["business_name"]).strip():
+            return str(info["business_name"]).strip()
+        if store:
+            name = (store.get("name") if isinstance(store, dict) else getattr(store, "name", None)) or (
+                store.get("shop_name") if isinstance(store, dict) else getattr(store, "shop_name", None)
+            )
+            if name and str(name).strip():
+                return str(name).strip()
+    except Exception as e:
+        print(f"[repository_appwrite.get_store_display_name] error: {e!r}")
+
+    # Fallback to friendly store name derived from domain
+    raw = str(store_id_or_shop or "").replace("https://", "").replace("http://", "").split("/")[0]
+    base = raw.split(".")[0].replace("-", " ").replace("_", " ").strip()
+    return base.title() if base else "Store"
+
+
 # ==========================================================================
 # STANDING INSTRUCTIONS & SCHEDULED TASKS
 # ==========================================================================
@@ -1859,6 +1899,10 @@ def save_standing_instruction(
     interval_days: int = 0,
     auto_add: bool = False,
     payload: dict | None = None,
+    product_handle: str = "",
+    product_image: str = "",
+    product_url: str = "",
+    price: str = "",
 ) -> dict:
     """Stores standing instructions (e.g. price drops, reorders, auto-cart restock)."""
     clean_email = (customer_email or "").strip().lower()
@@ -1880,6 +1924,10 @@ def save_standing_instruction(
         "interval_days": int(interval_days or 0),
         "auto_add": bool(auto_add),
         "payload": payload or {},
+        "product_handle": str(product_handle or ""),
+        "product_image": str(product_image or ""),
+        "product_url": str(product_url or ""),
+        "price": str(price or ""),
         "status": "active",
         "created_at": now_iso,
     }
@@ -2001,6 +2049,68 @@ def mark_abandoned_checkout_recovered(shop_domain: str, customer_email: str) -> 
             c["recovered_at"] = datetime.now(timezone.utc).isoformat()
             recovered = True
     return recovered
+
+
+def process_pending_abandoned_checkouts(shop_domain: str | None = None, min_age_seconds: int = 1800) -> int:
+    """Scans for pending abandoned checkouts that contain real items,
+    sends recovery emails with 100% real product data, and marks them notified."""
+    import email_utils
+    pending = list_pending_abandoned_checkouts(shop_domain=shop_domain, min_age_seconds=min_age_seconds)
+    count = 0
+    for chk in pending:
+        email = (chk.get("customer_email") or "").strip().lower()
+        items = chk.get("cart_items") or []
+        # Strict real data check: do not send if no items
+        if not email or not items:
+            continue
+        store_domain = chk.get("shop_domain") or chk.get("store_id")
+        store_name = get_store_display_name(store_domain)
+        reply_to = get_store_owner_email(store_domain)
+        checkout_url = chk.get("checkout_url") or f"https://{store_domain}/checkout"
+        sent = email_utils.send_abandoned_cart_email(
+            to_email=email,
+            store_name=store_name,
+            cart_items=items,
+            checkout_url=checkout_url,
+            total_price=chk.get("total_price", ""),
+            reply_to=reply_to,
+        )
+        if sent:
+            mark_abandoned_checkout_notified(chk.get("$id") or chk.get("id"))
+            count += 1
+    return count
+
+
+def process_due_reorder_reminders(shop_domain: str | None = None) -> int:
+    """Scans for scheduled reorder reminders that are due,
+    sends reminder emails with real product data, and marks them triggered."""
+    import email_utils
+    now_ts = int(time.time())
+    active_insts = list_standing_instructions(store_id=shop_domain, instruction_type="reorder_reminder", status="active")
+    count = 0
+    for inst in active_insts:
+        if now_ts >= int(inst.get("trigger_at") or 0):
+            email = (inst.get("customer_email") or "").strip().lower()
+            if not email:
+                continue
+            store_domain = inst.get("shop_domain") or inst.get("store_id")
+            store_name = get_store_display_name(store_domain)
+            reply_to = get_store_owner_email(store_domain)
+            p_title = inst.get("product_title") or "Item"
+            p_url = inst.get("product_url") or (f"https://{store_domain}/products/{inst.get('product_handle')}" if inst.get("product_handle") else f"https://{store_domain}")
+            p_img = inst.get("product_image", "")
+            sent = email_utils.send_reorder_reminder_email(
+                to_email=email,
+                store_name=store_name,
+                product_title=p_title,
+                reorder_url=p_url,
+                product_image=p_img,
+                reply_to=reply_to,
+            )
+            if sent:
+                mark_standing_instruction_triggered(inst.get("$id") or inst.get("id"))
+                count += 1
+    return count
 
 
 # ==========================================================================

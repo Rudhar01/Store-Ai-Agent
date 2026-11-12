@@ -460,6 +460,8 @@ def _parse_storefront_cart(cart_data: dict | None) -> dict | None:
         return None
     raw_items = cart_data.get("items") or []
     items = []
+    currency = cart_data.get("currency") or "USD"
+    curr_sym = "₹" if currency == "INR" else ("$" if currency == "USD" else f"{currency} ")
     for it in raw_items:
         if not isinstance(it, dict):
             continue
@@ -473,11 +475,26 @@ def _parse_storefront_cart(cart_data: dict | None) -> dict | None:
                 price_str = f"{float(raw_price):.2f}"
             except Exception:
                 price_str = "0.00"
+
+        img = ""
+        feat = it.get("featured_image")
+        if isinstance(feat, dict):
+            img = feat.get("url", "")
+        elif isinstance(feat, str):
+            img = feat
+        elif isinstance(it.get("image"), str):
+            img = it.get("image", "")
+        elif isinstance(it.get("image"), dict):
+            img = it.get("image", {}).get("src", "")
+
         items.append({
             "name": title,
             "title": title,
             "quantity": qty,
             "price": price_str,
+            "formatted_price": f"{curr_sym}{price_str}",
+            "image": img,
+            "url": it.get("url") or "",
             "variant_id": it.get("variant_id") or it.get("id"),
         })
 
@@ -1197,6 +1214,19 @@ async def _chat_impl(req: ChatRequest):
                 entities["amount"] = parsed_cart["total"]
             if parsed_cart.get("currency") and not entities.get("currency"):
                 entities["currency"] = parsed_cart["currency"]
+            if parsed_cart.get("items") and customer_email:
+                try:
+                    repo.save_abandoned_checkout(
+                        store_id=req.shop,
+                        shop_domain=req.shop,
+                        customer_email=customer_email,
+                        customer_name=customer_name or "",
+                        cart_items=parsed_cart["items"],
+                        total_price=str(parsed_cart.get("total", "")),
+                        checkout_url=f"https://{req.shop}/checkout",
+                    )
+                except Exception as _ce:
+                    print(f"[chatbot_widget] cart sync error: {_ce!r}")
 
         # 0. Restock Alert: extract inline email if shopper provided it in their request
         if (intent, action) == ("restock_alert", "subscribe_restock"):
