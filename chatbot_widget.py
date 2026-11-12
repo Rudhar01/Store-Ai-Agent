@@ -572,6 +572,18 @@ def _product_card(p: dict, store) -> dict:
 
 async def _catalog_search_ex(store, term: str, limit: int = 6):
     cleaned = extract_search_term(term) or term
+    if not cleaned:
+        return None, False
+
+    # 1. Try Shopify's native search engine with typo management first
+    try:
+        native_res = await shopify_actions.search_products(store, {"query": cleaned}, "")
+        native_results = native_res.get("results", []) if isinstance(native_res, dict) else []
+        if native_results and not native_res.get("no_exact_match"):
+            return native_results[:limit], False
+    except Exception as e:
+        print(f"chatbot_widget: native search in catalog_search_ex failed: {e!r}")
+
     words = [w for w in _words(cleaned) if len(w) >= 2]
     if not words:
         return None, False
