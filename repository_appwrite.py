@@ -497,7 +497,12 @@ def create_dashboard_user(store_id: str, email: str, password_hash: str) -> dict
 
 # --- Agent customization (name, welcome/title, instructions, status, icon, theme, position) ---
 
+_CUSTOMIZATION_CACHE: dict[str, dict] = {}
+
+
 def get_customization(store_id: str) -> dict | None:
+    if store_id in _CUSTOMIZATION_CACHE:
+        return _CUSTOMIZATION_CACHE[store_id]
     try:
         result = databases.list_documents(
             DATABASE_ID, CUSTOMIZATIONS_COLLECTION,
@@ -509,10 +514,11 @@ def get_customization(store_id: str) -> dict | None:
             # Normalize icon url attribute so callers always get custom_icon_url
             if not doc.get("custom_icon_url") and doc.get("icon_url"):
                 doc["custom_icon_url"] = doc.get("icon_url")
+            _CUSTOMIZATION_CACHE[store_id] = doc
             return doc
         return None
     except Exception:
-        return None
+        return _CUSTOMIZATION_CACHE.get(store_id)
 
 
 def ensure_customization(store_id: str) -> dict:
@@ -541,14 +547,17 @@ def ensure_customization(store_id: str) -> dict:
     if existing:
         if not existing.get("custom_icon_url") and existing.get("icon_url"):
             existing["custom_icon_url"] = existing.get("icon_url")
+        _CUSTOMIZATION_CACHE[store_id] = existing
         return existing
     try:
         doc = databases.create_document(
             DATABASE_ID, CUSTOMIZATIONS_COLLECTION, ID.unique(),
             data={k: v for k, v in default_cust.items() if k != "$id"},
         )
+        _CUSTOMIZATION_CACHE[store_id] = doc
         return doc
     except Exception:
+        _CUSTOMIZATION_CACHE[store_id] = default_cust
         return default_cust
 
 
@@ -562,17 +571,28 @@ def update_customization(store_id: str, **fields) -> dict:
         fields["custom_icon_url"] = fields["icon_url"]
 
     try:
-        return databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fields)
+        doc = databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fields)
+        _CUSTOMIZATION_CACHE[store_id] = doc
+        return doc
     except Exception as e:
         err_msg = str(e).lower()
         # If one attribute doesn't exist in collection schema, gracefully retry with the other
-        if "custom_icon_url" in err_msg:
-            fallback = {k: v for k, v in fields.items() if k != "custom_icon_url"}
-            return databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fallback)
-        elif "icon_url" in err_msg:
-            fallback = {k: v for k, v in fields.items() if k != "icon_url"}
-            return databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fallback)
-        raise
+        try:
+            if "custom_icon_url" in err_msg:
+                fallback = {k: v for k, v in fields.items() if k != "custom_icon_url"}
+                doc = databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fallback)
+                _CUSTOMIZATION_CACHE[store_id] = doc
+                return doc
+            elif "icon_url" in err_msg:
+                fallback = {k: v for k, v in fields.items() if k != "icon_url"}
+                doc = databases.update_document(DATABASE_ID, CUSTOMIZATIONS_COLLECTION, existing["$id"], data=fallback)
+                _CUSTOMIZATION_CACHE[store_id] = doc
+                return doc
+        except Exception:
+            pass
+        existing.update(fields)
+        _CUSTOMIZATION_CACHE[store_id] = existing
+        return existing
 
 
 # --- Widget icon storage (Appwrite Storage bucket + Local Static fallback) ---
@@ -821,15 +841,23 @@ def is_feature_enabled(store_id: str, feature_name: str) -> bool:
 
 # --- Store info (business name, support email, timezone) ---
 
+_STORE_INFO_CACHE: dict[str, dict] = {}
+
+
 def get_store_info(store_id: str) -> dict | None:
+    if store_id in _STORE_INFO_CACHE:
+        return _STORE_INFO_CACHE[store_id]
     try:
         result = databases.list_documents(
             DATABASE_ID, STORE_INFO_COLLECTION,
             queries=[Query.equal("store", store_id)],
         )
-        return result["documents"][0] if result.get("documents") else None
-    except Exception:
+        if result.get("documents"):
+            _STORE_INFO_CACHE[store_id] = result["documents"][0]
+            return result["documents"][0]
         return None
+    except Exception:
+        return _STORE_INFO_CACHE.get(store_id)
 
 
 def ensure_store_info(store_id: str, business_name: str = "", support_email: str = "", timezone: str = "UTC") -> dict:
@@ -844,12 +872,16 @@ def ensure_store_info(store_id: str, business_name: str = "", support_email: str
             updates["timezone"] = timezone
         if updates:
             try:
-                return databases.update_document(DATABASE_ID, STORE_INFO_COLLECTION, existing["$id"], data=updates)
+                doc = databases.update_document(DATABASE_ID, STORE_INFO_COLLECTION, existing["$id"], data=updates)
+                _STORE_INFO_CACHE[store_id] = doc
+                return doc
             except Exception as e:
                 print(f"[ensure_store_info] update failed: {e!r}")
+                existing.update(updates)
+                _STORE_INFO_CACHE[store_id] = existing
         return existing
     try:
-        return databases.create_document(
+        doc = databases.create_document(
             DATABASE_ID, STORE_INFO_COLLECTION, ID.unique(),
             data={
                 "store": store_id,
@@ -858,19 +890,30 @@ def ensure_store_info(store_id: str, business_name: str = "", support_email: str
                 "timezone": timezone or "UTC",
             },
         )
+        _STORE_INFO_CACHE[store_id] = doc
+        return doc
     except Exception:
-        return {
+        fallback = {
             "$id": f"info_{store_id}",
             "store": store_id,
             "business_name": business_name or "",
             "support_email": support_email or "",
             "timezone": timezone or "UTC",
         }
+        _STORE_INFO_CACHE[store_id] = fallback
+        return fallback
 
 
 def update_store_info(store_id: str, **fields) -> dict:
     existing = ensure_store_info(store_id)
-    return databases.update_document(DATABASE_ID, STORE_INFO_COLLECTION, existing["$id"], data=fields)
+    try:
+        doc = databases.update_document(DATABASE_ID, STORE_INFO_COLLECTION, existing["$id"], data=fields)
+        _STORE_INFO_CACHE[store_id] = doc
+        return doc
+    except Exception:
+        existing.update(fields)
+        _STORE_INFO_CACHE[store_id] = existing
+        return existing
 
 
 # --- Knowledge base / FAQs ---
@@ -1762,4 +1805,263 @@ def mark_restock_alert_notified(alert_id: str) -> bool:
             a["notified_at"] = datetime.now(timezone.utc).isoformat()
             return True
     return False
+
+
+# ==========================================================================
+# STORE OWNER EMAIL ROUTING (Reply-To from database)
+# ==========================================================================
+def get_store_owner_email(store_id_or_shop: str) -> str:
+    """Retrieves the merchant's email address from Appwrite database
+    so shopper replies route directly to the store owner."""
+    try:
+        store = _find_store_doc(store_id_or_shop)
+        store_id = (store.get("$id") if isinstance(store, dict) else getattr(store, "$id", None)) or str(store_id_or_shop)
+        if not store_id:
+            return "support@dripire.com"
+
+        # 1. Try store_info support_email
+        info = get_store_info(store_id) or get_store_info(str(store_id_or_shop))
+        if info and info.get("support_email") and "@" in str(info.get("support_email")):
+            return str(info["support_email"]).strip()
+
+        # 2. Try dashboard_users owner email
+        if databases:
+            res = databases.list_documents(
+                DATABASE_ID,
+                DASHBOARD_USERS_COLLECTION,
+                queries=[Query.equal("store", store_id), Query.limit(1)],
+            )
+            docs = res.get("documents", []) if isinstance(res, dict) else getattr(res, "documents", [])
+            if docs:
+                mail = docs[0].get("email") if isinstance(docs[0], dict) else getattr(docs[0], "email", None)
+                if mail and "@" in str(mail):
+                    return str(mail).strip()
+    except Exception as e:
+        print(f"[repository_appwrite.get_store_owner_email] error: {e!r}")
+
+    return "support@dripire.com"
+
+
+# ==========================================================================
+# STANDING INSTRUCTIONS & SCHEDULED TASKS
+# ==========================================================================
+_STANDING_INSTRUCTIONS: list[dict] = []
+
+def save_standing_instruction(
+    store_id: str,
+    shop_domain: str,
+    customer_email: str,
+    instruction_type: str,  # 'price_drop', 'reorder_reminder', 'auto_add_restock'
+    product_id: str = "",
+    product_title: str = "",
+    target_price: str = "",
+    trigger_at: int = 0,
+    interval_days: int = 0,
+    auto_add: bool = False,
+    payload: dict | None = None,
+) -> dict:
+    """Stores standing instructions (e.g. price drops, reorders, auto-cart restock)."""
+    clean_email = (customer_email or "").strip().lower()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    now_ts = int(time.time())
+    inst_id = f"inst_{int(now_ts*1000)}"
+
+    record = {
+        "$id": inst_id,
+        "id": inst_id,
+        "store_id": str(store_id),
+        "shop_domain": str(shop_domain),
+        "customer_email": clean_email,
+        "instruction_type": instruction_type,
+        "product_id": str(product_id or ""),
+        "product_title": str(product_title or "Product"),
+        "target_price": str(target_price or ""),
+        "trigger_at": int(trigger_at or (now_ts + interval_days * 86400 if interval_days else now_ts)),
+        "interval_days": int(interval_days or 0),
+        "auto_add": bool(auto_add),
+        "payload": payload or {},
+        "status": "active",
+        "created_at": now_iso,
+    }
+    _STANDING_INSTRUCTIONS.append(record)
+    return record
+
+
+def list_standing_instructions(
+    store_id: str | None = None,
+    customer_email: str | None = None,
+    instruction_type: str | None = None,
+    status: str = "active",
+) -> list[dict]:
+    """Lists standing instructions matching filters."""
+    clean_email = (customer_email or "").strip().lower() if customer_email else None
+    results = []
+    for inst in _STANDING_INSTRUCTIONS:
+        if store_id and inst.get("store_id") != str(store_id) and inst.get("shop_domain") != str(store_id):
+            continue
+        if clean_email and inst.get("customer_email") != clean_email:
+            continue
+        if instruction_type and inst.get("instruction_type") != instruction_type:
+            continue
+        if status and inst.get("status") != status:
+            continue
+        results.append(dict(inst))
+    return results
+
+
+def mark_standing_instruction_triggered(instruction_id: str) -> bool:
+    """Marks a standing instruction as triggered/completed."""
+    for inst in _STANDING_INSTRUCTIONS:
+        if inst.get("$id") == str(instruction_id) or inst.get("id") == str(instruction_id):
+            inst["status"] = "triggered"
+            inst["triggered_at"] = datetime.now(timezone.utc).isoformat()
+            return True
+    return False
+
+
+# ==========================================================================
+# ABANDONED CART RECOVERY (In-widget nudges & email recovery)
+# ==========================================================================
+_ABANDONED_CHECKOUTS: list[dict] = []
+
+def save_abandoned_checkout(
+    store_id: str,
+    shop_domain: str,
+    customer_email: str,
+    customer_name: str = "",
+    cart_items: list | None = None,
+    total_price: str = "",
+    checkout_url: str = "",
+) -> dict:
+    """Saves or updates an abandoned checkout session."""
+    clean_email = (customer_email or "").strip().lower()
+    now_ts = int(time.time())
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cid = f"chk_{int(now_ts*1000)}"
+
+    for existing in _ABANDONED_CHECKOUTS:
+        if (
+            existing.get("shop_domain") == str(shop_domain)
+            and existing.get("customer_email") == clean_email
+            and existing.get("status") == "pending"
+        ):
+            existing["cart_items"] = cart_items or existing.get("cart_items", [])
+            existing["total_price"] = total_price or existing.get("total_price", "")
+            existing["checkout_url"] = checkout_url or existing.get("checkout_url", "")
+            existing["updated_at"] = now_iso
+            return existing
+
+    record = {
+        "$id": cid,
+        "id": cid,
+        "store_id": str(store_id),
+        "shop_domain": str(shop_domain),
+        "customer_email": clean_email,
+        "customer_name": str(customer_name or ""),
+        "cart_items": cart_items or [],
+        "total_price": str(total_price or ""),
+        "checkout_url": str(checkout_url or ""),
+        "abandoned_at": now_ts,
+        "created_at": now_iso,
+        "status": "pending",
+    }
+    _ABANDONED_CHECKOUTS.append(record)
+    return record
+
+
+def list_pending_abandoned_checkouts(shop_domain: str | None = None, min_age_seconds: int = 1800) -> list[dict]:
+    """Retrieves checkouts abandoned for more than min_age_seconds and not yet notified."""
+    now_ts = int(time.time())
+    results = []
+    for c in _ABANDONED_CHECKOUTS:
+        if shop_domain and c.get("shop_domain") != str(shop_domain):
+            continue
+        if c.get("status") != "pending":
+            continue
+        if (now_ts - int(c.get("abandoned_at") or 0)) >= min_age_seconds:
+            results.append(dict(c))
+    return results
+
+
+def mark_abandoned_checkout_notified(checkout_id: str) -> bool:
+    for c in _ABANDONED_CHECKOUTS:
+        if c.get("$id") == str(checkout_id) or c.get("id") == str(checkout_id):
+            c["status"] = "notified"
+            c["notified_at"] = datetime.now(timezone.utc).isoformat()
+            return True
+    return False
+
+
+def mark_abandoned_checkout_recovered(shop_domain: str, customer_email: str) -> bool:
+    clean_email = (customer_email or "").strip().lower()
+    recovered = False
+    for c in _ABANDONED_CHECKOUTS:
+        if c.get("shop_domain") == str(shop_domain) and c.get("customer_email") == clean_email:
+            c["status"] = "recovered"
+            c["recovered_at"] = datetime.now(timezone.utc).isoformat()
+            recovered = True
+    return recovered
+
+
+# ==========================================================================
+# ORDER EDITS & CANCELLATION SETTINGS
+# ==========================================================================
+_ORDER_ACTION_REQUESTS: list[dict] = []
+_CANCELLATION_MODES: dict[str, str] = {}
+
+def get_order_cancellation_mode(store_id: str) -> str:
+    """Returns 'auto', 'ask', or 'off'. Default is 'auto'."""
+    if store_id in _CANCELLATION_MODES:
+        return _CANCELLATION_MODES[store_id]
+    try:
+        cfg = ensure_customization(store_id)
+        if cfg and cfg.get("order_cancellation_mode"):
+            val = str(cfg["order_cancellation_mode"]).strip().lower()
+            if val in {"auto", "ask", "off"}:
+                _CANCELLATION_MODES[store_id] = val
+                return val
+    except Exception:
+        pass
+    return "auto"
+
+
+def set_order_cancellation_mode(store_id: str, mode: str) -> bool:
+    mode_clean = str(mode or "auto").strip().lower()
+    if mode_clean not in {"auto", "ask", "off"}:
+        mode_clean = "auto"
+    _CANCELLATION_MODES[store_id] = mode_clean
+    try:
+        update_customization(store_id, order_cancellation_mode=mode_clean)
+        return True
+    except Exception as e:
+        print(f"[set_order_cancellation_mode] failed: {e!r}")
+        return True
+
+
+def save_order_action_request(
+    store_id: str,
+    shop_domain: str,
+    order_number: str,
+    customer_email: str,
+    action_type: str = "cancel",  # 'cancel' or 'edit_address'
+    details: str = "",
+    status: str = "pending",
+) -> dict:
+    """Stores an order edit or cancellation request for merchant approval or audit trail."""
+    req_id = f"ordreq_{int(time.time()*1000)}"
+    record = {
+        "$id": req_id,
+        "id": req_id,
+        "store_id": str(store_id),
+        "shop_domain": str(shop_domain),
+        "order_number": str(order_number),
+        "customer_email": str(customer_email).strip().lower(),
+        "action_type": action_type,
+        "details": details,
+        "status": status,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _ORDER_ACTION_REQUESTS.append(record)
+    return record
+
 

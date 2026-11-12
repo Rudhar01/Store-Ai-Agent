@@ -91,6 +91,8 @@ FEATURE_LIST = [
     ("cart_editing", "Cart Editing", "shopping_cart"),
     ("returns", "Returns", "replay"),
     ("track_orders", "Track Orders", "local_shipping"),
+    ("standing_instructions", "Standing Instructions & Alerts", "alarm"),
+    ("abandoned_cart_recovery", "Abandoned Cart Recovery", "shopping_cart_checkout"),
 ]
 
 STATUS_STYLES = {
@@ -2811,6 +2813,35 @@ def features_page():
 
                         on_toggle = _make_feature_toggle_handler(store["$id"], key, label, features)
                         ui.switch(value=bool(features.get(key)), on_change=on_toggle).props("color=grey-8")
+
+        # Order Cancellation & Edits Setting Card (Auto / Ask / Off)
+        with ui.card().classes(CARD_CLASSES + " p-6 mt-4 gap-4"):
+            with ui.row().classes("items-center justify-between w-full"):
+                with ui.column().classes("gap-0"):
+                    ui.label("Order Cancellation & Pre-Fulfillment Edits").classes("text-base font-bold text-gray-900")
+                    ui.label("Control how order cancellation and shipping address changes are handled before fulfillment.").classes("text-xs text-gray-500")
+                ui.icon("cancel", size="22px").style("color:#4B5563;")
+
+            current_mode = repo.get_order_cancellation_mode(store["$id"])
+            saved_indicator = ui.label("").classes("text-xs text-green-600 font-semibold")
+
+            def on_mode_change(e):
+                val = e.value
+                repo.set_order_cancellation_mode(store["$id"], val)
+                saved_indicator.text = f"Mode set to '{val.upper()}' ✓"
+
+            with ui.row().classes("items-center gap-6 w-full pt-2"):
+                mode_radio = ui.radio(
+                    {"auto": "Auto (Cancel automatically before fulfillment after verification)",
+                     "ask": "Ask (Request merchant approval before cancelling)",
+                     "off": "Off (Disable automated cancellation via chat)"},
+                    value=current_mode,
+                    on_change=on_mode_change,
+                ).props("color=grey-9")
+
+            with ui.row().classes("items-center justify-between w-full pt-2 border-t text-xs text-gray-400"):
+                ui.label("Requires read_order_edits / write_order_edits Shopify scopes. Only operates on unfulfilled orders.")
+                saved_indicator
 
 
 # --------------------------------------------------------------------

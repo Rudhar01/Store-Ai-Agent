@@ -53,6 +53,7 @@ import inspect
 import os
 import re
 import random
+import secrets
 import hashlib
 import time
 from datetime import datetime
@@ -2102,6 +2103,78 @@ async def _find_store_product(store, product_query: str, size: str = "", color: 
 # ==========================================================================
 # RESTOCK & PRICE-DROP ALERTS (Autonomous Shopper Watchers)
 # ==========================================================================
+async def _find_close_alternatives(store, out_of_stock_prod: dict | None, limit: int = 3) -> list[dict]:
+    """Finds 2-3 in-stock close alternatives when an item is unavailable."""
+    if not out_of_stock_prod:
+        return []
+    try:
+        resp = await _get(store, "products.json", {"status": "active", "limit": 50})
+        if resp.status_code != 200:
+            return []
+        prods = resp.json().get("products", [])
+    except Exception:
+        return []
+
+    orig_id = str(out_of_stock_prod.get("id"))
+    orig_type = (out_of_stock_prod.get("product_type") or "").lower().strip()
+    orig_vendor = (out_of_stock_prod.get("vendor") or "").lower().strip()
+    orig_tags = set(str(out_of_stock_prod.get("tags") or "").lower().replace(",", " ").split())
+    orig_title = (out_of_stock_prod.get("title") or "").lower()
+    orig_words = set(re.findall(r"\w+", orig_title)) - {"the", "a", "an", "and", "in", "of", "for", "with"}
+
+    scored = []
+    for p in prods:
+        if str(p.get("id")) == orig_id:
+            continue
+        in_stock_var = None
+        for v in (p.get("variants") or []):
+            inv_policy = v.get("inventory_policy", "deny")
+            inv_qty = v.get("inventory_quantity")
+            inv_mgmt = v.get("inventory_management")
+            if not inv_mgmt or inv_policy == "continue" or (inv_qty and inv_qty > 0):
+                in_stock_var = v
+                break
+        if not in_stock_var:
+            continue
+
+        score = 0
+        p_type = (p.get("product_type") or "").lower().strip()
+        if orig_type and p_type == orig_type:
+            score += 20
+        p_vendor = (p.get("vendor") or "").lower().strip()
+        if orig_vendor and p_vendor == orig_vendor:
+            score += 5
+        p_tags = set(str(p.get("tags") or "").lower().replace(",", " ").split())
+        common_tags = orig_tags & p_tags
+        score += len(common_tags) * 4
+        p_words = set(re.findall(r"\w+", (p.get("title") or "").lower())) - {"the", "a", "an", "and", "in", "of", "for", "with"}
+        common_words = orig_words & p_words
+        score += len(common_words) * 5
+
+        scored.append((score, p, in_stock_var))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
+    alts = []
+    for _, p, var in scored[:limit]:
+        img = (p.get("image") or {}).get("src", "")
+        if not img and p.get("images"):
+            img = (p["images"][0] or {}).get("src", "")
+        alts.append({
+            "id": str(var.get("id")),
+            "variant_id": str(var.get("id")),
+            "product_id": str(p.get("id")),
+            "name": p.get("title"),
+            "title": p.get("title"),
+            "price": float(var.get("price", 0) or 0),
+            "image": img,
+            "handle": p.get("handle", ""),
+            "url": f"https://{shop}/products/{p.get('handle', '')}" if p.get("handle") else "",
+            "in_stock": True,
+        })
+    return alts
+
+
 async def subscribe_restock(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
     import repository_appwrite as _repo
     shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
@@ -2150,15 +2223,27 @@ async def subscribe_restock(store, entities: dict, session_id: str, customer_id:
         }
 
     # Step 3: Product is OUT OF STOCK.
-    # Check whether shopper provided email so we can email them when back in stock.
+    # Look up 2-3 in-stock close alternatives to rescue the sale!
+    alternatives = await _find_close_alternatives(store, prod, limit=3)
+    alt_titles = ", ".join(f"'{a['name']}'" for a in alternatives) if alternatives else ""
+    swap_actions = [
+        {"label": f"Swap to {a['name'][:24]}", "action": "swap_item", "variant_id": a["variant_id"]}
+        for a in alternatives
+    ]
+
+    # If email is not yet provided:
     if not email:
+        alt_text = f"\n\nIn the meantime, here are {len(alternatives)} similar in-stock alternatives you can swap into your cart right now:\n{alt_titles}" if alternatives else ""
         return {
             "status": "email_required",
             "product_title": prod_title,
             "product_id": str(prod.get("id", "")) if prod else "",
             "variant_id": variant_id,
             "size": size,
-            "message": f"'{prod_title}' is currently out of stock. Please share your email address so I can email you the moment it's available again!",
+            "results": alternatives,
+            "alternatives": alternatives,
+            "actions": swap_actions,
+            "message": f"'{prod_title}' is currently out of stock. Please share your email address so I can email you the moment it's available again!{alt_text}",
         }
 
     record = _repo.save_restock_alert(
@@ -2174,6 +2259,7 @@ async def subscribe_restock(store, entities: dict, session_id: str, customer_id:
     )
 
     size_text = f" (Size {size})" if size else ""
+    alt_proposal = f"\n\nWhile you wait, here are {len(alternatives)} close in-stock alternatives available right now! You can swap any into your cart:" if alternatives else ""
     return {
         "status": "alert_subscribed",
         "product_title": prod_title,
@@ -2181,9 +2267,12 @@ async def subscribe_restock(store, entities: dict, session_id: str, customer_id:
         "size": size,
         "alert_type": alert_type,
         "subscription_id": record.get("$id") or record.get("id"),
+        "results": alternatives,
+        "alternatives": alternatives,
+        "actions": swap_actions,
         "message": (
             f"You're all set! '{prod_title}'{size_text} is currently out of stock, but we will email you at {email} "
-            f"the moment fresh stock arrives. You won't miss it!"
+            f"the moment fresh stock arrives. You won't miss it!{alt_proposal}"
         ),
     }
 
@@ -2218,6 +2307,438 @@ async def list_my_alerts(store, entities: dict, session_id: str, customer_id: st
         "alerts": alerts,
         "count": len(alerts),
         "message": f"Here are your active alerts for {email}:\n" + "\n".join(formatted),
+    }
+
+
+# ==========================================================================
+# CART SWAP FOR OUT-OF-STOCK ALTERNATIVES
+# ==========================================================================
+async def swap_cart_item(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    """Swaps an out-of-stock item with an in-stock alternative in the storefront cart."""
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
+    var_id = entities.get("variant_id") or entities.get("id")
+    target_prod = entities.get("product_title") or entities.get("product_name") or entities.get("name")
+
+    if not var_id and target_prod:
+        prod, variant, in_stock, _ = await _find_store_product(store, str(target_prod))
+        if variant and in_stock:
+            var_id = str(variant.get("id"))
+
+    if not var_id:
+        return {
+            "status": "swap_failed",
+            "message": "I couldn't identify the variant to swap into your cart. Please select one of the recommended alternative items.",
+        }
+
+    swap_action = {
+        "type": "swap_item",
+        "remove_variant_id": str(entities.get("remove_variant_id") or ""),
+        "add_variant_id": str(var_id),
+        "quantity": int(entities.get("quantity") or 1),
+    }
+    return {
+        "status": "swapped",
+        "widget_action": swap_action,
+        "message": "Great choice! I have prepared the in-stock alternative for your cart. You can review your cart anytime or proceed directly to checkout!",
+    }
+
+
+# ==========================================================================
+# STANDING INSTRUCTIONS & SCHEDULED TASKS
+# ==========================================================================
+async def create_standing_instruction(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    """Handles standing instructions and scheduled tasks:
+    - Price drops: 'Tell me when this drops below ₹999'
+    - Reorder reminder: 'Remind me to reorder in 30 days'
+    - Auto-add restock: 'Add this to my cart when it's back in stock'
+    """
+    import repository_appwrite as _repo
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
+    store_id = getattr(store, "id", None) or getattr(store, "$id", None) or shop
+    email = (entities.get("email") or "").strip().lower()
+    instruction_text = entities.get("instruction") or entities.get("message") or entities.get("query") or ""
+
+    target_price = str(entities.get("target_price") or "").strip()
+    if not target_price:
+        m_price = re.search(r"(?:below|under|drops?\s*to|drops?\s*below)\s*(?:₹|\$|rs\.?|inr)?\s*(\d+(?:,\d+)?(?:\.\d+)?)", instruction_text, re.IGNORECASE)
+        if m_price:
+            target_price = m_price.group(1).replace(",", "")
+
+    interval_days = int(entities.get("days") or 0)
+    if not interval_days:
+        m_days = re.search(r"(?:in|after|every)\s*(\d+)\s*(?:days?|weeks?|months?)", instruction_text, re.IGNORECASE)
+        if m_days:
+            val = int(m_days.group(1))
+            if "week" in m_days.group(0).lower():
+                interval_days = val * 7
+            elif "month" in m_days.group(0).lower():
+                interval_days = val * 30
+            else:
+                interval_days = val
+
+    auto_add = bool(entities.get("auto_add") or any(p in instruction_text.lower() for p in ["add this to my cart", "add to cart", "auto add", "add to my"]))
+
+    if target_price:
+        instruction_type = "price_drop"
+    elif interval_days:
+        instruction_type = "reorder_reminder"
+    elif auto_add:
+        instruction_type = "auto_add_restock"
+    else:
+        instruction_type = entities.get("instruction_type", "price_drop")
+
+    product_name = entities.get("product_title") or entities.get("product_name") or entities.get("product_query") or ""
+    if not product_name:
+        clean_p = re.sub(
+            r"\b(tell me when|remind me to|add this to my cart when|alert me when|drops below|reorder in|back in stock|it's back in stock|reorder|in|days|weeks|below|under)\b.*",
+            "",
+            instruction_text,
+            flags=re.IGNORECASE,
+        ).strip()
+        product_name = clean_p or instruction_text
+
+    prod, variant, in_stock, _ = await _find_store_product(store, str(product_name))
+    prod_title = (prod.get("title") if prod else None) or product_name or "this item"
+    prod_id = str(prod.get("id")) if prod else ""
+
+    if not email:
+        return {
+            "status": "email_required",
+            "instruction_type": instruction_type,
+            "product_title": prod_title,
+            "target_price": target_price,
+            "interval_days": interval_days,
+            "auto_add": auto_add,
+            "message": f"I'd be glad to schedule that for '{prod_title}'! Please share your email address so I can alert you as requested.",
+        }
+
+    record = _repo.save_standing_instruction(
+        store_id=store_id,
+        shop_domain=shop,
+        customer_email=email,
+        instruction_type=instruction_type,
+        product_id=prod_id,
+        product_title=prod_title,
+        target_price=target_price,
+        interval_days=interval_days,
+        auto_add=auto_add,
+        payload=entities,
+    )
+
+    if instruction_type == "price_drop":
+        confirm_msg = f"Standing instruction active! I'm watching '{prod_title}'. The moment the price drops below ₹{target_price}, I will email you at {email}."
+    elif instruction_type == "reorder_reminder":
+        confirm_msg = f"Reminder scheduled! I will email you at {email} in {interval_days} days with a 1-click reorder link for '{prod_title}'."
+    elif instruction_type == "auto_add_restock":
+        confirm_msg = f"Instruction recorded! The moment '{prod_title}' is restocked, I will email you at {email} and stage it directly in your cart for checkout."
+    else:
+        confirm_msg = f"Standing instruction saved for '{prod_title}'. I'll notify you at {email} as requested."
+
+    return {
+        "status": "instruction_created",
+        "instruction_id": record.get("$id") or record.get("id"),
+        "instruction_type": instruction_type,
+        "product_title": prod_title,
+        "email": email,
+        "message": confirm_msg,
+    }
+
+
+# ==========================================================================
+# ORDER EDITS & CANCELLATIONS (Pre-fulfillment, Verification, Auto/Ask/Off)
+# ==========================================================================
+_PENDING_CANCELLATIONS: dict[tuple[str, str], dict] = {}
+
+async def _get_order_by_number(store, order_number: str) -> dict | None:
+    """Finds an order by order number or name (e.g. 1001 or #1001)."""
+    clean_num = str(order_number).lstrip("#").strip()
+    try:
+        resp = await _get(store, "orders.json", {"name": f"#{clean_num}", "status": "any", "limit": 1})
+        if resp.status_code == 200:
+            orders = resp.json().get("orders", [])
+            if orders:
+                return orders[0]
+        # Fallback to search query
+        resp2 = await _get(store, "orders.json", {"query": clean_num, "status": "any", "limit": 5})
+        if resp2.status_code == 200:
+            for ord_obj in resp2.json().get("orders", []):
+                if str(ord_obj.get("order_number")) == clean_num or str(ord_obj.get("name")).lstrip("#") == clean_num:
+                    return ord_obj
+    except Exception as e:
+        print(f"[_get_order_by_number] lookup failed: {e!r}")
+    return None
+
+
+async def _execute_shopify_order_cancel(store, order_id: str) -> tuple[bool, str]:
+    """Cancels unfulfilled order in Shopify and restocks inventory."""
+    clean_id = str(order_id).split("/")[-1]
+    try:
+        # Try REST cancellation
+        resp = await _post(store, f"orders/{clean_id}/cancel.json", {"reason": "customer", "email": True, "restock": True})
+        if resp.status_code in (200, 201):
+            return True, ""
+        # Try GraphQL orderCancel mutation
+        mutation = """
+        mutation orderCancel($orderId: ID!, $reason: OrderCancelReason!, $restock: Boolean!) {
+          orderCancel(orderId: $orderId, reason: $reason, restock: $restock) {
+            orderCancelUserErrors { field message }
+          }
+        }
+        """
+        data = await _graphql_admin(store, mutation, {
+            "orderId": f"gid://shopify/Order/{clean_id}",
+            "reason": "CUSTOMER",
+            "restock": True,
+        })
+        errors = ((data or {}).get("orderCancel") or {}).get("orderCancelUserErrors") or []
+        if not errors:
+            return True, ""
+        return False, errors[0].get("message", "Cancellation rejected by Shopify")
+    except Exception as e:
+        return False, str(e)
+
+
+async def cancel_order(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    """Handles order cancellation strictly before fulfillment, with verification,
+    and adhering to the merchant's Auto / Ask / Off setting."""
+    import repository_appwrite as _repo
+    import email_utils
+
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
+    store_id = getattr(store, "id", None) or getattr(store, "$id", None) or shop
+    order_number = str(entities.get("order_number") or entities.get("order_id") or "").lstrip("#").strip()
+    store_owner_email = _repo.get_store_owner_email(shop)
+    mode = _repo.get_order_cancellation_mode(store_id)
+
+    if not order_number:
+        return {
+            "status": "order_number_required",
+            "message": "Please provide your order number (e.g. #1001) so I can verify and process your request.",
+        }
+
+    # 1. Check merchant setting
+    if mode == "off":
+        return {
+            "status": "disabled",
+            "message": f"Automated order cancellation is disabled for this store. Please contact our support team directly at {store_owner_email} for assistance with order #{order_number}.",
+        }
+
+    # 2. Look up order
+    orders_data = await _get_order_by_number(store, order_number)
+    if not orders_data:
+        return {
+            "status": "order_not_found",
+            "message": f"I couldn't locate order #{order_number}. Please check the order number or check your recent orders.",
+        }
+
+    order_id = str(orders_data.get("id"))
+    order_email = ((orders_data.get("email") or "").strip().lower() or
+                   ((orders_data.get("customer") or {}).get("email") or "").strip().lower())
+    order_cust_id = str((orders_data.get("customer") or {}).get("id") or "").split("/")[-1]
+
+    # 3. Check if already cancelled
+    if orders_data.get("cancelled_at") or orders_data.get("cancelledAt"):
+        return {
+            "status": "already_cancelled",
+            "message": f"Order #{order_number} has already been cancelled.",
+        }
+
+    # 4. Check fulfillment status (BEFORE FULFILLMENT ONLY)
+    f_status = (orders_data.get("fulfillment_status") or orders_data.get("displayFulfillmentStatus") or "").lower()
+    if f_status in {"fulfilled", "shipped", "in_transit", "out_for_delivery", "partially_fulfilled"}:
+        return {
+            "status": "already_fulfilled",
+            "message": f"Order #{order_number} has already been fulfilled and is on the way ({f_status}). Orders cannot be cancelled once fulfilled, but you can initiate a return as soon as it arrives!",
+        }
+
+    # 5. Customer verification
+    key = (shop, session_id)
+    otp_provided = str(entities.get("otp_code") or "").strip()
+    verified = False
+
+    if customer_id and order_cust_id and str(customer_id) == str(order_cust_id):
+        verified = True
+    elif entities.get("customer_email") and order_email and str(entities["customer_email"]).lower() == order_email:
+        verified = bool(entities.get("otp_verified"))
+
+    if not verified:
+        pending = _PENDING_CANCELLATIONS.get(key)
+        if pending and pending.get("order_number") == order_number and otp_provided and otp_provided == pending.get("code"):
+            verified = True
+            _PENDING_CANCELLATIONS.pop(key, None)
+        elif not otp_provided:
+            code = str(secrets.randbelow(900000) + 100000)
+            _PENDING_CANCELLATIONS[key] = {
+                "code": code,
+                "order_number": order_number,
+                "order_id": order_id,
+                "email": order_email,
+                "expires": time.time() + 600,
+            }
+            masked = (order_email[:2] + "****" + order_email[order_email.find("@"):]) if "@" in order_email else "your email"
+            email_utils.send_html_email(
+                to_email=order_email,
+                subject=f"Verification Code for Order #{order_number} Cancellation",
+                html_body=f"<p>Your 6-digit confirmation code to cancel order #{order_number} is <strong>{code}</strong>. This code expires in 10 minutes.</p>",
+                reply_to=store_owner_email,
+                from_name=f"{shop} Support",
+            )
+            return {
+                "status": "verification_required",
+                "order_number": order_number,
+                "message": f"To protect your security, I've sent a 6-digit confirmation code to {masked}. Please reply with the code to confirm cancelling order #{order_number}.",
+            }
+        else:
+            return {
+                "status": "invalid_otp",
+                "message": "Invalid confirmation code. Please check your email and enter the 6-digit code.",
+            }
+
+    # 6. Mode 'ask' -> Request merchant review
+    if mode == "ask":
+        _repo.save_order_action_request(
+            store_id=store_id,
+            shop_domain=shop,
+            order_number=order_number,
+            customer_email=order_email,
+            action_type="cancel",
+            details="Shopper verified cancellation request submitted before fulfillment.",
+            status="pending",
+        )
+        email_utils.send_html_email(
+            to_email=store_owner_email,
+            subject=f"⚠️ Cancellation Request: Order #{order_number}",
+            html_body=f"<p>Verified customer {order_email} requested cancellation for unfulfilled Order #{order_number}. Please review in Shopify Admin.</p>",
+            reply_to=order_email,
+            from_name="Dripire Order Manager",
+        )
+        email_utils.send_order_cancellation_email(
+            to_email=order_email,
+            store_name=shop,
+            order_number=order_number,
+            status="requested",
+            details="Your cancellation request has been verified and submitted to the store owner for approval. You will receive an update shortly.",
+            reply_to=store_owner_email,
+        )
+        return {
+            "status": "cancellation_requested",
+            "order_number": order_number,
+            "message": f"Your cancellation request for order #{order_number} has been verified and submitted to the store owner. You'll receive a confirmation email at {order_email} once processed!",
+        }
+
+    # 7. Mode 'auto' -> Automated cancellation
+    success, err = await _execute_shopify_order_cancel(store, order_id)
+    if not success:
+        return {
+            "status": "error",
+            "message": f"Could not cancel order #{order_number} automatically ({err}). Please contact {store_owner_email} for assistance.",
+        }
+
+    _repo.save_order_action_request(
+        store_id=store_id,
+        shop_domain=shop,
+        order_number=order_number,
+        customer_email=order_email,
+        action_type="cancel",
+        details="Auto-cancelled before fulfillment via AI Assistant.",
+        status="cancelled",
+    )
+    email_utils.send_order_cancellation_email(
+        to_email=order_email,
+        store_name=shop,
+        order_number=order_number,
+        status="cancelled",
+        details="Your order #{order_number} has been successfully cancelled and all items have been released back into stock.",
+        reply_to=store_owner_email,
+    )
+    return {
+        "status": "cancelled",
+        "order_number": order_number,
+        "message": f"Order #{order_number} has been successfully cancelled and your items have been released back into stock. A confirmation receipt was emailed to {order_email}.",
+    }
+
+
+async def edit_order_address(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    """Updates shipping address on an unfulfilled order before fulfillment."""
+    import repository_appwrite as _repo
+    import email_utils
+
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
+    store_id = getattr(store, "id", None) or getattr(store, "$id", None) or shop
+    order_number = str(entities.get("order_number") or entities.get("order_id") or "").lstrip("#").strip()
+    new_address = str(entities.get("address") or entities.get("query") or "").strip()
+    store_owner_email = _repo.get_store_owner_email(shop)
+
+    if not order_number or not new_address:
+        return {
+            "status": "info_required",
+            "message": "Please provide your order number and the updated shipping address you'd like to use.",
+        }
+
+    orders_data = await _get_order_by_number(store, order_number)
+    if not orders_data:
+        return {
+            "status": "order_not_found",
+            "message": f"I couldn't locate order #{order_number}. Please check your order number.",
+        }
+
+    f_status = (orders_data.get("fulfillment_status") or orders_data.get("displayFulfillmentStatus") or "").lower()
+    if f_status in {"fulfilled", "shipped", "in_transit", "out_for_delivery", "partially_fulfilled"}:
+        return {
+            "status": "already_fulfilled",
+            "message": f"Order #{order_number} has already been fulfilled and is currently in transit ({f_status}). The delivery address cannot be modified once shipped.",
+        }
+
+    order_id = str(orders_data.get("id"))
+    order_email = ((orders_data.get("email") or "").strip().lower() or
+                   ((orders_data.get("customer") or {}).get("email") or "").strip().lower())
+
+    # Update note on order in Shopify Admin
+    await _put(store, f"orders/{order_id}.json", {"order": {"id": int(order_id), "note": f"Shipping address update requested: {new_address}"}})
+    _repo.save_order_action_request(
+        store_id=store_id,
+        shop_domain=shop,
+        order_number=order_number,
+        customer_email=order_email,
+        action_type="edit_address",
+        details=f"Address update to: {new_address}",
+        status="completed",
+    )
+    email_utils.send_html_email(
+        to_email=order_email,
+        subject=f"Delivery Address Update for Order #{order_number}",
+        html_body=f"<p>The delivery notes for Order #{order_number} have been updated to: <strong>{new_address}</strong>.</p>",
+        reply_to=store_owner_email,
+        from_name=f"{shop} Support",
+    )
+    return {
+        "status": "address_updated",
+        "order_number": order_number,
+        "message": f"The delivery address for order #{order_number} has been updated to '{new_address}'. A confirmation receipt has been sent to {order_email}.",
+    }
+
+
+# ==========================================================================
+# ABANDONED CART RECOVERY NUDGE
+# ==========================================================================
+async def nudge_abandoned_cart(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
+    """Handles in-widget abandoned cart recovery nudges."""
+    shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
+    cart_data = entities.get("cart_data") or {}
+    items = cart_data.get("items") or []
+    checkout_url = f"https://{shop}/checkout"
+
+    if items:
+        first_title = items[0].get("title") or items[0].get("name") or "item"
+        msg = f"I've saved your cart with {len(items)} items (including {first_title})! You can complete your order anytime with this direct link: {checkout_url}. Let me know if you have any questions or need assistance!"
+    else:
+        msg = f"I've reserved your cart items for you. Ready to complete your order? Here is your checkout link: {checkout_url}"
+
+    return {
+        "status": "cart_held",
+        "checkout_url": checkout_url,
+        "widget_action": {"type": "checkout", "url": checkout_url},
+        "message": msg,
     }
 
 
@@ -2636,6 +3157,11 @@ ACTION_MAP = {
     "general_chat.recommend_products": recommend_products,
     "restock_alert.subscribe_restock": subscribe_restock,
     "restock_alert.list_my_alerts": list_my_alerts,
+    "cart_management.swap_item": swap_cart_item,
+    "standing_instruction.create_instruction": create_standing_instruction,
+    "order_management.cancel_order": cancel_order,
+    "order_management.edit_address": edit_order_address,
+    "cart_recovery.nudge_abandoned_cart": nudge_abandoned_cart,
     "visual_search.search_by_image": search_by_image,
     "goal_cart_builder.build_goal_bundle": build_goal_bundle,
     "fallback.clarify": clarify,

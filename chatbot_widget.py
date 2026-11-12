@@ -729,6 +729,18 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                                "size": entities.get("size") or "", "color": entities.get("color") or ""},
                      language=language)
 
+    # Arm standing instruction email followup
+    if action == "create_instruction" and isinstance(data, dict) and data.get("status") == "email_required":
+        _set_pending(_pkey(shop, session_id), type="await_instruction_email", intent="standing_instruction", action="create_instruction",
+                     entities={**entities, "product_title": data.get("product_title")},
+                     language=language)
+
+    # Arm order cancellation verification OTP followup
+    if action == "cancel_order" and isinstance(data, dict) and data.get("status") == "verification_required":
+        _set_pending(_pkey(shop, session_id), type="await_cancellation_otp", intent="order_management", action="cancel_order",
+                     entities={"order_number": data.get("order_number") or entities.get("order_number")},
+                     language=language)
+
     return out
 
 
@@ -814,6 +826,29 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
             entities = {**pending.get("entities", {}), "email": email}
             result = await _execute_and_reply(store, "restock_alert", "subscribe_restock", entities, language, message, session_id, customer_id=customer_id)
             _log(shop, message, "done", "restock_alert", "subscribe_restock", entities, result.get("reply", ""))
+            return result
+        return None
+
+    # Standing instructions email followup
+    if ptype == "await_instruction_email":
+        email_match = EMAIL_RE.search(message)
+        if email_match:
+            email = email_match.group(0).lower()
+            _remember_customer(shop, session_id, customer_id, email)
+            entities = {**pending.get("entities", {}), "email": email}
+            result = await _execute_and_reply(store, "standing_instruction", "create_instruction", entities, language, message, session_id, customer_id=customer_id)
+            _log(shop, message, "done", "standing_instruction", "create_instruction", entities, result.get("reply", ""))
+            return result
+        return None
+
+    # Order cancellation OTP followup
+    if ptype == "await_cancellation_otp":
+        otp_match = _OTP_RE.search(message) or re.search(r"\b(\d{6})\b", message)
+        if otp_match:
+            otp_code = otp_match.group(1)
+            entities = {**pending.get("entities", {}), "otp_code": otp_code}
+            result = await _execute_and_reply(store, "order_management", "cancel_order", entities, language, message, session_id, customer_id=customer_id)
+            _log(shop, message, result.get("status", "done"), "order_management", "cancel_order", entities, result.get("reply", ""))
             return result
         return None
 
@@ -1031,13 +1066,23 @@ async def _chat_impl(req: ChatRequest):
             _log(req.shop, message, "cancelled", pending["intent"], pending["action"], pending["entities"], cancel_reply)
             return {"status": "cancelled", "reply": cancel_reply, "language": pending["language"]}
 
-    # Fast-path for OTP in messages
+    # Fast-path for OTP in messages (payments and order cancellations)
     otp_match = _OTP_RE.search(message) or (re.search(r"\b(\d{6})\b", message) if len(message.strip()) == 6 else None)
-    if (otp_match or req.otp_code) and _pkey(req.shop, req.session_id) in shopify_actions._PENDING_PAYMENTS:
+    if otp_match or req.otp_code:
         otp_to_verify = req.otp_code or (otp_match.group(1) if otp_match else message.strip())
-        result = await _execute_and_reply(store, "payment_checkout", "confirm_payment_otp", {"otp_code": otp_to_verify}, "en", message, req.session_id, customer_id=customer_id)
-        _log(req.shop, message, result.get("status", "done"), "payment_checkout", "confirm_payment_otp", {"otp_code": otp_to_verify}, result.get("reply", ""))
-        return result
+        if (req.shop, req.session_id) in shopify_actions._PENDING_CANCELLATIONS:
+            pending_c = shopify_actions._PENDING_CANCELLATIONS[(req.shop, req.session_id)]
+            result = await _execute_and_reply(
+                store, "order_management", "cancel_order",
+                {"otp_code": otp_to_verify, "order_number": pending_c.get("order_number")},
+                "en", message, req.session_id, customer_id=customer_id
+            )
+            _log(req.shop, message, result.get("status", "done"), "order_management", "cancel_order", {"otp_code": otp_to_verify}, result.get("reply", ""))
+            return result
+        elif _pkey(req.shop, req.session_id) in shopify_actions._PENDING_PAYMENTS:
+            result = await _execute_and_reply(store, "payment_checkout", "confirm_payment_otp", {"otp_code": otp_to_verify}, "en", message, req.session_id, customer_id=customer_id)
+            _log(req.shop, message, result.get("status", "done"), "payment_checkout", "confirm_payment_otp", {"otp_code": otp_to_verify}, result.get("reply", ""))
+            return result
 
     # Fast-path for exact short phrases only — avoids mis-routing longer
     # messages that happen to contain a matching keyword.
@@ -1069,6 +1114,34 @@ async def _chat_impl(req: ChatRequest):
         m_bud = re.search(r"(?:under|below|budget\s*of|max\s*of|within|for)\s*(?:₹|\$|rs\.?|inr)?\s*(\d+(?:,\d+)?(?:\.\d+)?)", message, re.IGNORECASE)
         if m_bud:
             entities["budget"] = m_bud.group(1).replace(",", "")
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif any(p in _msg_lower for p in ["drops below", "price drop", "drops to", "remind me to reorder", "reorder in", "add this to my cart when", "add to cart when", "auto add when restocked"]):
+        intent, action = "standing_instruction", "create_instruction"
+        entities = {"instruction": message, "email": customer_email}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif any(p in _msg_lower for p in ["cancel order", "cancel my order", "want to cancel", "cancel #", "please cancel"]):
+        intent, action = "order_management", "cancel_order"
+        m_ord = _ORDER_NO_RE.search(message)
+        entities = {"order_number": m_ord.group(1) if m_ord else "", "email": customer_email}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif any(p in _msg_lower for p in ["change address", "change shipping address", "update address", "edit address"]):
+        intent, action = "order_management", "edit_address"
+        m_ord = _ORDER_NO_RE.search(message)
+        entities = {"order_number": m_ord.group(1) if m_ord else "", "address": message, "email": customer_email}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif any(p in _msg_lower for p in ["swap with", "swap to", "swap item", "replace with", "swap in cart"]):
+        intent, action = "cart_management", "swap_item"
+        clean_target = re.sub(r"\b(swap with|swap to|swap item|replace with|swap in cart|swap)\b", "", message, flags=re.IGNORECASE).strip()
+        entities = {"product_title": clean_target}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    elif any(p in _msg_lower for p in ["hold my cart", "hold items", "hold them", "keep my cart", "save my cart"]):
+        intent, action = "cart_recovery", "nudge_abandoned_cart"
+        entities = {"email": customer_email}
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
     elif any(p in _msg_lower for p in ["notify me when", "back in stock", "restock alert", "when it restocks", "when restocked", "alert me when", "notify me if price drops"]):

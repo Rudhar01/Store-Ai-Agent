@@ -45,7 +45,7 @@ SHOPIFY_SCOPES = (
 
 # >>> ADDED (analytics & widget installation): always ask Shopify for the permissions the
 # dashboard's Analytics page needs (orders + products) and widget script installation (script_tags + themes).
-for _needed_scope in ("read_products", "read_orders", "write_script_tags", "read_script_tags", "write_themes", "read_themes"):
+for _needed_scope in ("read_products", "read_orders", "write_orders", "read_customers", "write_script_tags", "read_script_tags", "write_themes", "read_themes", "read_order_edits", "write_order_edits"):
     if _needed_scope not in [_s.strip() for _s in SHOPIFY_SCOPES.split(",")]:
         SHOPIFY_SCOPES = f"{SHOPIFY_SCOPES},{_needed_scope}" if SHOPIFY_SCOPES else _needed_scope
 # <<< END ADDED

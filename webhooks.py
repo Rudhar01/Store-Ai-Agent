@@ -99,7 +99,85 @@ async def products_webhook(request: Request):
     shop = request.headers.get("X-Shopify-Shop-Domain")
     if shop:
         import behavioral_recommender
+        import email_utils
         behavioral_recommender.invalidate_catalog_cache(shop)
+        try:
+            payload = json.loads(body or b"{}")
+            prod_id = str(payload.get("id") or "")
+            prod_title = payload.get("title") or ""
+            img_src = (payload.get("image") or {}).get("src", "")
+            prod_url = f"https://{shop}/products/{payload.get('handle', '')}" if payload.get("handle") else ""
+            reply_to = repo.get_store_owner_email(shop)
+
+            # Check price-drop standing instructions
+            for v in (payload.get("variants") or []):
+                try:
+                    current_price = float(v.get("price") or 0.0)
+                except Exception:
+                    continue
+                instructions = repo.list_standing_instructions(store_id=shop, instruction_type="price_drop", status="active")
+                for inst in instructions:
+                    match = False
+                    if inst.get("product_id") and str(inst.get("product_id")) == prod_id:
+                        match = True
+                    elif inst.get("product_title") and inst["product_title"].lower() in prod_title.lower():
+                        match = True
+                    if match:
+                        try:
+                            target = float(inst.get("target_price") or 0.0)
+                        except Exception:
+                            target = 0.0
+                        if target and current_price <= target:
+                            email_utils.send_price_drop_email(
+                                to_email=inst["customer_email"],
+                                store_name=shop,
+                                product_title=prod_title,
+                                new_price=f"₹{current_price:.2f}",
+                                product_url=prod_url,
+                                product_image=img_src,
+                                reply_to=reply_to,
+                            )
+                            repo.mark_standing_instruction_triggered(inst.get("$id"))
+        except Exception as e:
+            print(f"webhooks: products_webhook price check error: {e!r}")
+    return PlainTextResponse("ok")
+
+
+@router.post("/checkouts/create")
+@router.post("/checkouts/update")
+async def checkouts_webhook(request: Request):
+    body = await _verify(request)
+    if body is None:
+        return PlainTextResponse("Invalid HMAC", status_code=401)
+    shop = request.headers.get("X-Shopify-Shop-Domain") or ""
+    try:
+        payload = json.loads(body or b"{}")
+        email = (payload.get("email") or "").strip().lower()
+        if shop and email and not payload.get("completed_at"):
+            cust = payload.get("customer") or {}
+            cname = f"{cust.get('first_name', '')} {cust.get('last_name', '')}".strip()
+            items = [
+                {
+                    "title": it.get("title") or it.get("name"),
+                    "quantity": it.get("quantity") or 1,
+                    "price": str(it.get("price") or ""),
+                    "image": it.get("image_url") or "",
+                }
+                for it in payload.get("line_items", [])
+            ]
+            checkout_url = payload.get("abandoned_checkout_url") or payload.get("web_url") or f"https://{shop}/checkout"
+            total = str(payload.get("total_price") or "")
+            repo.save_abandoned_checkout(
+                store_id=shop,
+                shop_domain=shop,
+                customer_email=email,
+                customer_name=cname,
+                cart_items=items,
+                total_price=total,
+                checkout_url=checkout_url,
+            )
+    except Exception as e:
+        print(f"webhooks: checkouts_webhook error: {e!r}")
     return PlainTextResponse("ok")
 
 
@@ -158,6 +236,8 @@ async def orders_webhook(request: Request):
                 recent_orders=recent_orders,
                 currency=curr,
             )
+            if email:
+                repo.mark_abandoned_checkout_recovered(shop, email)
     except Exception as e:
         print(f"webhooks: orders_webhook sync error: {e!r}")
     return PlainTextResponse("ok")
@@ -203,5 +283,31 @@ async def inventory_webhook(request: Request):
     shop = request.headers.get("X-Shopify-Shop-Domain")
     if shop:
         import behavioral_recommender
+        import email_utils
         behavioral_recommender.invalidate_catalog_cache(shop)
+        try:
+            reply_to = repo.get_store_owner_email(shop)
+            alerts = repo.list_restock_alerts(store_id=shop, status="active")
+            for a in alerts:
+                email_utils.send_restock_notification_email(
+                    to_email=a["customer_email"],
+                    store_name=shop,
+                    product_title=a.get("product_title", "Product"),
+                    product_url=f"https://{shop}",
+                    reply_to=reply_to,
+                )
+                repo.mark_restock_alert_notified(a.get("$id"))
+
+            insts = repo.list_standing_instructions(store_id=shop, instruction_type="auto_add_restock", status="active")
+            for inst in insts:
+                email_utils.send_restock_notification_email(
+                    to_email=inst["customer_email"],
+                    store_name=shop,
+                    product_title=inst.get("product_title", "Product"),
+                    product_url=f"https://{shop}",
+                    reply_to=reply_to,
+                )
+                repo.mark_standing_instruction_triggered(inst.get("$id"))
+        except Exception as e:
+            print(f"webhooks: inventory_webhook check error: {e!r}")
     return PlainTextResponse("ok")
