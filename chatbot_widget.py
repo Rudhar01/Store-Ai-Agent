@@ -678,7 +678,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                 except Exception as e:
                     print(f"chatbot_widget: fallback products fetch failed: {e!r}")
 
-    products = data.get("results") if action in {"search_products", "get_recommendations", "recommend_products", "assistant_help", "clarify", "search_by_image", "subscribe_restock"} and isinstance(data, dict) else None
+    products = data.get("results") if action in {"search_products", "get_recommendations", "recommend_products", "assistant_help", "clarify", "subscribe_restock"} and isinstance(data, dict) else None
     if products and isinstance(products, list) and len(products) > 0:
         first_prod = products[0]
         if isinstance(first_prod, dict) and first_prod.get("name"):
@@ -956,10 +956,8 @@ async def chat(req: ChatRequest):
 
 async def _chat_impl(req: ChatRequest):
     message = (req.message or "").strip()
-    if not message and not req.otp_code and not req.image_data:
-        return {"reply": "Could you type, upload a photo, or say something first?"}
-    if req.image_data and not message:
-        message = "Find products matching this photo"
+    if not message and not req.otp_code:
+        return {"reply": "Could you type or say something first?"}
 
     # SECURITY: Detect anything that looks like a credit/debit card number (13-19 digits, possibly with spaces or dashes).
     # Never process, log, or store card numbers in chat — guide shopper to store checkout.
@@ -1101,19 +1099,6 @@ async def _chat_impl(req: ChatRequest):
     elif _msg_lower in _EXACT_CHECKOUT:
         intent, action = "payment_checkout", "initiate_payment"
         entities = {}
-        language = "en"
-        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
-    elif req.image_data or any(p in _msg_lower for p in ["visual search", "search by image", "search by photo", "matching this photo", "look like this picture", "similar to this picture"]):
-        intent, action = "visual_search", "search_by_image"
-        entities = {"image_data": req.image_data or "", "image_query": message}
-        language = "en"
-        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
-    elif any(p in _msg_lower for p in ["wedding outfit", "gym outfit", "outfit under", "look under", "skincare routine under", "build me a look", "build a look", "build an outfit", "complete look", "routine under", "curate an outfit", "outfit for"]):
-        intent, action = "goal_cart_builder", "build_goal_bundle"
-        entities = {"goal_or_occasion": message}
-        m_bud = re.search(r"(?:under|below|budget\s*of|max\s*of|within|for)\s*(?:₹|\$|rs\.?|inr)?\s*(\d+(?:,\d+)?(?:\.\d+)?)", message, re.IGNORECASE)
-        if m_bud:
-            entities["budget"] = m_bud.group(1).replace(",", "")
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
     elif any(p in _msg_lower for p in ["drops below", "price drop", "drops to", "remind me to reorder", "reorder in", "add this to my cart when", "add to cart when", "auto add when restocked"]):
@@ -2208,29 +2193,8 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root .confirm-btn { border:1px solid rgba(236,236,236,.8); background:rgba(255,255,255,.75); color:#2a2a2a; font-size:11px; font-weight:700; padding:6px 16px; border-radius:999px; cursor:pointer; }",
     "#ai-chat-widget-root .confirm-btn:hover:not(:disabled) { background:#2b2b2b; color:#fff; }",
 
-    "#ai-chat-widget-root .img-preview-chip { display:none; align-items:center; gap:6px; background:#f3f4f6; border:1px solid #e5e7eb; border-radius:8px; padding:4px 8px; margin-top:6px; font-size:11px; color:#374151; }",
-    "#ai-chat-widget-root .img-preview-chip img { width:22px; height:22px; border-radius:4px; object-fit:cover; }",
-    "#ai-chat-widget-root .img-preview-chip button { background:none; border:none; color:#9ca3af; font-size:14px; cursor:pointer; line-height:1; }",
-    "#ai-chat-widget-root .img-upload-btn { position:absolute; left:6px; top:50%; transform:translateY(-50%); width:28px; height:28px; border-radius:50%; background:transparent; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; color:#6b7280; transition:color .15s ease; z-index:2; }",
-    "#ai-chat-widget-root .img-upload-btn:hover { color:#111827; }",
-    "#ai-chat-widget-root .img-upload-btn svg { width:16px; height:16px; }",
-    "#ai-chat-widget-root .user-thumb { max-width:140px; max-height:140px; border-radius:10px; display:block; margin-bottom:6px; box-shadow:0 2px 6px rgba(0,0,0,.15); }",
-
-    "#ai-chat-widget-root .bundle-card { background:#ffffff; border:1.5px solid #e5e7eb; border-radius:14px; padding:12px; margin:8px 0; box-shadow:0 4px 12px rgba(0,0,0,.06); width:100%; }",
-    "#ai-chat-widget-root .bundle-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }",
-    "#ai-chat-widget-root .bundle-title { font-size:12px; font-weight:700; color:#111827; display:flex; align-items:center; gap:4px; }",
-    "#ai-chat-widget-root .bundle-badge { font-size:9.5px; font-weight:700; color:#059669; background:#ecfdf5; border:1px solid #a7f3d0; padding:2px 6px; border-radius:999px; }",
-    "#ai-chat-widget-root .bundle-item { display:flex; align-items:center; gap:8px; padding:6px 0; border-top:1px solid #f3f4f6; }",
-    "#ai-chat-widget-root .bundle-item img { width:32px; height:32px; border-radius:6px; object-fit:cover; }",
-    "#ai-chat-widget-root .bundle-item-info { flex:1; min-width:0; }",
-    "#ai-chat-widget-root .bundle-item-slot { font-size:9.5px; color:#6b7280; font-weight:600; text-transform:uppercase; }",
-    "#ai-chat-widget-root .bundle-item-name { font-size:11px; font-weight:600; color:#1f2937; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }",
-    "#ai-chat-widget-root .bundle-item-price { font-size:11px; font-weight:700; color:#111827; }",
-    "#ai-chat-widget-root .bundle-cta-btn { width:100%; margin-top:8px; background:#111827; color:#ffffff; border:none; border-radius:8px; padding:8px 12px; font-size:11.5px; font-weight:700; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px; transition:background .15s ease; }",
-    "#ai-chat-widget-root .bundle-cta-btn:hover { background:#374151; }",
-
     "#ai-chat-widget-root .input-row { position:relative; margin-top:8px; }",
-    "#ai-chat-widget-root .input-row input { width:100%; padding:11px 42px 11px 36px; border-radius:999px; border:1px solid #e5e5e5; background:#fff; font-size:12px; color:#333; outline:none; box-shadow:0 2px 8px rgba(0,0,0,.05); }",
+    "#ai-chat-widget-root .input-row input { width:100%; padding:11px 42px 11px 16px; border-radius:999px; border:1px solid #e5e5e5; background:#fff; font-size:12px; color:#333; outline:none; box-shadow:0 2px 8px rgba(0,0,0,.05); }",
     "#ai-chat-widget-root .mic-btn { position:absolute; right:5px; top:50%; transform:translateY(-50%); width:31px; height:31px; border-radius:50%; background:#2b2b2b; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; }",
     "#ai-chat-widget-root .mic-btn.listening { background:#d64545; }",
     "#ai-chat-widget-root .mic-btn svg { width:17px; height:17px; stroke:#fff; }",
@@ -2279,17 +2243,8 @@ WIDGET_JS = r"""
       '<div class="conversation" id="conversation">' +
         '<div class="bubble bot" id="greetingBubble">Hi! How can I help you today?</div>' +
       "</div>" +
-      '<div class="img-preview-chip" id="imgPreviewChip">' +
-        '<img id="imgPreviewThumb" src="" alt="preview" />' +
-        '<span style="flex:1">Photo attached</span>' +
-        '<button id="imgPreviewRemove" type="button" aria-label="Remove photo">&times;</button>' +
-      '</div>' +
       '<div class="input-row">' +
-        '<button class="img-upload-btn" id="imgUploadBtn" type="button" title="Visual Search: Upload an image" aria-label="Visual Search">' +
-          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' +
-        '</button>' +
-        '<input type="file" id="imgFileInput" accept="image/*" style="display:none;" />' +
-        '<input type="text" id="chatInput" placeholder="Ask, upload photo, build outfit....." />' +
+        '<input type="text" id="chatInput" placeholder="Ask about products, orders, shipping....." />' +
         '<button class="mic-btn" id="micBtn" aria-label="Voice input">' +
           '<svg class="icon-mic-inner" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>' +
           '<svg class="icon-send-inner" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>' +
@@ -2305,12 +2260,6 @@ WIDGET_JS = r"""
   var input = document.getElementById("chatInput");
   var micBtn = document.getElementById("micBtn");
   var micStatus = document.getElementById("micStatus");
-  var imgUploadBtn = document.getElementById("imgUploadBtn");
-  var imgFileInput = document.getElementById("imgFileInput");
-  var imgPreviewChip = document.getElementById("imgPreviewChip");
-  var imgPreviewThumb = document.getElementById("imgPreviewThumb");
-  var imgPreviewRemove = document.getElementById("imgPreviewRemove");
-  var pendingImageData = null;
   var conversation = document.getElementById("conversation");
   var cartBadge = document.getElementById("cartBadge");
   var headerCart = document.getElementById("headerCart");
@@ -3084,60 +3033,88 @@ WIDGET_JS = r"""
     autoResizeConversation();
   }
 
-  function addBundleCard(bundle, totalPrice, widgetAction, opts) {
-    opts = opts || {};
-    var card = document.createElement("div");
-    card.className = "bundle-card";
-    var head = document.createElement("div");
-    head.className = "bundle-header";
-    head.innerHTML = '<span class="bundle-title">🎯 Curated Look (' + bundle.length + ' pieces)</span><span class="bundle-badge">Ready to wear</span>';
-    card.appendChild(head);
+  // Spoken replies state & text-to-speech synthesis
+  var spokenRepliesEnabled = false;
+  try {
+    spokenRepliesEnabled = sessionStorage.getItem("aiChatSpokenReplies_" + SHOP) === "1";
+  } catch (e) {}
 
-    bundle.forEach(function (item) {
-      var itEl = document.createElement("div");
-      itEl.className = "bundle-item";
-      var img = document.createElement("img");
-      img.src = item.image || "";
-      img.alt = item.name || "";
-      var info = document.createElement("div");
-      info.className = "bundle-item-info";
-      info.innerHTML = '<div class="bundle-item-slot">' + (item.slot || "Item") + '</div>' +
-                       '<div class="bundle-item-name">' + (item.name || "Product") + '</div>';
-      var price = document.createElement("div");
-      price.className = "bundle-item-price";
-      price.textContent = "$" + item.price;
-      itEl.appendChild(img);
-      itEl.appendChild(info);
-      itEl.appendChild(price);
-      card.appendChild(itEl);
-    });
-
-    var cta = document.createElement("button");
-    cta.className = "bundle-cta-btn";
-    cta.innerHTML = '🛍️ Add Complete Look to Cart (' + (totalPrice ? '$' + totalPrice : 'Bundle') + ')';
-    cta.addEventListener("click", function () {
-      cta.disabled = true;
-      cta.textContent = "Adding look to cart\u2026";
-      if (widgetAction && widgetAction.items) {
-        cartAddAll(widgetAction.items);
-      } else {
-        cartAddAll(bundle.map(function (b) { return { variant_id: b.variant_id, quantity: 1 }; }));
-      }
-      setTimeout(function () {
-        cta.textContent = "Added Complete Look to Cart ✓";
-      }, 700);
-    });
-    card.appendChild(cta);
-
-    conversation.appendChild(card);
-    autoResizeConversation();
-    if (opts.record !== false) { chatHistory.push({ type: "bundle", bundle: bundle, totalPrice: totalPrice, widgetAction: widgetAction }); persistState(); }
+  function cleanTextForSpeech(text) {
+    if (!text) return "";
+    return text
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/https?:\/\/\S+/gi, "")
+      .replace(/[*_#`~>]/g, "")
+      .replace(/^[ \t]*[•\-\*+][ \t]+/gm, "")
+      .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]|\uD83C[\uDF00-\uDFFF]|\uD83D[\uDC00-\uDE4F]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
-  function handleChatResponse(data) {
-    if (data.reply) addBubble(data.reply, "bot");
-    if (data.bundle && Array.isArray(data.bundle) && data.bundle.length > 0) addBundleCard(data.bundle, data.total_bundle_price, data.widget_action);
-    else if (Array.isArray(data.products) && data.products.length > 0) addProductRow(data.products);
+  function speakText(rawText) {
+    if (!window.speechSynthesis) return;
+    try {
+      window.speechSynthesis.cancel();
+      var clean = cleanTextForSpeech(rawText);
+      if (!clean) return;
+      var utterance = new SpeechSynthesisUtterance(clean);
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
+      utterance.lang = (navigator && navigator.language) || "en-US";
+
+      var voices = window.speechSynthesis.getVoices();
+      if (voices && voices.length > 0) {
+        var preferredVoice = voices.find(function (v) {
+          var n = v.name || "";
+          var l = v.lang || "";
+          return (l.indexOf("en") === 0 || l === utterance.lang) && (n.indexOf("Natural") !== -1 || n.indexOf("Google") !== -1 || n.indexOf("Samantha") !== -1);
+        }) || voices.find(function (v) { return (v.lang || "").indexOf("en") === 0; }) || voices[0];
+        if (preferredVoice) utterance.voice = preferredVoice;
+      }
+
+      window.speechSynthesis.speak(utterance);
+    } catch (err) {
+      console.warn("speechSynthesis error:", err);
+    }
+  }
+
+  function updateTtsButtonUI() {
+    if (!ttsToggle) return;
+    ttsToggle.classList.toggle("active", spokenRepliesEnabled);
+    ttsToggle.title = spokenRepliesEnabled ? "Mute spoken replies" : "Toggle spoken replies";
+    try {
+      sessionStorage.setItem("aiChatSpokenReplies_" + SHOP, spokenRepliesEnabled ? "1" : "0");
+    } catch (e) {}
+  }
+
+  if (ttsToggle) {
+    updateTtsButtonUI();
+    ttsToggle.addEventListener("click", function () {
+      spokenRepliesEnabled = !spokenRepliesEnabled;
+      updateTtsButtonUI();
+      if (spokenRepliesEnabled) {
+        var botBubbles = conversation.querySelectorAll(".bubble.bot:not(.typing)");
+        if (botBubbles && botBubbles.length > 0) {
+          var lastBubble = botBubbles[botBubbles.length - 1];
+          speakText(lastBubble.textContent || lastBubble.innerText || "");
+        } else {
+          speakText("Spoken replies are enabled.");
+        }
+      } else {
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+      }
+    });
+  }
+
+  function handleChatResponse(data, opts) {
+    opts = opts || {};
+    if (data.reply) {
+      addBubble(data.reply, "bot");
+      if (opts.fromVoice || spokenRepliesEnabled) {
+        speakText(data.reply);
+      }
+    }
+    if (Array.isArray(data.products) && data.products.length > 0) addProductRow(data.products);
     if (Array.isArray(data.orders) && data.orders.length > 0) addOrderPicker(data.orders);
     if (data.status === "otp_required") addOtpPrompt(data.otp, data.amount, data.currency, data.payment_method);
     if (data.needs_credentials_form) addPaymentForm(data.total, data.currency);
@@ -3301,36 +3278,8 @@ WIDGET_JS = r"""
     }
   }
 
-  if (imgUploadBtn && imgFileInput) {
-    imgUploadBtn.addEventListener("click", function () { imgFileInput.click(); });
-    imgFileInput.addEventListener("change", function (e) {
-      var file = e.target.files && e.target.files[0];
-      if (!file) return;
-      var reader = new FileReader();
-      reader.onload = function (evt) {
-        pendingImageData = evt.target.result;
-        if (imgPreviewThumb) imgPreviewThumb.src = pendingImageData;
-        if (imgPreviewChip) imgPreviewChip.style.display = "flex";
-        if (input) input.placeholder = "Search matching this photo or press send...";
-        micBtn.classList.add("has-text");
-      };
-      reader.readAsDataURL(file);
-    });
-  }
-  if (imgPreviewRemove) {
-    imgPreviewRemove.addEventListener("click", function () {
-      pendingImageData = null;
-      if (imgFileInput) imgFileInput.value = "";
-      if (imgPreviewChip) imgPreviewChip.style.display = "none";
-      if (input) input.placeholder = "Ask, upload photo, build outfit.....";
-      if (input && !input.value.trim()) micBtn.classList.remove("has-text");
-    });
-  }
-
   var QUICK_ACTIONS = [
     { icon: "📦", label: "Show all my orders", command: "Show all my orders" },
-    { icon: "🎯", label: "Goal cart builder", command: "Build me a complete gym outfit under $100" },
-    { icon: "📸", label: "Visual search", command: "Find products matching a photo" },
     { icon: "🔔", label: "Restock alerts", command: "What restock alerts do I have?" },
     { icon: "🚚", label: "Track an order", command: "Track order" },
     { icon: "💳", label: "Checkout", command: "checkout" },
@@ -3485,25 +3434,12 @@ WIDGET_JS = r"""
     });
   }
 
-  function sendMessage(text) {
+  function sendMessage(text, isVoice) {
     text = (text || "").trim();
-    var currentImg = pendingImageData;
-    pendingImageData = null;
-    if (imgFileInput) imgFileInput.value = "";
-    if (imgPreviewChip) imgPreviewChip.style.display = "none";
-    if (input) input.placeholder = "Ask, upload photo, build outfit.....";
-
-    if (!text && !currentImg) return;
-    if (!text && currentImg) text = "Find products matching this photo";
+    if (!text) return;
 
     syncCustomerSession();
-    var userEl = addBubble(text, "user");
-    if (currentImg) {
-      var imgEl = document.createElement("img");
-      imgEl.className = "user-thumb";
-      imgEl.src = currentImg;
-      userEl.insertBefore(imgEl, userEl.firstChild);
-    }
+    addBubble(text, "user");
     input.value = "";
     micBtn.classList.remove("has-text");
 
@@ -3526,15 +3462,14 @@ WIDGET_JS = r"""
           customer_email: customerEmail,
           customer_name: customerName,
           visitor_id: VISITOR_ID,
-          cart_data: cartPayload || lastKnownCart,
-          image_data: currentImg
+          cart_data: cartPayload || lastKnownCart
         })
       });
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
         typingEl.remove();
-        handleChatResponse(data);
+        handleChatResponse(data, { fromVoice: !!isVoice });
       })
       .catch(function () {
         typingEl.remove();
@@ -3606,7 +3541,10 @@ WIDGET_JS = r"""
     };
     recognizer.onresult = function (event) {
       var transcript = event.results[0][0].transcript;
-      if (transcript) sendMessage(transcript);
+      if (transcript) {
+        input.value = transcript;
+        sendMessage(transcript, true);
+      }
     };
     recognizer.onerror = function () {
       isListening = false;
@@ -3616,7 +3554,7 @@ WIDGET_JS = r"""
 
     micBtn.addEventListener("click", function () {
       if (input.value.trim().length > 0) {
-        sendMessage(input.value);
+        sendMessage(input.value, false);
         return;
       }
       if (isListening) recognizer.stop();
@@ -3624,7 +3562,7 @@ WIDGET_JS = r"""
     });
   } else {
     micBtn.addEventListener("click", function () {
-      if (input.value.trim().length > 0) sendMessage(input.value);
+      if (input.value.trim().length > 0) sendMessage(input.value, false);
     });
   }
 

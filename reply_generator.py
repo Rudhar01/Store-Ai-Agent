@@ -216,19 +216,6 @@ def generate_reply(
             "If status is 'email_required', inform them the product is out of stock and warmly ask for their email address so we can alert them the second it arrives. "
             "If status is 'alert_subscribed', confirm cheerfully that they are subscribed and will receive an email as soon as fresh stock arrives."
         )
-    elif action_name == "search_by_image":
-        extra_clause = (
-            " For visual search: if direct_match is true, enthusiastically celebrate finding the exact product from the shopper's photo, "
-            "mention its name and price, and invite them to add it to their cart. "
-            "If direct_match is false but results are available, explicitly tell the user that the exact product from their photo is not available in our store, "
-            "and warmly introduce the similar products found using the embedding model. "
-            "If results are empty or status is 'no_products_available', directly and clearly tell the user that the product in their photo is not available and no similar products are available at this store."
-        )
-    elif action_name == "build_goal_bundle":
-        extra_clause = (
-            " Present the curated multi-item look/bundle breakdown with items, total price, and budget comparison clearly, "
-            "and invite them to add the complete look to their cart with 1 click."
-        )
 
     system_prompt = (
         f"You are a friendly Shopify store assistant. Reply ONLY in {language_name} "

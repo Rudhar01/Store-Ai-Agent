@@ -667,82 +667,32 @@ async def run_tests():
     print("PASS: send_restock_notification_email verified with responsive HTML template.")
 
     print("\n==================================================")
-    print("  TEST 14: MULTIMODAL VISUAL SEARCH DISCOVERY")
+    print("  TEST 14: VERIFY REMOVAL OF VISUAL SEARCH & GOAL CART BUILDER")
     print("==================================================")
-    mock_catalog = [
-        {"id": 101, "title": "White Minimalist Leather Sneakers", "variants": [{"id": 1001, "price": "85.00"}], "image": {"src": "https://img.com/sneakers.jpg"}, "handle": "white-sneakers", "product_type": "Shoes", "tags": "sneakers casual white"},
-        {"id": 102, "title": "Navy Blue Athletic Running Shoes", "variants": [{"id": 1002, "price": "110.00"}], "image": {"src": "https://img.com/running.jpg"}, "handle": "running-shoes", "product_type": "Shoes", "tags": "shoes athletic navy running"},
-        {"id": 103, "title": "Floral Summer Midi Dress", "variants": [{"id": 1003, "price": "65.00"}], "image": {"src": "https://img.com/dress.jpg"}, "handle": "floral-dress", "product_type": "Dresses", "tags": "dress floral summer midi"},
-    ]
-    async def mock_vis_get(s, path, params=None):
-        if "products.json" in path:
-            return SimpleNamespace(status_code=200, json=lambda: {"products": mock_catalog}, text="")
-        return SimpleNamespace(status_code=404, json=lambda: {}, text="")
-    shopify_actions._get = mock_vis_get
+    assert "visual_search.search_by_image" not in shopify_actions.ACTION_MAP, "visual_search.search_by_image should not be in ACTION_MAP"
+    assert "goal_cart_builder.build_goal_bundle" not in shopify_actions.ACTION_MAP, "goal_cart_builder.build_goal_bundle should not be in ACTION_MAP"
 
-    # 1. Direct / exact match
-    vis_exact = await shopify_actions.dispatch(
-        "visual_search", "search_by_image", store,
-        {"exact_product_name": "White Minimalist Leather Sneakers"},
-        session_id=session_id
-    )
-    assert vis_exact["status"] == "exact_match_found", f"Expected exact_match_found, got {vis_exact.get('status')}"
-    assert vis_exact["direct_match"] is True
-    assert len(vis_exact["results"]) == 1
-    assert "White Minimalist Leather Sneakers" in vis_exact["results"][0]["name"]
-    print("PASS: Exact match correctly identified catalog item directly.")
-
-    # 2. Exact item unavailable -> embedding model recommends similar products
-    vis_similar = await shopify_actions.dispatch(
-        "visual_search", "search_by_image", store,
-        {"category": "running shoes", "color": "orange", "style": "athletic runner"},
-        session_id=session_id
-    )
-    assert vis_similar["status"] == "similar_products_found", f"Expected similar_products_found, got {vis_similar.get('status')}"
-    assert vis_similar["direct_match"] is False
-    assert len(vis_similar["results"]) > 0
-    assert any("Running Shoes" in r["name"] for r in vis_similar["results"])
-    assert "not currently available" in vis_similar["message"] or "similar products" in vis_similar["message"]
-    print(f"PASS: Exact item unavailable -> embedding model recommended {len(vis_similar['results'])} similar styles.")
-
-    # 3. Completely unrelated item -> directly informs user no such product is available
-    vis_none = await shopify_actions.dispatch(
-        "visual_search", "search_by_image", store,
-        {"category": "diamond necklace", "color": "gold", "style": "luxury jewelry"},
-        session_id=session_id
-    )
-    assert vis_none["status"] == "no_products_available", f"Expected no_products_available, got {vis_none.get('status')}"
-    assert vis_none["direct_match"] is False
-    assert len(vis_none["results"]) == 0
-    assert "no similar products are available at this store" in vis_none["message"].lower() or "not available" in vis_none["message"].lower()
-    print("PASS: Unmatched item with no catalog similarity directly informed shopper that no such product is available.")
+    # Verify dispatch cleanly rejects these intents
+    vis_res = await shopify_actions.dispatch("visual_search", "search_by_image", store, {}, session_id=session_id)
+    assert "error" in vis_res, "Expected error when dispatching visual_search"
+    goal_res = await shopify_actions.dispatch("goal_cart_builder", "build_goal_bundle", store, {}, session_id=session_id)
+    assert "error" in goal_res, "Expected error when dispatching goal_cart_builder"
+    print("PASS: Visual Search and Goal Cart Builder are completely and cleanly removed.")
 
     print("\n==================================================")
-    print("  TEST 15: GOAL-BASED MULTI-ITEM CART BUILDER")
+    print("  TEST 15: SIMULTANEOUS VOICE TEXT+SPEECH & SPOKEN REPLIES TOGGLE")
     print("==================================================")
-    mock_outfit_catalog = [
-        {"id": 201, "title": "Performance Dry-Fit Gym T-Shirt", "product_type": "Shirt", "tags": "active wear gym t-shirt dry fit", "variants": [{"id": 2001, "price": "30.00"}], "image": {"src": "https://img.com/gym-tee.jpg"}},
-        {"id": 202, "title": "Breathable Training Shorts with Liner", "product_type": "Shorts", "tags": "training shorts gym athletic", "variants": [{"id": 2002, "price": "40.00"}], "image": {"src": "https://img.com/gym-shorts.jpg"}},
-        {"id": 203, "title": "Insulated Stainless Steel Gym Shaker Bottle", "product_type": "Accessories", "tags": "bottle shaker gym workout accessory", "variants": [{"id": 2003, "price": "18.00"}], "image": {"src": "https://img.com/bottle.jpg"}},
-    ]
-    async def mock_goal_get(s, path, params=None):
-        if "products.json" in path:
-            return SimpleNamespace(status_code=200, json=lambda: {"products": mock_outfit_catalog}, text="")
-        return SimpleNamespace(status_code=404, json=lambda: {}, text="")
-    shopify_actions._get = mock_goal_get
-
-    goal_res = await shopify_actions.dispatch(
-        "goal_cart_builder", "build_goal_bundle", store,
-        {"goal_or_occasion": "Build me a complete gym outfit under $100", "budget": "100"},
-        session_id=session_id
-    )
-    assert goal_res["status"] == "bundle_assembled"
-    assert goal_res["goal"] == "gym"
-    assert len(goal_res["bundle"]) >= 2
-    assert float(goal_res["total_bundle_price"]) <= 100.0, f"Total {goal_res['total_bundle_price']} exceeded budget $100"
-    assert goal_res.get("widget_action", {}).get("type") == "cart_add_all"
-    assert len(goal_res["widget_action"]["items"]) >= 2
-    print(f"PASS: Goal Cart Builder assembled coordinated look ({len(goal_res['bundle'])} items, Total: ${goal_res['total_bundle_price']}) within budget.")
+    # Fetch widget script and verify client-side voice features
+    widget_code = chatbot_widget.WIDGET_JS
+    assert "SpeechRecognition" in widget_code, "Widget must include SpeechRecognition for voice input"
+    assert "speechSynthesis" in widget_code, "Widget must include speechSynthesis for voice output"
+    assert "speakText" in widget_code, "Widget must include speakText function"
+    assert "cleanTextForSpeech" in widget_code, "Widget must clean markdown from text before speaking"
+    assert "spokenRepliesEnabled" in widget_code, "Widget must track spokenRepliesEnabled state"
+    assert "ttsToggle" in widget_code, "Widget must bind to ttsToggle button"
+    assert "sendMessage(transcript, true)" in widget_code, "Voice input must pass isVoice=true to speak reply simultaneously"
+    assert "fromVoice || spokenRepliesEnabled" in widget_code, "Reply must be spoken if fromVoice or spokenRepliesEnabled"
+    print("PASS: Widget includes simultaneous voice text+speech response and interactive spoken replies toggle.")
 
     print("\n==================================================")
     print("  ALL 15 AGENT CAPABILITY TESTS PASSED WITH 100% SUCCESS!")
