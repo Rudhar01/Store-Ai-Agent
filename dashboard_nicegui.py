@@ -74,8 +74,6 @@ SHOPIFY_API_KEY = os.environ.get("SHOPIFY_API_KEY", "")
 NAV_ITEMS = [
     ("Dashboard", "Dashboard", "home"),
     ("analytics", "Analytics", "bar_chart"),
-    ("customers", "Customers", "people"),
-    ("store", "Store Information", "storefront"),
     ("agent", "AI Agent", "smart_toy"),
     ("features", "Features", "grid_view"),
     ("appearance", "Appearance", "palette"),
@@ -235,7 +233,7 @@ def _shopify_nav_menu():
         <meta name="shopify-api-key" content="{api_key}">
         <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
         <style>
-            ui-nav-menu {{ display: none !important; }}
+            ui-nav-menu { display: none !important; visibility: hidden !important; height: 0 !important; overflow: hidden !important; }
         </style>
     ''')
 
@@ -257,7 +255,7 @@ def _shopify_nav_menu():
         links.append(f'<a href="{href}">{label}</a>')
 
     links_html = "".join(links)
-    ui.html(f'<ui-nav-menu style="display:none !important;" hidden>{links_html}</ui-nav-menu>')
+    ui.html(f'<ui-nav-menu style="display:none !important;visibility:hidden !important;height:0 !important;overflow:hidden !important;" hidden>{links_html}</ui-nav-menu>')
 
     # 3. Robust JavaScript backup for older or newer App Bridge v4 / v3 instances
     # Some Shopify Admin UI wrappers listen on NavigationMenu or custom events
@@ -1428,7 +1426,6 @@ def dashboard_page():
             quick = [
                 ("palette", "Customize Appearance", "Change colors & icon", "appearance"),
                 ("menu_book", "Manage FAQs", "Add or edit knowledge base", "knowledge"),
-                ("storefront", "Store Information", "Update your store details", "store"),
                 ("smart_toy", "AI Agent Settings", "Name, instructions & status", "agent"),
                 ("bar_chart", "Analytics", "Chat usage, products & sales", "analytics"),
             ]
@@ -2117,22 +2114,16 @@ def _render_analytics(b: dict, grain: str):
         m = _metric(b, key)
         return m["reason"] if not m["ok"] and m["reason"] else fallback
 
-    searched = _data(b, "product_searches")
     bought = _data(b, "product_purchases")
-    top_search = searched[0] if searched else None
     top_buy = bought[0] if bought else None
     period = ANALYTICS_RANGES.get(b["days"], "")
 
-    with ui.element("div").classes("w-full grid grid-cols-2 md:grid-cols-4 gap-3"):
+    with ui.element("div").classes("w-full grid grid-cols-2 md:grid-cols-3 gap-3"):
         _kpi_card("receipt_long", "Number of orders", _fmt(k["orders"]) if k["orders"] is not None else None,
                   period, _why("sales_daily", "Order data not connected"), accent_color="#3B82F6")
         _kpi_card("payments", "Revenue",
                   (f"{cur} " if cur else "") + _fmt(k["revenue"], 2) if k["revenue"] is not None else None,
                   period, _why("sales_daily", "Sales data not connected"), accent_color="#10B981")
-        _kpi_card("search", "Most searched product", top_search[0] if top_search else None,
-                  f"{_fmt(top_search[1])} searches" if top_search else "",
-                  _why("product_searches", "No product searches yet") if not searched else "No product searches yet",
-                  compact=True, accent_color="#8B5CF6")
         _kpi_card("emoji_events", "Most bought product", top_buy[0] if top_buy else None,
                   f"{_fmt(top_buy[1])} units sold" if top_buy else "",
                   _why("product_purchases", "No purchases yet") if not bought else "No purchases in this period",
@@ -2183,129 +2174,15 @@ def _render_analytics(b: dict, grain: str):
                 _trend_chart(_aggregate(series, fields, grain), [(f, *names[f]) for f in fields])
                 _unfiltered_note(usage)
 
-    # ---- Sales trend ----
-    sales = _metric(b, "sales_daily")
-    with _section_card("Sales trend", "show_chart", f"{grain.title()} · {ANALYTICS_RANGES.get(b['days'], '')}", icon_color="#10B981"):
-        if not sales["ok"]:
-            _unavailable_state(sales["reason"])
-        else:
-            series = _to_series(sales["data"], b["days"])
-            fields = [f for f in ("revenue", "orders") if f in sales["data"]["fields"]]
-            if not fields or not any(r[f] for r in series for f in fields):
-                _empty_state("No sales in this period", "Sales will appear here once orders are recorded.")
-            else:
-                rows = _aggregate(series, fields, grain)
-                option = {
-                    "grid": {"left": 44, "right": 44 if len(fields) > 1 else 16, "top": 32, "bottom": 24},
-                    "legend": {
-                        "top": 0,
-                        "textStyle": {"fontSize": 11, "color": "#4B5563"},
-                        "itemWidth": 12, "itemHeight": 12, "itemGap": 14,
-                    },
-                    "xAxis": {
-                        "type": "category", "data": [r["label"] for r in rows],
-                        "axisLabel": {"fontSize": 10, "color": "#6B7280"},
-                        "axisLine": {"lineStyle": {"color": "#E5E7EB"}},
-                        "axisTick": {"show": False},
-                    },
-                    "yAxis": [
-                        {
-                            "type": "value",
-                            "axisLabel": {"fontSize": 10, "color": "#6B7280"},
-                            "splitLine": {"lineStyle": {"color": "#F3F4F6", "type": "dashed"}},
-                        }
-                    ],
-                    "series": [],
-                    "tooltip": {
-                        "trigger": "axis",
-                        "backgroundColor": "rgba(17, 24, 39, 0.92)",
-                        "borderColor": "#374151",
-                        "textStyle": {"color": "#F9FAFB", "fontSize": 11},
-                        "extraCssText": "box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); border-radius: 8px;",
-                    },
-                }
-                if "revenue" in fields:
-                    option["series"].append(
-                        _line_series("Revenue" + (f" ({cur})" if cur else ""),
-                                     [r["revenue"] for r in rows], "#10B981", area=True)
-                    )
-                if "orders" in fields:
-                    if "revenue" in fields:
-                        option["yAxis"].append({
-                            "type": "value", "minInterval": 1,
-                            "axisLabel": {"fontSize": 10, "color": "#6B7280"},
-                            "splitLine": {"show": False},
-                        })
-                    option["series"].append({
-                        "name": "Orders",
-                        "type": "bar",
-                        "barMaxWidth": 18,
-                        "yAxisIndex": 1 if "revenue" in fields else 0,
-                        "data": [r["orders"] for r in rows],
-                        "itemStyle": {
-                            "color": _vertical_bar_gradient("#3B82F6"),
-                            "borderRadius": [4, 4, 0, 0],
-                        },
-                    })
-                ui.echart(option).classes("w-full").style("height:240px;")
-                _unfiltered_note(sales)
-
     # ---- Products ----
     _ranked_card(b, "product_views", "Most-viewed products", "visibility",
                  "No product views recorded in this period", "Views are counted when shoppers open a product.", "#3B82F6")
-    _ranked_card(b, "product_searches", "Top product searches", "search",
-                 "No product searches recorded in this period", "Searches made through the assistant appear here.", "#8B5CF6")
     _ranked_card(b, "product_purchases", "Most-purchased products", "shopping_bag",
                  "No purchases recorded in this period", "Purchased products will be ranked here.", "#10B981")
-    _ranked_card(b, "product_cart_adds", "Most added to cart via the assistant", "add_shopping_cart",
-                 "No assistant cart adds in this period", "Products shoppers add to cart in chat are ranked here.", "#F59E0B")
-
-    # ---- Category popularity ----
-    cat = _metric(b, "category_popularity")
-    with _section_card("Product popularity by category", "category", icon_color="#EC4899"):
-        if not cat["ok"]:
-            _unavailable_state(cat["reason"])
-        elif not cat["data"]:
-            _empty_state("No category activity recorded in this period",
-                         "Category interest appears once products are viewed, searched or bought.")
-        else:
-            ui.echart({
-                "tooltip": {
-                    "trigger": "item",
-                    "formatter": "{b}: <b>{c}</b> ({d}%)",
-                    "backgroundColor": "rgba(17, 24, 39, 0.92)",
-                    "borderColor": "#374151",
-                    "textStyle": {"color": "#F9FAFB", "fontSize": 11},
-                    "extraCssText": "box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); border-radius: 8px;",
-                },
-                "legend": {
-                    "bottom": 0,
-                    "textStyle": {"fontSize": 11, "color": "#4B5563"},
-                    "itemWidth": 12, "itemHeight": 12, "itemGap": 12,
-                },
-                "series": [{
-                    "type": "pie",
-                    "radius": ["40%", "72%"],
-                    "center": ["50%", "45%"],
-                    "data": [{"value": c, "name": n} for n, c in cat["data"]],
-                    "label": {"show": False},
-                    "emphasis": {
-                        "scale": True,
-                        "scaleSize": 6,
-                        "itemStyle": {
-                            "shadowBlur": 10,
-                            "shadowOffsetX": 0,
-                            "shadowColor": "rgba(0, 0, 0, 0.2)",
-                        },
-                    },
-                    "itemStyle": {"borderRadius": 6, "borderColor": "#fff", "borderWidth": 2},
-                }],
-                "color": _CHART_COLORS,
-            }).classes("w-full").style("height:280px;")
-            _unfiltered_note(cat)
 
     # ---- Data coverage (transparency) ----
-    missing = [_METRIC_LABELS[m] for m, r in b["metrics"].items() if not r["ok"]]
+    visible_metric_keys = {"chat_summary", "chat_usage_daily", "product_views", "product_purchases"}
+    missing = [_METRIC_LABELS[m] for m, r in b["metrics"].items() if m in visible_metric_keys and not r["ok"]]
     if missing:
         ui.label("Not available yet (no data source connected or loading failed): " + ", ".join(missing)).classes(
             "text-[11px] text-gray-400"
@@ -2382,225 +2259,16 @@ async def analytics_page():
 
 
 # --------------------------------------------------------------------
-# CUSTOMERS & CHAT PROFILES
+# REMOVED TABS (Redirect to Dashboard)
 # --------------------------------------------------------------------
 @ui.page("/dashboard/customers")
-async def customers_page():
-    store = _require_store()
-    if not store:
-        return
-    cfg = repo.ensure_customization(store["$id"])
-    shop = store.get("shop_domain") or ""
-
-    import customer_profiles
-
-    content = _layout("customers", store, cfg)
-    with content:
-        _page_header("Customers & Chat Transcripts", "Shoppers interacting with your AI assistant, order history, and full chat logs.")
-
-        profiles = await customer_profiles.list_customer_profiles(shop, limit=200)
-
-        total_custs = len(profiles)
-        total_orders = sum(int(p.get("order_count") or p.get("orders_count") or 0) for p in profiles)
-        total_chats = sum(int(p.get("total_chats") or (len(p.get("chat_history") or []) if isinstance(p.get("chat_history"), list) else 0)) for p in profiles)
-
-        with ui.row().classes("w-full grid grid-cols-1 md:grid-cols-3 gap-4 -mt-1"):
-            for title, val, icon in [
-                ("Total Customers", str(total_custs), "people"),
-                ("Customer Orders", str(total_orders), "shopping_bag"),
-                ("Chat Messages Logged", str(total_chats), "chat"),
-            ]:
-                with ui.card().classes(CARD_CLASSES + " p-5 gap-1"):
-                    with ui.row().classes("items-center justify-between w-full"):
-                        ui.label(title).classes("text-xs font-semibold text-gray-500 uppercase tracking-wide")
-                        ui.icon(icon, size="20px").style("color:#6B7280;")
-                    ui.label(val).classes("text-2xl font-bold text-gray-900")
-
-        # Detail modal dialog
-        detail_dialog = ui.dialog().props("maximized-on-mobile")
-        dialog_container = ui.element("div")
-
-        def open_details(profile: dict):
-            detail_dialog.clear()
-            with detail_dialog, ui.card().classes("w-full max-w-4xl p-6 gap-6 bg-white rounded-2xl shadow-xl").style("max-height:85vh;overflow-y:auto;"):
-                with ui.row().classes("w-full items-center justify-between border-b pb-4"):
-                    with ui.row().classes("items-center gap-3"):
-                        with ui.element("div").classes("w-10 h-10 rounded-full flex items-center justify-center").style("background:#2B2B2B;color:white;font-weight:bold;"):
-                            ui.label((profile.get("name") or profile.get("first_name") or profile.get("email") or "C")[:1].upper())
-                        with ui.column().classes("gap-0"):
-                            ui.label(profile.get("name") or f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip() or "Shopper").classes("text-lg font-bold text-gray-900")
-                            ui.label(profile.get("email") or "No email provided").classes("text-xs text-gray-500")
-                    ui.button(icon="close", on_click=detail_dialog.close).props("flat round dense")
-
-                # Personal details row
-                with ui.row().classes("w-full grid grid-cols-2 md:grid-cols-4 gap-4 p-4 rounded-xl bg-gray-50 border border-gray-100"):
-                    with ui.column().classes("gap-0.5"):
-                        ui.label("CUSTOMER ID").classes("text-[10px] font-bold text-gray-400 uppercase tracking-wider")
-                        ui.label(str(profile.get("customer_id") or "N/A")).classes("text-xs font-semibold text-gray-800")
-                    with ui.column().classes("gap-0.5"):
-                        ui.label("PHONE").classes("text-[10px] font-bold text-gray-400 uppercase tracking-wider")
-                        ui.label(str(profile.get("phone") or "N/A")).classes("text-xs font-semibold text-gray-800")
-                    with ui.column().classes("gap-0.5"):
-                        ui.label("ORDERS / SPENT").classes("text-[10px] font-bold text-gray-400 uppercase tracking-wider")
-                        ui.label(f"{profile.get('order_count', 0)} orders • {profile.get('total_spent') or '0.00'}").classes("text-xs font-semibold text-gray-800")
-                    with ui.column().classes("gap-0.5"):
-                        ui.label("ADDRESS").classes("text-[10px] font-bold text-gray-400 uppercase tracking-wider")
-                        ui.label(str(profile.get("addresses") or "N/A")[:30]).classes("text-xs font-semibold text-gray-800")
-
-                # Orders section
-                orders_list = profile.get("recent_orders") or profile.get("orders_data") or []
-                if isinstance(orders_list, str):
-                    try:
-                        orders_list = json.loads(orders_list)
-                    except Exception:
-                        orders_list = []
-
-                ui.label(f"Orders ({len(orders_list)})").classes("text-base font-bold text-gray-900 -mb-2")
-                if orders_list:
-                    with ui.column().classes("w-full gap-2"):
-                        for ord_info in orders_list[:10]:
-                            with ui.row().classes("w-full items-center justify-between p-3 rounded-lg border border-gray-100 bg-white hover:bg-gray-50"):
-                                with ui.row().classes("items-center gap-3"):
-                                    ui.label(f"#{ord_info.get('order_number')}").classes("text-xs font-bold text-gray-900")
-                                    ui.label(str(ord_info.get('created_at', ''))[:10]).classes("text-xs text-gray-400")
-                                    f_st = ord_info.get("fulfillment_status") or "unfulfilled"
-                                    ui.badge(f_st).props(f"color={'green' if f_st=='delivered' else 'orange' if f_st=='shipped' else 'grey'}").classes("text-[10px]")
-                                with ui.row().classes("items-center gap-3"):
-                                    ui.label(f"{ord_info.get('total_price', '0.00')} {ord_info.get('currency', 'INR')}").classes("text-xs font-semibold text-gray-800")
-                                    trks = ord_info.get("tracking") or []
-                                    if trks and trks[0].get("url"):
-                                        ui.link("Track", trks[0]["url"], new_tab=True).classes("text-xs text-blue-600 font-semibold")
-                else:
-                    ui.label("No orders on file yet.").classes("text-xs text-gray-400 italic")
-
-                # Chat transcript section
-                chat_turns = profile.get("chat_history") or []
-                if isinstance(chat_turns, str):
-                    try:
-                        chat_turns = json.loads(chat_turns)
-                    except Exception:
-                        chat_turns = []
-
-                ui.label(f"Chat Transcript ({len(chat_turns)} turns)").classes("text-base font-bold text-gray-900 -mb-2")
-                if chat_turns:
-                    with ui.column().classes("w-full gap-3 p-4 rounded-xl bg-gray-50 border border-gray-100").style("max-height:350px;overflow-y:auto;"):
-                        for turn in chat_turns:
-                            is_user = turn.get("role") == "user"
-                            with ui.row().classes(f"w-full {'justify-end' if is_user else 'justify-start'}"):
-                                with ui.column().classes(f"max-w-[80%] p-3 rounded-2xl {'bg-gray-900 text-white' if is_user else 'bg-white border text-gray-800 shadow-sm'}"):
-                                    ui.label(turn.get("message", "")).classes("text-xs")
-                                    if turn.get("time"):
-                                        ui.label(str(turn.get("time"))).classes(f"text-[9px] {'text-gray-400' if is_user else 'text-gray-400'} mt-1 self-end")
-                else:
-                    ui.label("No chat messages recorded yet.").classes("text-xs text-gray-400 italic")
-
-            detail_dialog.open()
-
-        # Customer List Table Card
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-4"):
-            search_input = ui.input(placeholder="Search by name, email, or customer ID...").classes("w-full md:w-96").props("dense outlined")
-            search_input.add_slot("prepend", '<i class="q-icon material-icons">search</i>')
-
-            table_container = ui.column().classes("w-full gap-2")
-
-            def render_table(query=""):
-                table_container.clear()
-                q = (query or "").strip().lower()
-                filtered = [
-                    p for p in profiles
-                    if not q or (
-                        q in str(p.get("name", "")).lower()
-                        or q in str(p.get("email", "")).lower()
-                        or q in str(p.get("customer_id", "")).lower()
-                    )
-                ]
-
-                if not filtered:
-                    with table_container:
-                        ui.label("No customer records found yet. Customers will appear here automatically when they browse or chat on your store.").classes("text-xs text-gray-400 italic py-6 text-center w-full")
-                    return
-
-                with table_container:
-                    # Header row
-                    with ui.row().classes("w-full items-center justify-between px-3 py-2 text-[11px] font-bold text-gray-400 uppercase tracking-wider border-b"):
-                        ui.label("Customer").classes("w-1/4")
-                        ui.label("Contact").classes("w-1/4")
-                        ui.label("Orders / Spent").classes("w-1/6")
-                        ui.label("Chats / Last Active").classes("w-1/6")
-                        ui.label("Action").classes("w-16 text-right")
-
-                    for p in filtered:
-                        with ui.row().classes("w-full items-center justify-between px-3 py-3 rounded-xl border border-gray-100 hover:bg-gray-50 transition-colors"):
-                            # Name & Avatar
-                            with ui.row().classes("w-1/4 items-center gap-3"):
-                                with ui.element("div").classes("w-8 h-8 rounded-full flex items-center justify-center shrink-0").style("background:#F3F4F6;color:#374151;font-weight:600;font-size:12px;"):
-                                    ui.label((p.get("name") or p.get("first_name") or p.get("email") or "C")[:1].upper())
-                                with ui.column().classes("gap-0"):
-                                    ui.label(p.get("name") or f"{p.get('first_name', '')} {p.get('last_name', '')}".strip() or "Customer").classes("text-xs font-semibold text-gray-900")
-                                    if p.get("customer_id"):
-                                        ui.label(f"ID: {p.get('customer_id')}").classes("text-[10px] text-gray-400")
-
-                            # Contact
-                            with ui.column().classes("w-1/4 gap-0"):
-                                ui.label(p.get("email") or "—").classes("text-xs text-gray-700 truncate")
-                                if p.get("phone"):
-                                    ui.label(p.get("phone")).classes("text-[10px] text-gray-400")
-
-                            # Orders
-                            with ui.column().classes("w-1/6 gap-0"):
-                                ui.label(f"{p.get('order_count', 0)} orders").classes("text-xs font-semibold text-gray-800")
-                                ui.label(str(p.get("total_spent") or "0.00")).classes("text-[10px] text-gray-500")
-
-                            # Chat activity
-                            with ui.column().classes("w-1/6 gap-0"):
-                                ui.label(f"{p.get('total_chats', 0)} messages").classes("text-xs font-semibold text-gray-800")
-                                l_seen = p.get("last_seen")
-                                if l_seen:
-                                    try:
-                                        ui.label(time.strftime("%b %d, %H:%M", time.localtime(int(l_seen)))).classes("text-[10px] text-gray-400")
-                                    except Exception:
-                                        pass
-
-                            # Action button
-                            with ui.row().classes("w-16 justify-end"):
-                                ui.button("View", on_click=lambda prof=p: open_details(prof)).props("no-caps flat dense").classes("text-xs font-semibold text-blue-600 hover:bg-blue-50 px-2 py-1 rounded-lg")
-
-            search_input.on("update:model-value", lambda e: render_table(e.args))
-            render_table()
+def customers_page():
+    _goto("/dashboard/Dashboard")
 
 
-# --------------------------------------------------------------------
-# STORE INFORMATION
-# --------------------------------------------------------------------
 @ui.page("/dashboard/store")
 def store_info_page():
-    store = _require_store()
-    if not store:
-        return
-    cfg = repo.ensure_customization(store["$id"])
-    info = repo.ensure_store_info(store["$id"])
-
-    content = _layout("store", store, cfg)
-    with content:
-        _page_header("Store Information", "Basic details about your store.")
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
-            business = ui.input("Business name", value=info.get("business_name", "")).classes("w-full")
-            support = ui.input("Support email", value=info.get("support_email", "")).classes("w-full")
-            timezone = ui.input("Timezone", value=info.get("timezone", "UTC")).classes("w-full")
-            saved_label = ui.label("").classes("text-xs text-gray-500 font-medium")
-
-            def save():
-                repo.update_store_info(
-                    store["$id"],
-                    business_name=business.value.strip(),
-                    support_email=support.value.strip(),
-                    timezone=timezone.value.strip() or "UTC",
-                )
-                saved_label.text = "Saved ✓"
-
-            ui.button("Save changes", on_click=save).props("no-caps").classes("mt-2").style(
-                f"background:{BRAND};color:white;border-radius:10px;"
-            )
+    _goto("/dashboard/Dashboard")
 
 
 # --------------------------------------------------------------------
