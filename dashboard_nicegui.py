@@ -233,12 +233,24 @@ def _shopify_nav_menu():
         <meta name="shopify-api-key" content="{api_key}">
         <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
         <style>
-            ui-nav-menu {{ display: none !important; visibility: hidden !important; height: 0 !important; overflow: hidden !important; }}
+            ui-nav-menu, ui-nav-menu * {{
+                display: none !important;
+                visibility: hidden !important;
+                height: 0 !important;
+                max-height: 0 !important;
+                overflow: hidden !important;
+                opacity: 0 !important;
+                font-size: 0 !important;
+                line-height: 0 !important;
+            }}
         </style>
     ''')
 
-    # 2. Render official declarative <ui-nav-menu> web-component
-    # Notice: we preserve current query parameters (?shop=..., host=...) on links
+    # 2. Render official declarative <ui-nav-menu> web-component via JavaScript injection
+    # Notice: we preserve current query parameters (?shop=..., host=...) on links.
+    # Note: We do NOT use ui.html() here because NiceGUI's DOMPurify sanitization strips
+    # custom elements like <ui-nav-menu>, causing bare <a> links to render as visible text
+    # above the navigation bar in the dashboard.
     try:
         request = ui.context.client.request
         params = {k: v for k, v in request.query_params.items() if k in ("shop", "host", "embedded", "session", "id_token")}
@@ -246,36 +258,29 @@ def _shopify_nav_menu():
         params = {}
 
     from urllib.parse import urlencode
+    import json
     query_str = f"?{urlencode(params)}" if params else ""
 
     links = []
     for key, label, _ in NAV_ITEMS:
-        # Match routes: key == 'Dashboard' -> /dashboard/Dashboard, others -> /dashboard/{key}
         href = f"/dashboard/{key}{query_str}"
         links.append(f'<a href="{href}">{label}</a>')
 
     links_html = "".join(links)
-    ui.html(f'<ui-nav-menu style="display:none !important;visibility:hidden !important;height:0 !important;overflow:hidden !important;" hidden>{links_html}</ui-nav-menu>')
+    links_html_json = json.dumps(links_html)
 
-    # 3. Robust JavaScript backup for older or newer App Bridge v4 / v3 instances
-    # Some Shopify Admin UI wrappers listen on NavigationMenu or custom events
-    nav_items_js = [
-        {"destination": f"/dashboard/{k}{query_str}", "label": l}
-        for k, l, _ in NAV_ITEMS
-    ]
-    import json
-    items_json = json.dumps(nav_items_js)
+    # 3. Robust JavaScript creation for App Bridge
+    # Appends <ui-nav-menu> directly to document.body outside NiceGUI's Vue component tree.
     ui.run_javascript(f'''
         (function() {{
             try {{
-                var items = {items_json};
-                // If shopify or app-bridge global is present
-                if (window.shopify && window.shopify.config) {{
-                    // App Bridge v4 automatically reads <ui-nav-menu>
-                    var menu = document.querySelector('ui-nav-menu');
-                    if (menu && menu.replaceChildren) {{
-                        // elements exist and are attached
-                    }}
+                var menu = document.querySelector('ui-nav-menu');
+                if (!menu) {{
+                    menu = document.createElement('ui-nav-menu');
+                    menu.style.setProperty('display', 'none', 'important');
+                    menu.setAttribute('hidden', 'true');
+                    menu.innerHTML = {links_html_json};
+                    document.body.appendChild(menu);
                 }}
             }} catch(e) {{
                 console.warn("[AppBridge NavMenu]", e);
