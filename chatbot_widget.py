@@ -418,6 +418,48 @@ def _safe_reply(action: str, data: dict, language: str, original_message: str, f
         return fallback
 
 
+_CART_LEAD_IN = re.compile(
+    r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:add\s+to\s+(?:my\s+|the\s+)?cart|add|put|place|insert|buy|get)\s+",
+    re.IGNORECASE,
+)
+_CART_TRAILING = re.compile(
+    r"\s+(?:to|in|into|for)?\s*(?:my|the)?\s*(?:cart|bag|basket)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_add_to_cart(message: str) -> tuple[str, int] | None:
+    msg = (message or "").strip()
+    msg_low = msg.lower()
+    if any(q in msg_low for q in ["how to", "how do i", "can i add", "what did i add", "when will", "why"]):
+        return None
+    has_cart_kw = bool(re.search(r"\b(cart|bag|basket)\b", msg_low))
+    starts_add = bool(re.match(r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:add|put|place|insert)\s+", msg_low))
+    if not (has_cart_kw or starts_add):
+        return None
+    if not re.search(r"\b(add|put|place|insert|buy)\b", msg_low):
+        return None
+
+    qty = 1
+    m_qty = re.search(r"\b(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", msg_low)
+    cleaned = _CART_LEAD_IN.sub("", msg)
+    cleaned = _CART_TRAILING.sub("", cleaned)
+    m_lead_qty = re.match(r"^\s*(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\s+(.+)$", cleaned, re.IGNORECASE)
+    if m_lead_qty:
+        qty = int(m_lead_qty.group(1))
+        cleaned = m_lead_qty.group(2).strip()
+    elif m_qty:
+        m_verb_qty = re.search(r"^(?:can you\s+)?(?:please\s+)?(?:add|put)\s+(\d+)\s+(.+)$", msg_low)
+        if m_verb_qty:
+            qty = int(m_verb_qty.group(1))
+            cleaned = _CART_TRAILING.sub("", m_verb_qty.group(2)).strip()
+
+    cleaned = _LEADING_ARTICLE.sub("", cleaned).strip(" .,!?")
+    if not cleaned or cleaned.lower() in ("to cart", "cart", "it", "this"):
+        return None
+    return cleaned, qty
+
+
 _SEARCH_LEAD_IN = re.compile(
     r"^(?:can you\s+)?(?:please\s+)?(?:show\s+me|find(?:\s+me)?|search(?:\s+for)?|look(?:\s+up|\s+for)?|"
     r"get(?:\s+me)?|i want(?:\s+to\s+see)?|i'm looking for|i am looking for|do you have(?:\s+any|\s+some)?|"
@@ -536,9 +578,13 @@ def _parse_storefront_cart(cart_data: dict | None) -> dict | None:
 
 
 def extract_search_term(message: str) -> str:
-    m = _SEARCH_LEAD_IN.sub("", (message or "").lower().strip())
-    m = _SEARCH_FILLER.sub("", m)
+    m = (message or "").strip()
+    m = _CART_LEAD_IN.sub("", m)
+    m = _SEARCH_LEAD_IN.sub("", m)
+    m = _CART_TRAILING.sub("", m)
+    m = re.sub(r"^\s*(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\s+", "", m, flags=re.IGNORECASE)
     m = _LEADING_ARTICLE.sub("", m)
+    m = _SEARCH_FILLER.sub("", m)
     return re.sub(r"\s+", " ", m).strip(" .,!?")
 
 
@@ -559,11 +605,22 @@ def _product_card(p: dict, store) -> dict:
         price = int(price) if price == int(price) else price
     except (TypeError, ValueError):
         pass
+
+    avail = variant.get("availableForSale")
+    if avail is None:
+        is_managed = (variant.get("inventory_management") or "").lower() == "shopify"
+        policy_continue = (variant.get("inventory_policy") or "").lower() == "continue"
+        qty = variant.get("inventory_quantity")
+        avail = not is_managed or policy_continue or (qty is not None and int(qty) > 0)
+
     card = {
         "id": str(variant.get("id")),
         "name": p.get("title", "Unnamed product"),
+        "title": p.get("title", "Unnamed product"),
         "price": price,
         "image": (p.get("image") or {}).get("src", ""),
+        "available": bool(avail),
+        "in_stock": bool(avail),
     }
     if p.get("handle"):
         card["url"] = f"https://{store.shop_domain}/products/{p['handle']}"
@@ -635,15 +692,38 @@ async def _catalog_search(store, term: str, limit: int = 6) -> list[dict] | None
 
 
 async def _resolve_product(store, text: str):
+    if not text:
+        return None, None
+    wanted = (text or "").strip().lower()
+    wanted_norm = re.sub(r"[^a-z0-9]+", "", wanted)
+
+    # 1. Try finding direct product via _find_store_product first
+    try:
+        prod, variant, in_stock, _ = await shopify_actions._find_store_product(store, text)
+        if prod and variant:
+            card = _product_card(prod, store)
+            card["id"] = str(variant.get("id"))
+            return card, None
+    except Exception as e:
+        print(f"chatbot_widget: _resolve_product _find_store_product error: {e!r}")
+
     found, by_meaning = await _catalog_search_ex(store, text)
     if not found:
         return None, None
-    wanted = (text or "").strip().lower()
+
     for p in found:
-        if p["name"].lower() == wanted:
+        p_name = p.get("name", "").lower()
+        p_norm = re.sub(r"[^a-z0-9]+", "", p_name)
+        if p_name == wanted or p_norm == wanted_norm:
             return p, None
-    if len(found) == 1 and not by_meaning:
+
+    # If first candidate is a match or starts with/contains wanted
+    if found:
+        first_norm = re.sub(r"[^a-z0-9]+", "", found[0].get("name", "").lower())
+        if wanted_norm in first_norm or first_norm in wanted_norm:
+            return found[0], None
         return found[0], None
+
     return None, found
 
 
@@ -699,14 +779,14 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
     if action in {"search_products", "get_recommendations", "recommend_products"} and isinstance(data, dict):
         if not data.get("results"):
             query = entities.get("query") or entities.get("category") or extract_search_term(original_message)
-            if query:
+            if query and action != "search_products":
                 alt = await _catalog_search(store, str(query))
                 if alt:
                     alt = _apply_price_filters(alt, entities)
                     if alt:
                         data["results"] = alt
                         data.pop("error", None)
-            if not data.get("results"):
+            if not data.get("results") and action in {"get_recommendations", "recommend_products"}:
                 try:
                     resp = await shopify_actions._get(store, "products.json", {"status": "active", "limit": 6})
                     if resp.status_code == 200:
@@ -944,6 +1024,13 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
         return result
 
     product, options = await _resolve_product(store, message)
+    if not product and options:
+        product = options[0]
+    if not product:
+        prod, var, in_stk, _ = await shopify_actions._find_store_product(store, message)
+        if prod and var:
+            product = _product_card(prod, store)
+            product["id"] = str(var.get("id"))
     if product:
         quantity = int((pending.get("entities") or {}).get("quantity") or 1)
         result = _add_to_cart_result(product, quantity, language, message)
@@ -1136,7 +1223,22 @@ async def _chat_impl(req: ChatRequest):
     # messages that happen to contain a matching keyword.
     # The LLM handles every other message so complex phrasing is not penalised.
     _msg_lower = message.strip().lower()
-    if _msg_lower in _EXACT_GREETINGS:
+    _m_cart = _is_add_to_cart(message)
+    if _m_cart:
+        item_name, item_qty = _m_cart
+        intent, action = "cart_management", "add_item"
+        entities = {"product_name_or_id": item_name, "quantity": item_qty}
+        language = "en"
+        classification = {
+            "intent": intent,
+            "action": action,
+            "entities": entities,
+            "language": language,
+            "requires_confirmation": False,
+            "message_type": "action",
+            "is_action": True,
+        }
+    elif _msg_lower in _EXACT_GREETINGS:
         intent, action = "general_chat", "assistant_help"
         entities = {}
         language = "en"
@@ -1396,18 +1498,27 @@ async def _chat_impl(req: ChatRequest):
                            language, message, "Sure — which item would you like to add to your cart?", asked=1)
                 _log(req.shop, message, "awaiting_item", intent, action, None, out["reply"])
                 return out
-            product, options = await _resolve_product(store, str(term))
             quantity = int(entities.get("quantity") or 1)
+            product, options = await _resolve_product(store, str(term))
+            if not product and options:
+                product = options[0]
+
+            if not product:
+                prod, var, in_stk, _ = await shopify_actions._find_store_product(store, str(term))
+                if prod and var:
+                    product = _product_card(prod, store)
+                    product["id"] = str(var.get("id"))
+
             if product:
                 result = _add_to_cart_result(product, quantity, language, message)
                 _log(req.shop, message, "done", intent, action, {**entities, "product_name_or_id": product["name"], "quantity": quantity}, result["reply"])
                 return result
-            if options:
-                names = [p["name"] for p in options]
-                out = _ask(key, "await_item", f"Tell the shopper several products match ({', '.join(names)}) and ask which one they mean.",
-                           language, message, f"I found a few matches — did you mean {', '.join(names)}?", asked=1)
-                _log(req.shop, message, "ambiguous", intent, action, entities, out["reply"])
-                return out
+
+            # If item not found anywhere in catalog
+            clean_term = str(term).strip()
+            reply = f"I couldn't find \"{clean_term}\" in our store catalog. Please check the product name or explore our collection."
+            _log(req.shop, message, "not_found", intent, action, entities, reply)
+            return {"status": "done", "reply": reply, "language": language}
 
         if (intent, action) == ("cart_management", "remove_item"):
             term = entities.get("product_name_or_id")

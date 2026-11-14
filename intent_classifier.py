@@ -406,8 +406,55 @@ def _is_cancel_order_query(msg_low: str) -> bool:
     ])
 
 
+def _is_add_to_cart_query(msg_low: str) -> bool:
+    if any(q in msg_low for q in ["how to", "how do i", "can i add", "what did i add", "when will", "why"]):
+        return False
+    has_cart_kw = bool(re.search(r"\b(cart|bag|basket)\b", msg_low))
+    starts_add = bool(re.match(r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:add|put|place|insert)\s+", msg_low))
+    if not (has_cart_kw or starts_add):
+        return False
+    return bool(re.search(r"\b(add|put|place|insert|buy)\b", msg_low))
+
+
+def _extract_cart_product_and_qty(user_message: str) -> tuple[str, int]:
+    msg = (user_message or "").strip()
+    msg_low = msg.lower()
+    qty = 1
+    m_qty = re.search(r"\b(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", msg_low)
+    cleaned = re.sub(
+        r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:add\s+to\s+(?:my\s+|the\s+)?cart|add|put|place|insert|buy|get)\s+",
+        "", msg, flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+(?:to|in|into|for)?\s*(?:my|the)?\s*(?:cart|bag|basket)\s*$", "", cleaned, flags=re.IGNORECASE)
+    m_lead_qty = re.match(r"^\s*(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\s+(.+)$", cleaned, re.IGNORECASE)
+    if m_lead_qty:
+        qty = int(m_lead_qty.group(1))
+        cleaned = m_lead_qty.group(2).strip()
+    elif m_qty:
+        m_verb_qty = re.search(r"^(?:can you\s+)?(?:please\s+)?(?:add|put)\s+(\d+)\s+(.+)$", msg_low)
+        if m_verb_qty:
+            qty = int(m_verb_qty.group(1))
+            cleaned = re.sub(r"\s+(?:to|in|into|for)?\s*(?:my|the)?\s*(?:cart|bag|basket)\s*$", "", m_verb_qty.group(2), flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"^\s*(?:a|an|the)\s+", "", cleaned, flags=re.IGNORECASE).strip(" .,!?")
+    return cleaned, qty
+
+
 def _fallback(confidence: float = 0.0, language: str = "en", user_message: str = "") -> dict:
     msg_low = str(user_message or "").strip().lower()
+    if _is_add_to_cart_query(msg_low):
+        prod, qty = _extract_cart_product_and_qty(user_message)
+        entities = {"product_name_or_id": prod, "quantity": qty}
+        return {
+            "intent": "cart_management",
+            "action": "add_item",
+            "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
+        }
+
     if _is_availability_inquiry(msg_low):
         clean_p = _extract_availability_product(user_message)
         entities = {"product_title": clean_p} if clean_p else {}
@@ -500,6 +547,21 @@ def classify_intent(user_message: str, schema: dict | None = None, history: list
     schema = schema or load_schema()
 
     msg_low = str(user_message or "").strip().lower()
+
+    # Fast heuristic check for direct add-to-cart commands
+    if _is_add_to_cart_query(msg_low):
+        prod, qty = _extract_cart_product_and_qty(user_message)
+        entities = {"product_name_or_id": prod, "quantity": qty}
+        return {
+            "intent": "cart_management",
+            "action": "add_item",
+            "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": "en",
+            "message_type": "action",
+            "is_action": True,
+        }
 
     # Fast heuristic check for product availability inquiries
     if _is_availability_inquiry(msg_low):

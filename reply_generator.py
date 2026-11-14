@@ -195,10 +195,10 @@ def generate_reply(
         )
     elif action_name == "search_products":
         extra_clause = (
-            " If products are listed in the results, present them enthusiastically with their names and prices. "
-            "If 'no_exact_match' is true in the data, gently explain that the exact term wasn't found, but warmly "
-            "showcase the featured products provided from the store catalog. Never claim the store has no items "
-            "when products are present in the results."
+            " Present the matching products found with their names and prices in a concise, friendly manner. "
+            "If an item is marked out of stock (in_stock is false or available is false), clearly let the shopper know that it is currently out of stock and offer to notify them when fresh stock arrives. "
+            "Keep the response concise and focused strictly on the searched item(s). "
+            "If 'no_exact_match' is true or no products are found in the results, politely let the shopper know that no products matching that name were found in our store catalog."
         )
     elif action_name == "assistant_help":
         extra_clause = (

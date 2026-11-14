@@ -950,30 +950,42 @@ async def _resolve_variant(store, product_query: str) -> dict | None:
             "price": "19.99",
             "image": "",
         }
+
+    # 1. Use robust _find_store_product which handles fuzzy tokens and hyphen matching
     try:
-        resp = await _get(store, "products.json", {"title": product_query, "status": "active", "limit": 5})
+        prod, variant, in_stock, _ = await _find_store_product(store, q_str)
+        if prod and variant:
+            img = (prod.get("image") or {}).get("src", "")
+            if not img and prod.get("images"):
+                img = (prod["images"][0] or {}).get("src", "")
+            return {
+                "product_id": prod.get("id"),
+                "variant_id": variant.get("id"),
+                "variant_title": variant.get("title", ""),
+                "name": prod.get("title", q_str),
+                "price": variant.get("price", "0.00"),
+                "image": img,
+            }
+    except Exception as e:
+        print(f"[_resolve_variant] _find_store_product lookup error: {e!r}")
+
+    # 2. REST API fallback with normalized title matching
+    try:
+        resp = await _get(store, "products.json", {"status": "active", "limit": 100})
         if resp.status_code == 200:
-            products = resp.json().get("products", [])
-            if not products:
-                # Retry with broad search
-                resp = await _get(store, "products.json", {"status": "active", "limit": 20})
-                if resp.status_code == 200:
-                    needle = product_query.strip().lower()
-                    for p in resp.json().get("products", []):
-                        if needle in p.get("title", "").lower():
-                            products = [p]
-                            break
-            if products:
-                product = products[0]
-                variant = (product.get("variants") or [{}])[0]
-                return {
-                    "product_id": product.get("id"),
-                    "variant_id": variant.get("id"),
-                    "variant_title": variant.get("title"),
-                    "name": product.get("title"),
-                    "price": variant.get("price"),
-                    "image": (product.get("image") or {}).get("src", ""),
-                }
+            needle_norm = re.sub(r"[^a-z0-9]+", "", q_str.lower())
+            for p in resp.json().get("products", []):
+                p_title_norm = re.sub(r"[^a-z0-9]+", "", (p.get("title") or "").lower())
+                if needle_norm == p_title_norm or needle_norm in p_title_norm:
+                    variant = (p.get("variants") or [{}])[0]
+                    return {
+                        "product_id": p.get("id"),
+                        "variant_id": variant.get("id"),
+                        "variant_title": variant.get("title", ""),
+                        "name": p.get("title"),
+                        "price": variant.get("price"),
+                        "image": (p.get("image") or {}).get("src", ""),
+                    }
     except Exception as e:
         print(f"[_resolve_variant] API error: {e!r}")
 
@@ -1583,11 +1595,20 @@ def _format_product_card(p: dict, store, entities: dict) -> dict | None:
         if size and size not in opt_str:
             continue
 
+        # Check variant availability
+        avail = v.get("availableForSale")
+        if avail is None:
+            is_managed = (v.get("inventory_management") or "").lower() == "shopify"
+            policy_continue = (v.get("inventory_policy") or "").lower() == "continue"
+            qty = v.get("inventory_quantity")
+            avail = not is_managed or policy_continue or (qty is not None and int(qty) > 0)
+
         best_variant = {
             "id": str(v.get("id", "")).split("/")[-1],
             "price": price,
             "title": v.get("title", ""),
-            "available": v.get("availableForSale", True),
+            "available": bool(avail),
+            "in_stock": bool(avail),
         }
         break
 
@@ -1596,11 +1617,18 @@ def _format_product_card(p: dict, store, entities: dict) -> dict | None:
         v0 = var_list[0]
         raw_p = v0.get("price")
         p0 = float(raw_p.get("amount", 0)) if isinstance(raw_p, dict) else float(raw_p or 0)
+        avail0 = v0.get("availableForSale")
+        if avail0 is None:
+            is_managed = (v0.get("inventory_management") or "").lower() == "shopify"
+            policy_continue = (v0.get("inventory_policy") or "").lower() == "continue"
+            qty = v0.get("inventory_quantity")
+            avail0 = not is_managed or policy_continue or (qty is not None and int(qty) > 0)
         best_variant = {
             "id": str(v0.get("id", "")).split("/")[-1],
             "price": p0,
             "title": v0.get("title", ""),
-            "available": v0.get("availableForSale", True),
+            "available": bool(avail0),
+            "in_stock": bool(avail0),
         }
 
     if not best_variant:
@@ -1620,10 +1648,13 @@ def _format_product_card(p: dict, store, entities: dict) -> dict | None:
     return {
         "id": str(best_variant["id"]),
         "name": p.get("title", "Unnamed product"),
+        "title": p.get("title", "Unnamed product"),
         "price": best_variant["price"],
         "image": img_url,
         "handle": handle,
         "url": f"https://{shop_dom}/products/{handle}" if handle and shop_dom else "",
+        "available": best_variant.get("available", True),
+        "in_stock": best_variant.get("in_stock", True),
     }
 
 
@@ -1750,84 +1781,155 @@ def _score_product_match(p: dict, tokens: list[str]) -> float:
     return total_score
 
 
+_GENERIC_CAT_WORDS = {
+    "shirt", "tshirt", "t-shirt", "tee", "tees", "top", "tops", "item", "product",
+    "products", "clothes", "clothing", "apparel", "wear", "cloth", "garment"
+}
+
+
+def _evaluate_product_search_match(p: dict, query_str: str, tokens: list[str], distinctive_tokens: list[str]) -> tuple[bool, float]:
+    title = (p.get("title") or "").lower()
+    handle = (p.get("handle") or "").lower()
+    tags = str(p.get("tags") or "").lower()
+    p_type = (p.get("product_type") or "").lower()
+
+    title_norm = re.sub(r"[^a-z0-9]+", "", title)
+    query_norm = re.sub(r"[^a-z0-9]+", "", (query_str or "").lower())
+    haystack_words = set(re.findall(r"[a-z0-9]+", f"{title} {handle} {tags} {p_type}"))
+    haystack_norm = re.sub(r"[^a-z0-9]+", "", f"{title}{handle}{tags}{p_type}")
+
+    # 1. Strict concise filter:
+    # If the user searched distinctive keywords (e.g. "silence"), require matching that keyword!
+    if distinctive_tokens:
+        matched_distinctive = False
+        for dt in distinctive_tokens:
+            dt_clean = dt.lower()
+            dt_sing = dt_clean[:-1] if dt_clean.endswith("s") and len(dt_clean) > 3 else dt_clean
+            dt_norm = re.sub(r"[^a-z0-9]+", "", dt_clean)
+            if dt_norm and (dt_norm in title_norm or dt_norm in handle or dt_norm in haystack_norm):
+                matched_distinctive = True
+                break
+            if any(hw == dt_clean or hw == dt_sing or hw.startswith(dt_sing) for hw in haystack_words):
+                matched_distinctive = True
+                break
+            if any(difflib.SequenceMatcher(None, dt_clean, hw).ratio() >= 0.78 for hw in haystack_words if len(hw) >= 3):
+                matched_distinctive = True
+                break
+        if not matched_distinctive:
+            return False, 0.0
+
+    # 2. Relevance Scoring (Relevance dominates over in-stock status)
+    score = 0.0
+    if query_norm and (query_norm == title_norm or query_norm == handle):
+        score += 200.0
+    elif query_norm and (query_norm in title_norm or title_norm in query_norm):
+        score += 150.0
+    elif tokens and all(t in title for t in tokens):
+        score += 120.0
+
+    for tok in tokens:
+        tok_sing = tok[:-1] if tok.endswith("s") and len(tok) > 3 else tok
+        if tok in title or tok_sing in title:
+            score += 40.0
+        elif any(hw == tok or hw == tok_sing or hw.startswith(tok_sing) for hw in haystack_words):
+            score += 20.0
+        elif any(difflib.SequenceMatcher(None, tok, hw).ratio() >= 0.75 for hw in haystack_words if len(hw) >= 3):
+            score += 15.0
+
+    for dt in distinctive_tokens:
+        if dt in title:
+            score += 35.0
+
+    return True, max(score, 1.0)
+
+
 async def search_products(store, entities: dict, session_id: str) -> dict:
     """Searches products using Shopify's native search engine (Storefront Predictive Search
     & Admin GraphQL Search) with built-in typo tolerance and multi-tier fuzzy matching."""
     raw_query = entities.get("query") or entities.get("category") or ""
     tokens = _clean_search_tokens(raw_query)
 
-    cards: list[dict] = []
-    seen_ids: set[str] = set()
+    # Distinctive tokens (e.g. "silence" from "silence tshirt")
+    distinctive_tokens = [t for t in tokens if t.lower() not in _GENERIC_CAT_WORDS and len(t) >= 2]
+    if not distinctive_tokens and tokens:
+        distinctive_tokens = tokens
 
-    # ----------------------------------------------------------------------
-    # TIER 1: Shopify Storefront Predictive Search (Native Typo Tolerance)
-    # ----------------------------------------------------------------------
+    # Collect all candidate product dictionaries
+    candidate_products: dict[str, dict] = {}
+
+    # TIER 1: Shopify Storefront Predictive Search
     if raw_query.strip():
-        pred_nodes = await _search_shopify_predictive(store, raw_query.strip(), limit=8)
-        for p in pred_nodes:
-            card = _format_product_card(p, store, entities)
-            if card and card["id"] not in seen_ids:
-                seen_ids.add(card["id"])
-                cards.append(card)
+        try:
+            pred_nodes = await _search_shopify_predictive(store, raw_query.strip(), limit=12)
+            for p in pred_nodes:
+                pid = str(p.get("id"))
+                if pid not in candidate_products:
+                    candidate_products[pid] = p
+        except Exception as e:
+            print(f"shopify_actions: predictive search error: {e!r}")
 
-    # ----------------------------------------------------------------------
-    # TIER 2: Shopify Admin GraphQL Native Search (Multi-query with wildcards)
-    # ----------------------------------------------------------------------
-    if not cards:
-        candidate_queries = _generate_shopify_search_queries(raw_query)
-        for sq in candidate_queries:
+    # TIER 2: Shopify Admin GraphQL Native Search
+    candidate_queries = _generate_shopify_search_queries(raw_query)
+    for sq in candidate_queries:
+        try:
             nodes = await _search_shopify_graphql(store, sq, first=12)
             if nodes:
                 for p in nodes:
-                    card = _format_product_card(p, store, entities)
-                    if card and card["id"] not in seen_ids:
-                        seen_ids.add(card["id"])
-                        cards.append(card)
-                if cards:
-                    break
-
-    # ----------------------------------------------------------------------
-    # TIER 3: Resilient In-Memory Fuzzy Matching Fallback (handles extreme typos,
-    # offline dev environments, and mock unit tests)
-    # ----------------------------------------------------------------------
-    if not cards:
-        try:
-            resp = await _get(store, "products.json", {"status": "active", "limit": 100})
-            if resp.status_code == 200:
-                all_products = resp.json().get("products", [])
-                scored = []
-                featured_fallback = []
-                corrected_tokens = [_COMMON_TYPO_MAP.get(t, t) for t in tokens]
-
-                for p in all_products:
-                    card = _format_product_card(p, store, entities)
-                    if not card:
-                        continue
-                    featured_fallback.append(card)
-                    # Score match
-                    score = _score_product_match(p, corrected_tokens or tokens) if tokens else 1.0
-                    if score >= (0.70 if tokens else 0.0):
-                        scored.append((score, card))
-
-                scored.sort(key=lambda x: x[0], reverse=True)
-                cards = [item[1] for item in scored[:6]]
-
-                # If no exact or fuzzy match was found, return top featured items
-                if not cards and featured_fallback:
-                    return {
-                        "results": featured_fallback[:4],
-                        "no_exact_match": True,
-                        "searched_query": raw_query,
-                        "filters_applied": entities,
-                        "message": f"We couldn't find an exact match for '{raw_query}', but here are top featured products from our store:",
-                    }
+                    pid = str(p.get("id"))
+                    if pid not in candidate_products:
+                        candidate_products[pid] = p
         except Exception as e:
-            print(f"shopify_actions: in-memory fallback search failed: {e!r}")
+            print(f"shopify_actions: GraphQL search error: {e!r}")
+
+    # TIER 3: REST catalog (ensures offline/mock stores & out-of-stock catalog items are included)
+    try:
+        resp = await _get(store, "products.json", {"status": "active", "limit": 100})
+        if resp.status_code == 200:
+            for p in resp.json().get("products", []):
+                pid = str(p.get("id"))
+                if pid not in candidate_products:
+                    candidate_products[pid] = p
+    except Exception as e:
+        print(f"shopify_actions: in-memory fallback search failed: {e!r}")
+
+    # If no search query was given, return top catalog products
+    if not raw_query.strip() and not tokens:
+        cards = []
+        for p in candidate_products.values():
+            card = _format_product_card(p, store, entities)
+            if card:
+                cards.append(card)
+        return {"results": cards[:6], "filters_applied": entities}
+
+    # Evaluate, strictly filter, and score candidates
+    scored_cards = []
+    for p in candidate_products.values():
+        is_match, score = _evaluate_product_search_match(p, raw_query, tokens, distinctive_tokens)
+        if not is_match or score <= 0.0:
+            continue
+        card = _format_product_card(p, store, entities)
+        if card:
+            card["relevance_score"] = score
+            scored_cards.append((score, card))
+
+    # Sort: Primary key is relevance score DESCENDING.
+    # Secondary tie-breaker is stock availability (only between items with equal relevance).
+    scored_cards.sort(
+        key=lambda item: (item[0], 1 if item[1].get("in_stock") else 0),
+        reverse=True
+    )
+    cards = [item[1] for item in scored_cards[:6]]
 
     if not cards:
-        return {"results": [], "filters_applied": entities, "message": "No active products currently found in store."}
+        return {
+            "results": [],
+            "no_exact_match": True,
+            "searched_query": raw_query,
+            "filters_applied": entities,
+            "message": f"I couldn't find any products matching '{raw_query}' in our store catalog.",
+        }
 
-    return {"results": cards[:6], "filters_applied": entities}
+    return {"results": cards, "filters_applied": entities}
 
 
 async def check_availability(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
@@ -1855,21 +1957,34 @@ async def check_availability(store, entities: dict, session_id: str, customer_id
     if not prod:
         search_res = await search_products(store, {"query": prod_query}, session_id)
         alt_cards = (search_res.get("results") or []) if isinstance(search_res, dict) else []
-        if alt_cards:
+        if alt_cards and not search_res.get("no_exact_match"):
             top_card = alt_cards[0]
             top_name = top_card.get("name") or prod_query
             top_price = top_card.get("price") or ""
+            is_stk = bool(top_card.get("in_stock", True))
             price_str = f"₹{top_price}" if "₹" not in str(top_price) else str(top_price)
-            return {
-                "status": "available",
-                "in_stock": True,
-                "is_action": False,
-                "message_type": "normal",
-                "product_title": top_name,
-                "price": price_str,
-                "results": alt_cards[:4],
-                "message": f"Yes! We have '{top_name}' available in stock right now for {price_str}! Would you like me to add it to your cart or help you choose a size?",
-            }
+            if is_stk:
+                return {
+                    "status": "available",
+                    "in_stock": True,
+                    "is_action": False,
+                    "message_type": "normal",
+                    "product_title": top_name,
+                    "price": price_str,
+                    "results": [top_card],
+                    "message": f"Yes! We have '{top_name}' available in stock right now for {price_str}! Would you like me to add it to your cart or help you choose a size?",
+                }
+            else:
+                return {
+                    "status": "out_of_stock",
+                    "in_stock": False,
+                    "is_action": False,
+                    "message_type": "normal",
+                    "product_title": top_name,
+                    "price": price_str,
+                    "results": [top_card],
+                    "message": f"'{top_name}' is currently out of stock at the moment. Would you like me to notify you when fresh stock arrives?",
+                }
         return {
             "status": "not_found",
             "is_action": False,
@@ -1885,11 +2000,13 @@ async def check_availability(store, entities: dict, session_id: str, customer_id
         "id": str(variant.get("id")) if variant else str(prod.get("id", "")),
         "product_id": str(prod.get("id", "")),
         "name": prod_title,
+        "title": prod_title,
         "price": float(price_raw) if str(price_raw).replace(".", "").isdigit() else 0.0,
         "image": (prod.get("image") or {}).get("src", "") if prod else "",
         "handle": prod.get("handle", "") if prod else "",
         "url": f"https://{shop}/products/{prod.get('handle', '')}" if (prod and prod.get("handle")) else "",
         "in_stock": in_stock,
+        "available": in_stock,
     }
 
     if in_stock:
@@ -1919,7 +2036,7 @@ async def check_availability(store, entities: dict, session_id: str, customer_id
         "is_action": False,
         "message_type": "normal",
         "product_title": prod_title,
-        "results": alternatives,
+        "results": [product_card],
         "alternatives": alternatives,
         "message": f"'{prod_title}' is currently out of stock at the moment.{alt_text} Would you like to check one of those out, or should I notify you when fresh stock arrives?",
     }
@@ -2392,16 +2509,21 @@ async def _find_store_product(store, product_query: str, size: str = "", color: 
     tokens = _clean_search_tokens(str(product_query))
     corrected_tokens = [_COMMON_TYPO_MAP.get(t, t) for t in tokens]
     q_lower = str(product_query).lower().strip()
+    q_norm = re.sub(r"[^a-z0-9]+", "", q_lower)
 
     scored = []
     for p in all_products:
         p_title = (p.get("title") or "").lower()
         p_handle = (p.get("handle") or "").lower()
+        p_title_norm = re.sub(r"[^a-z0-9]+", "", p_title)
+        p_handle_norm = re.sub(r"[^a-z0-9]+", "", p_handle)
 
-        if q_lower == p_title or q_lower == p_handle:
-            score = 10.0
+        if q_lower == p_title or q_lower == p_handle or (q_norm and q_norm == p_title_norm) or (q_norm and q_norm == p_handle_norm):
+            score = 20.0
+        elif (q_norm and q_norm in p_title_norm) or (p_title_norm and p_title_norm in q_norm):
+            score = 15.0
         elif q_lower in p_title or p_title in q_lower:
-            score = 6.0
+            score = 10.0
         elif corrected_tokens or tokens:
             score = max(_score_product_match(p, corrected_tokens), _score_product_match(p, tokens))
         else:
