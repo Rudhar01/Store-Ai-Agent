@@ -233,7 +233,7 @@ def _shopify_nav_menu():
         <meta name="shopify-api-key" content="{api_key}">
         <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
         <style>
-            ui-nav-menu { display: none !important; visibility: hidden !important; height: 0 !important; overflow: hidden !important; }
+            ui-nav-menu {{ display: none !important; visibility: hidden !important; height: 0 !important; overflow: hidden !important; }}
         </style>
     ''')
 
