@@ -460,6 +460,76 @@ def _is_add_to_cart(message: str) -> tuple[str, int] | None:
     return cleaned, qty
 
 
+_CART_REMOVE_LEAD_IN = re.compile(
+    r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:remove|delete|take\s+out|take|drop|discard)\s+",
+    re.IGNORECASE,
+)
+_CART_REMOVE_TRAILING = re.compile(
+    r"\s+(?:from|out\s+of|off|out|in)?\s*(?:my|the)?\s*(?:cart|bag|basket)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_remove_from_cart(message: str) -> tuple[str, int | None] | None:
+    msg = (message or "").strip()
+    msg_low = msg.lower()
+    if any(q in msg_low for q in ["how to", "how do i", "can i remove", "why"]):
+        return None
+    if not re.search(r"\b(remove|delete|take\s+out|take|drop|discard)\b", msg_low):
+        return None
+    has_cart_kw = bool(re.search(r"\b(cart|bag|basket)\b", msg_low))
+    starts_remove = bool(_CART_REMOVE_LEAD_IN.match(msg_low))
+    if not (has_cart_kw or starts_remove):
+        return None
+
+    qty = None
+    m_qty = re.search(r"\b(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", msg_low)
+    cleaned = _CART_REMOVE_LEAD_IN.sub("", msg)
+    cleaned = _CART_REMOVE_TRAILING.sub("", cleaned)
+    m_lead_qty = re.match(r"^\s*(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\s+(.+)$", cleaned, re.IGNORECASE)
+    if m_lead_qty:
+        qty = int(m_lead_qty.group(1))
+        cleaned = m_lead_qty.group(2).strip()
+    elif m_qty:
+        m_verb_qty = re.search(r"^(?:can you\s+)?(?:please\s+)?(?:remove|delete|take\s+out|take)\s+(\d+)\s+(.+)$", msg_low)
+        if m_verb_qty:
+            qty = int(m_verb_qty.group(1))
+            cleaned = _CART_REMOVE_TRAILING.sub("", m_verb_qty.group(2)).strip()
+
+    cleaned = _LEADING_ARTICLE.sub("", cleaned).strip(" .,!?")
+    if not cleaned or cleaned.lower() in ("from cart", "from my cart", "from", "cart", "it", "this", "item", "that"):
+        return "", qty
+    return cleaned, qty
+
+
+def _is_clear_cart(message: str) -> bool:
+    msg_low = (message or "").strip().lower()
+    if any(q in msg_low for q in ["how to", "how do i", "why"]):
+        return False
+    return bool(re.search(r"\b(clear|empty|reset)\s+(?:all\s+items\s+in\s+)?(?:my\s+|the\s+)?(?:cart|bag|basket)\b", msg_low)) or msg_low in {
+        "clear cart", "clear my cart", "empty cart", "empty my cart", "delete cart", "delete my cart", "reset cart", "remove all from cart"
+    }
+
+
+def _is_product_search(message: str) -> str | None:
+    msg = (message or "").strip()
+    msg_low = msg.lower()
+    if any(q in msg_low for q in ["how to", "how do i", "when will", "why", "who are you", "what can you do"]):
+        return None
+    if re.search(r"\b(cart|bag|basket|checkout|order|track|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up)\b", msg_low):
+        return None
+    if _SEARCH_LEAD_IN.search(msg_low):
+        cleaned = _SEARCH_LEAD_IN.sub("", msg).strip()
+    else:
+        m = re.match(r"^(?:search|find|show|look\s+for|looking\s+for|do\s+you\s+have)\s+(?:for\s+)?(.+)$", msg, re.IGNORECASE)
+        cleaned = m.group(1).strip() if m else None
+    if cleaned:
+        cleaned = _LEADING_ARTICLE.sub("", cleaned).strip(" .,!?")
+        if cleaned:
+            return cleaned
+    return None
+
+
 _SEARCH_LEAD_IN = re.compile(
     r"^(?:can you\s+)?(?:please\s+)?(?:show\s+me|find(?:\s+me)?|search(?:\s+for)?|look(?:\s+up|\s+for)?|"
     r"get(?:\s+me)?|i want(?:\s+to\s+see)?|i'm looking for|i am looking for|do you have(?:\s+any|\s+some)?|"
@@ -892,6 +962,27 @@ def _add_to_cart_result(product: dict, quantity: int, language: str, message: st
     }
 
 
+def _remove_from_cart_result(product_name: str, variant_id: any, quantity: int | None, language: str, message: str) -> dict:
+    qty_text = f"{quantity}x " if quantity else ""
+    fallback = f"Removed {qty_text}'{product_name}' from your cart."
+    reply = _safe_reply(
+        "remove_item", {"removed": product_name, "quantity": quantity}, language, message,
+        fallback=fallback,
+    )
+    action_dict = {"type": "cart_remove", "product_name": product_name}
+    if variant_id:
+        action_dict["variant_id"] = _as_variant_id(variant_id)
+    if quantity:
+        action_dict["quantity"] = quantity
+    return {
+        "status": "done", "reply": reply, "language": language,
+        "intent": "cart_management", "action": "remove_item",
+        "widget_action": action_dict,
+        "message_type": "action",
+        "is_action": True,
+    }
+
+
 def _ask(key: str, ptype: str, instruction: str, language: str, message: str, fallback: str, **extra) -> dict:
     _set_pending(key, type=ptype, language=language, **extra)
     reply = _safe_reply("clarify", {"instruction": instruction}, language, message, fallback)
@@ -1019,7 +1110,12 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
 
     if is_remove:
         name = extract_search_term(message) or message.strip()
-        result = await _execute_and_reply(store, intent, action, {"product_name_or_id": name}, language, message, session_id, customer_id=customer_id)
+        var_id = None
+        prod, _ = await _resolve_product(store, name)
+        if prod:
+            name = prod.get("name") or name
+            var_id = prod.get("id")
+        result = _remove_from_cart_result(name, var_id, None, language, message)
         _log(shop, message, "done", intent, action, {"product_name_or_id": name}, result["reply"])
         return result
 
@@ -1224,6 +1320,8 @@ async def _chat_impl(req: ChatRequest):
     # The LLM handles every other message so complex phrasing is not penalised.
     _msg_lower = message.strip().lower()
     _m_cart = _is_add_to_cart(message)
+    _m_rem = _is_remove_from_cart(message)
+    _m_search = _is_product_search(message)
     if _m_cart:
         item_name, item_qty = _m_cart
         intent, action = "cart_management", "add_item"
@@ -1237,6 +1335,48 @@ async def _chat_impl(req: ChatRequest):
             "requires_confirmation": False,
             "message_type": "action",
             "is_action": True,
+        }
+    elif _m_rem:
+        item_name, item_qty = _m_rem
+        intent, action = "cart_management", "remove_item"
+        entities = {"product_name_or_id": item_name}
+        if item_qty:
+            entities["quantity"] = item_qty
+        language = "en"
+        classification = {
+            "intent": intent,
+            "action": action,
+            "entities": entities,
+            "language": language,
+            "requires_confirmation": False,
+            "message_type": "action",
+            "is_action": True,
+        }
+    elif _is_clear_cart(message):
+        intent, action = "cart_management", "clear_cart"
+        entities = {}
+        language = "en"
+        classification = {
+            "intent": intent,
+            "action": action,
+            "entities": entities,
+            "language": language,
+            "requires_confirmation": False,
+            "message_type": "action",
+            "is_action": True,
+        }
+    elif _m_search:
+        intent, action = "product_search", "search_products"
+        entities = {"query": _m_search}
+        language = "en"
+        classification = {
+            "intent": intent,
+            "action": action,
+            "entities": entities,
+            "language": language,
+            "requires_confirmation": False,
+            "message_type": "normal",
+            "is_action": False,
         }
     elif _msg_lower in _EXACT_GREETINGS:
         intent, action = "general_chat", "assistant_help"
@@ -1520,6 +1660,21 @@ async def _chat_impl(req: ChatRequest):
             _log(req.shop, message, "not_found", intent, action, entities, reply)
             return {"status": "done", "reply": reply, "language": language}
 
+        if (intent, action) == ("cart_management", "clear_cart"):
+            reply = "I've cleared your shopping cart."
+            result = {
+                "status": "done",
+                "reply": reply,
+                "language": language,
+                "intent": "cart_management",
+                "action": "clear_cart",
+                "widget_action": {"type": "cart_clear"},
+                "message_type": "action",
+                "is_action": True,
+            }
+            _log(req.shop, message, "done", intent, action, entities, reply)
+            return result
+
         if (intent, action) == ("cart_management", "remove_item"):
             term = entities.get("product_name_or_id")
             if not term:
@@ -1543,7 +1698,39 @@ async def _chat_impl(req: ChatRequest):
                            language, message, "Sure — which item would you like to remove from your cart?", asked=1)
                 _log(req.shop, message, "awaiting_item", intent, action, None, out["reply"])
                 return out
-            entities["product_name_or_id"] = term
+
+            quantity = entities.get("quantity")
+            product_name = str(term).strip()
+            variant_id = None
+
+            # 1. First check if it matches an item in current cart_data
+            cart_data = req.cart_data or {}
+            cart_items = cart_data.get("items") or []
+            needle = product_name.lower()
+            for it in cart_items:
+                title = (it.get("product_title") or it.get("title") or it.get("name") or "").lower()
+                if needle in title or title in needle:
+                    product_name = it.get("product_title") or it.get("title") or it.get("name") or product_name
+                    variant_id = it.get("variant_id") or it.get("id")
+                    break
+
+            # 2. If not found in cart_data, resolve from store catalog
+            if not variant_id:
+                product, options = await _resolve_product(store, str(term))
+                if not product and options:
+                    product = options[0]
+                if not product:
+                    prod, var, _, _ = await shopify_actions._find_store_product(store, str(term))
+                    if prod and var:
+                        product_name = prod.get("title") or product_name
+                        variant_id = var.get("id")
+                elif product:
+                    product_name = product.get("name") or product_name
+                    variant_id = product.get("id")
+
+            result = _remove_from_cart_result(product_name, variant_id, quantity, language, message)
+            _log(req.shop, message, "done", intent, action, {**entities, "product_name_or_id": product_name, "quantity": quantity}, result["reply"])
+            return result
 
         # 4. Warranty Claim
         if intent == "warranty_claim" and action == "submit_claim":

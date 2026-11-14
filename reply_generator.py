@@ -279,6 +279,15 @@ def generate_reply(
         if isinstance(data, dict):
             if data.get("message"):
                 return str(data["message"])
+            if data.get("added"):
+                qty = data.get("quantity") or 1
+                return f"Added {qty}x '{data['added']}' to your cart!"
+            if data.get("removed"):
+                qty = data.get("quantity_removed") or data.get("quantity")
+                qty_str = f"{qty}x " if qty else ""
+                rem = data.get("remaining_quantity")
+                rem_str = f" ({rem} remaining in your cart)" if rem is not None and rem > 0 else ""
+                return f"Removed {qty_str}'{data['removed']}' from your cart{rem_str}."
             if data.get("results") and isinstance(data["results"], list):
                 count = len(data["results"])
                 return f"I found {count} product{'s' if count != 1 else ''} that might match what you're looking for:"

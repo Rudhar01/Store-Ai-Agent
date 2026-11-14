@@ -416,6 +416,84 @@ def _is_add_to_cart_query(msg_low: str) -> bool:
     return bool(re.search(r"\b(add|put|place|insert|buy)\b", msg_low))
 
 
+_CART_REMOVE_LEAD_IN = re.compile(
+    r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:remove|delete|take\s+out|take|drop|discard)\s+",
+    re.IGNORECASE,
+)
+_CART_REMOVE_TRAILING = re.compile(
+    r"\s+(?:from|out\s+of|off|out|in)?\s*(?:my|the)?\s*(?:cart|bag|basket)\s*$",
+    re.IGNORECASE,
+)
+_SEARCH_LEAD_IN_PATTERN = re.compile(
+    r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:show\s+me|find(?:\s+me)?|search(?:\s+for)?|look(?:\s+up|\s+for)?|"
+    r"get(?:\s+me)?|i want(?:\s+to\s+see)?|i'm looking for|i am looking for|do you have(?:\s+any|\s+some)?|"
+    r"tell me about(?:\s+any|\s+some)?|are there(?:\s+any)?|browse|where can i find|what(?:'s|\s+is) your cheapest)\s+",
+    re.IGNORECASE,
+)
+
+
+def _is_remove_from_cart_query(msg_low: str) -> bool:
+    if any(q in msg_low for q in ["how to", "how do i", "can i remove", "why"]):
+        return False
+    if not re.search(r"\b(remove|delete|take\s+out|take|drop|discard)\b", msg_low):
+        return False
+    has_cart_kw = bool(re.search(r"\b(cart|bag|basket)\b", msg_low))
+    starts_remove = bool(_CART_REMOVE_LEAD_IN.match(msg_low))
+    return has_cart_kw or starts_remove
+
+
+def _extract_remove_cart_product_and_qty(user_message: str) -> tuple[str, int | None]:
+    msg = (user_message or "").strip()
+    msg_low = msg.lower()
+    qty = None
+    m_qty = re.search(r"\b(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", msg_low)
+    cleaned = _CART_REMOVE_LEAD_IN.sub("", msg)
+    cleaned = _CART_REMOVE_TRAILING.sub("", cleaned)
+    m_lead_qty = re.match(r"^\s*(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\s+(.+)$", cleaned, re.IGNORECASE)
+    if m_lead_qty:
+        qty = int(m_lead_qty.group(1))
+        cleaned = m_lead_qty.group(2).strip()
+    elif m_qty:
+        m_verb_qty = re.search(r"^(?:can you\s+)?(?:please\s+)?(?:remove|delete|take\s+out|take)\s+(\d+)\s+(.+)$", msg_low)
+        if m_verb_qty:
+            qty = int(m_verb_qty.group(1))
+            cleaned = _CART_REMOVE_TRAILING.sub("", m_verb_qty.group(2)).strip()
+    cleaned = re.sub(r"^\s*(?:a|an|the)\s+", "", cleaned, flags=re.IGNORECASE).strip(" .,!?")
+    if not cleaned or cleaned.lower() in ("from cart", "from my cart", "from", "cart", "it", "this", "item", "that"):
+        return "", qty
+    return cleaned, qty
+
+
+def _is_clear_cart_query(msg_low: str) -> bool:
+    if any(q in msg_low for q in ["how to", "how do i", "why"]):
+        return False
+    return bool(re.search(r"\b(clear|empty|reset)\s+(?:all\s+items\s+in\s+)?(?:my\s+|the\s+)?(?:cart|bag|basket)\b", msg_low)) or msg_low in {
+        "clear cart", "clear my cart", "empty cart", "empty my cart", "delete cart", "delete my cart", "reset cart", "remove all from cart"
+    }
+
+
+def _is_product_search_query(msg_low: str) -> bool:
+    if any(q in msg_low for q in ["how to", "how do i", "when will", "why", "who are you", "what can you do"]):
+        return False
+    if re.search(r"\b(cart|bag|basket|checkout|order|track|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up)\b", msg_low):
+        return False
+    if _SEARCH_LEAD_IN_PATTERN.search(msg_low):
+        return True
+    return bool(re.match(r"^(?:search|find|show|look\s+for|looking\s+for|do\s+you\s+have)\s+(?:for\s+)?(.+)$", msg_low))
+
+
+def _extract_search_product_query(user_message: str) -> str:
+    msg = (user_message or "").strip()
+    msg_low = msg.lower()
+    if _SEARCH_LEAD_IN_PATTERN.search(msg_low):
+        cleaned = _SEARCH_LEAD_IN_PATTERN.sub("", msg).strip()
+    else:
+        m = re.match(r"^(?:search|find|show|look\s+for|looking\s+for|do\s+you\s+have)\s+(?:for\s+)?(.+)$", msg, re.IGNORECASE)
+        cleaned = m.group(1).strip() if m else msg
+    cleaned = re.sub(r"^\s*(?:a|an|the)\s+", "", cleaned, flags=re.IGNORECASE).strip(" .,!?")
+    return cleaned
+
+
 def _extract_cart_product_and_qty(user_message: str) -> tuple[str, int]:
     msg = (user_message or "").strip()
     msg_low = msg.lower()
@@ -453,6 +531,47 @@ def _fallback(confidence: float = 0.0, language: str = "en", user_message: str =
             "language": language,
             "message_type": "action",
             "is_action": True,
+        }
+
+    if _is_remove_from_cart_query(msg_low):
+        prod, qty = _extract_remove_cart_product_and_qty(user_message)
+        entities = {"product_name_or_id": prod}
+        if qty is not None:
+            entities["quantity"] = qty
+        return {
+            "intent": "cart_management",
+            "action": "remove_item",
+            "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    if _is_clear_cart_query(msg_low):
+        return {
+            "intent": "cart_management",
+            "action": "clear_cart",
+            "entities": {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    if _is_product_search_query(msg_low):
+        query = _extract_search_product_query(user_message)
+        return {
+            "intent": "product_search",
+            "action": "search_products",
+            "entities": {"query": query},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
         }
 
     if _is_availability_inquiry(msg_low):
@@ -561,6 +680,50 @@ def classify_intent(user_message: str, schema: dict | None = None, history: list
             "language": "en",
             "message_type": "action",
             "is_action": True,
+        }
+
+    # Fast heuristic check for direct remove-from-cart commands
+    if _is_remove_from_cart_query(msg_low):
+        prod, qty = _extract_remove_cart_product_and_qty(user_message)
+        entities = {"product_name_or_id": prod}
+        if qty is not None:
+            entities["quantity"] = qty
+        return {
+            "intent": "cart_management",
+            "action": "remove_item",
+            "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": "en",
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    # Fast heuristic check for clear cart commands
+    if _is_clear_cart_query(msg_low):
+        return {
+            "intent": "cart_management",
+            "action": "clear_cart",
+            "entities": {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": "en",
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    # Fast heuristic check for product search queries
+    if _is_product_search_query(msg_low):
+        query = _extract_search_product_query(user_message)
+        return {
+            "intent": "product_search",
+            "action": "search_products",
+            "entities": {"query": query},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": "en",
+            "message_type": "normal",
+            "is_action": False,
         }
 
     # Fast heuristic check for product availability inquiries
