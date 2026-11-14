@@ -290,7 +290,9 @@ def generate_reply(
                 return f"Removed {qty_str}'{data['removed']}' from your cart{rem_str}."
             if data.get("results") and isinstance(data["results"], list):
                 count = len(data["results"])
-                return f"I found {count} product{'s' if count != 1 else ''} that might match what you're looking for:"
+                if action_name in ("recommend_products", "get_recommendations"):
+                    return f"Here are {count} featured product{'s' if count != 1 else ''} from our collection:"
+                return f"Here are {count} product{'s' if count != 1 else ''} matching your search:"
             if data.get("orders") and isinstance(data["orders"], list):
                 count = len(data["orders"])
                 if data.get("active_only"):
@@ -300,7 +302,9 @@ def generate_reply(
                 oid = data.get("order_number") or data.get("order_id")
                 st = data.get("status") or "processing"
                 return f"Order #{oid} is currently {st}."
-        return "I'm here to help, but I'm having a brief issue generating a detailed reply. Please check back shortly or let me know what you need."
+        if action_name == "assistant_help":
+            return "Welcome! I'm here to help you shop. You can ask me to search products, check what's in stock, track orders, or manage your cart."
+        return "I'm here to help! Let me know what you'd like to find, track, or add to your cart."
 
 
 if __name__ == "__main__":

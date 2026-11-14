@@ -52,9 +52,39 @@ else:
     except ImportError:
         OpenAI = None
 
-PRIMARY_API_KEY = os.environ.get("PRIMARY_LLM_API_KEY", "")
-PRIMARY_BASE_URL = os.environ.get("PRIMARY_LLM_BASE_URL") or None
-PRIMARY_MODEL = os.environ.get("PRIMARY_LLM_MODEL", "Qwen/Qwen3-8B-AWQ")
+def _resolve_primary_config():
+    api_key = (
+        os.environ.get("PRIMARY_LLM_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("GROQ_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+        or ""
+    ).strip()
+
+    base_url = os.environ.get("PRIMARY_LLM_BASE_URL")
+    if not base_url:
+        if os.environ.get("GROQ_API_KEY"):
+            base_url = "https://api.groq.com/openai/v1"
+        elif os.environ.get("GEMINI_API_KEY"):
+            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        elif os.environ.get("OPENAI_API_KEY"):
+            base_url = "https://api.openai.com/v1"
+
+    model = os.environ.get("PRIMARY_LLM_MODEL")
+    if not model:
+        if os.environ.get("OPENAI_API_KEY"):
+            model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        elif os.environ.get("GROQ_API_KEY"):
+            model = "llama-3.3-70b-versatile"
+        elif os.environ.get("GEMINI_API_KEY"):
+            model = "gemini-1.5-flash"
+        else:
+            model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+    return api_key, base_url, model
+
+
+PRIMARY_API_KEY, PRIMARY_BASE_URL, PRIMARY_MODEL = _resolve_primary_config()
 PRIMARY_TIMEOUT = float(os.environ.get("PRIMARY_LLM_TIMEOUT", "6.0"))
 FALLBACK_TIMEOUT = float(os.environ.get("FALLBACK_LLM_TIMEOUT", "8.0"))
 
@@ -62,7 +92,6 @@ FALLBACK_TIMEOUT = float(os.environ.get("FALLBACK_LLM_TIMEOUT", "8.0"))
 def _load_fallback_providers() -> list[dict]:
     raw = (os.environ.get("FALLBACK_LLM_APIKEY_ENDPOINT_MODEL") or "").strip()
     if not raw:
-        print("[llm_selector] FALLBACK_LLM_APIKEY_ENDPOINT_MODEL not set — no fallback providers configured")
         return []
 
     try:
@@ -96,10 +125,13 @@ def _get_primary() -> OpenAI:
     global _primary_client
     if OpenAI is None:
         raise RuntimeError("Neither langfuse nor openai SDK is installed. Please install openai or langfuse.")
+    api_key, base_url, _ = _resolve_primary_config()
+    if not api_key:
+        raise RuntimeError("No LLM API key configured (set OPENAI_API_KEY, GROQ_API_KEY, GEMINI_API_KEY, or PRIMARY_LLM_API_KEY in .env)")
     if _primary_client is None:
         _primary_client = OpenAI(
-            api_key=PRIMARY_API_KEY,
-            base_url=PRIMARY_BASE_URL,
+            api_key=api_key,
+            base_url=base_url,
             max_retries=0,  # Do not retry 502/down endpoints; immediately try fallback
             timeout=PRIMARY_TIMEOUT,
         )
@@ -136,10 +168,12 @@ def create_chat_completion(*, messages, **kwargs):
     last_error: Exception | None = None
 
     try:
-        return _get_primary().chat.completions.create(model=PRIMARY_MODEL, messages=messages, **kwargs)
+        _, _, model = _resolve_primary_config()
+        return _get_primary().chat.completions.create(model=model, messages=messages, **kwargs)
     except Exception as e:
         last_error = e
-        print(f"[llm_selector] primary endpoint failed ({e!r}) — trying {len(_FALLBACK_PROVIDERS)} fallback(s)")
+        if _FALLBACK_PROVIDERS:
+            print(f"[llm_selector] primary endpoint failed ({e!r}) — trying {len(_FALLBACK_PROVIDERS)} fallback(s)")
 
     fallback_kwargs = {k: v for k, v in kwargs.items() if k != "extra_body"}
 

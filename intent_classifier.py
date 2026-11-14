@@ -393,11 +393,28 @@ def _is_return_request(msg_low: str) -> bool:
     ])
 
 
+_MY_ORDERS_RE = re.compile(
+    r"\b(my|all|past|previous|recent|active|current|pending|open)\b[^.?!]{0,30}\borders\b"
+    r"|\blist of (my |the )?orders\b"
+    r"|\border (history|list)\b"
+    r"|\bwhat (have|did) i (order|ordered|bought|purchased)\b"
+    r"|\b(show|list|see|view|track|where are|check|what are) (me )?(my |the |all )?orders\b"
+    r"|\bmere saare orders dikhao\b|\bmere orders\b",
+    re.IGNORECASE,
+)
+
+
+def _is_my_orders_query(msg_low: str) -> bool:
+    return bool(_MY_ORDERS_RE.search(msg_low))
+
+
 def _is_active_orders_query(msg_low: str) -> bool:
+    if not any(k in msg_low for k in ["active", "pending", "open", "in progress"]):
+        return False
     return any(p in msg_low for p in [
         "active order", "active orders", "orders in progress", "pending order", "pending orders",
         "open order", "open orders", "in progress orders"
-    ])
+    ]) or _is_my_orders_query(msg_low)
 
 
 def _is_cancel_order_query(msg_low: str) -> bool:
@@ -430,6 +447,7 @@ _SEARCH_LEAD_IN_PATTERN = re.compile(
     r"tell me about(?:\s+any|\s+some)?|are there(?:\s+any)?|browse|where can i find|what(?:'s|\s+is) your cheapest)\s+",
     re.IGNORECASE,
 )
+_SEARCH_FILLER_PATTERN = re.compile(r"\b(products?|items?|please|for me|any|around|got|add|remove|delete|to my cart|from my cart|my cart|cart|some|few|available|your|the|best|all)\b", re.IGNORECASE)
 
 
 def _is_remove_from_cart_query(msg_low: str) -> bool:
@@ -473,16 +491,24 @@ def _is_clear_cart_query(msg_low: str) -> bool:
 
 
 def _is_product_search_query(msg_low: str) -> bool:
-    if any(q in msg_low for q in ["how to", "how do i", "when will", "why", "who are you", "what can you do"]):
+    if any(q in msg_low for q in ["how to", "how do i", "when will", "why", "who are you", "what can you do", "where is my", "where are my"]):
         return False
-    if re.search(r"\b(cart|bag|basket|checkout|order|track|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up)\b", msg_low):
+    if re.search(r"\b(cart|bag|basket|checkout|orders?|track|tracking|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up|policy|policies|shipping|contact|support|email|address|phone|help)\b", msg_low):
         return False
     if _SEARCH_LEAD_IN_PATTERN.search(msg_low):
         return True
-    return bool(re.match(r"^(?:search|find|show|look\s+for|looking\s+for|do\s+you\s+have)\s+(?:for\s+)?(.+)$", msg_low))
+    if re.match(r"^(?:search|find|show|look\s+for|looking\s+for|do\s+you\s+have)\s+(?:for\s+)?(.+)$", msg_low):
+        return True
+    words = msg_low.split()
+    if 1 <= len(words) <= 5:
+        stopwords = {"ok", "okay", "yes", "no", "thanks", "thank", "bye", "good", "sure", "hi", "hello", "hey", "help"}
+        if not (set(words) & stopwords):
+            return True
+    return False
 
 
-def _extract_search_product_query(user_message: str) -> str:
+def _extract_search_product_query(user_message: str) -> tuple[str, bool]:
+    """Returns (query, is_browse)."""
     msg = (user_message or "").strip()
     msg_low = msg.lower()
     if _SEARCH_LEAD_IN_PATTERN.search(msg_low):
@@ -490,15 +516,17 @@ def _extract_search_product_query(user_message: str) -> str:
     else:
         m = re.match(r"^(?:search|find|show|look\s+for|looking\s+for|do\s+you\s+have)\s+(?:for\s+)?(.+)$", msg, re.IGNORECASE)
         cleaned = m.group(1).strip() if m else msg
+    content_only = _SEARCH_FILLER_PATTERN.sub("", cleaned).strip(" .,!?")
+    if not content_only:
+        return ("", True)
     cleaned = re.sub(r"^\s*(?:a|an|the)\s+", "", cleaned, flags=re.IGNORECASE).strip(" .,!?")
-    return cleaned
+    return (cleaned, False)
 
 
 def _extract_cart_product_and_qty(user_message: str) -> tuple[str, int]:
     msg = (user_message or "").strip()
     msg_low = msg.lower()
     qty = 1
-    m_qty = re.search(r"\b(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", msg_low)
     cleaned = re.sub(
         r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:add\s+to\s+(?:my\s+|the\s+)?cart|add|put|place|insert|buy|get)\s+",
         "", msg, flags=re.IGNORECASE,
@@ -508,12 +536,19 @@ def _extract_cart_product_and_qty(user_message: str) -> tuple[str, int]:
     if m_lead_qty:
         qty = int(m_lead_qty.group(1))
         cleaned = m_lead_qty.group(2).strip()
-    elif m_qty:
+    else:
         m_verb_qty = re.search(r"^(?:can you\s+)?(?:please\s+)?(?:add|put)\s+(\d+)\s+(.+)$", msg_low)
         if m_verb_qty:
             qty = int(m_verb_qty.group(1))
             cleaned = re.sub(r"\s+(?:to|in|into|for)?\s*(?:my|the)?\s*(?:cart|bag|basket)\s*$", "", m_verb_qty.group(2), flags=re.IGNORECASE).strip()
+        else:
+            m_mid_qty = re.search(r"\b(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", cleaned)
+            if m_mid_qty:
+                qty = int(m_mid_qty.group(1))
+                cleaned = re.sub(r"\b" + m_mid_qty.group(1) + r"\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", "", cleaned, flags=re.IGNORECASE).strip()
+
     cleaned = re.sub(r"^\s*(?:a|an|the)\s+", "", cleaned, flags=re.IGNORECASE).strip(" .,!?")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned, qty
 
 
@@ -561,8 +596,32 @@ def _fallback(confidence: float = 0.0, language: str = "en", user_message: str =
             "is_action": True,
         }
 
+    if _is_my_orders_query(msg_low):
+        is_active = any(w in msg_low for w in ["active", "pending", "open", "in progress"])
+        return {
+            "intent": "order_tracking",
+            "action": "list_recent_orders",
+            "entities": {"filter": "active", "active_only": True} if is_active else {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
+        }
+
     if _is_product_search_query(msg_low):
-        query = _extract_search_product_query(user_message)
+        query, is_browse = _extract_search_product_query(user_message)
+        if is_browse:
+            return {
+                "intent": "product_search",
+                "action": "get_recommendations",
+                "entities": {},
+                "confidence": 0.95,
+                "requires_confirmation": False,
+                "language": language,
+                "message_type": "normal",
+                "is_action": False,
+            }
         return {
             "intent": "product_search",
             "action": "search_products",
@@ -712,9 +771,34 @@ def classify_intent(user_message: str, schema: dict | None = None, history: list
             "is_action": True,
         }
 
+    # Order heuristics checked BEFORE product search to prevent misrouting orders queries
+    if _is_my_orders_query(msg_low):
+        is_active = any(w in msg_low for w in ["active", "pending", "open", "in progress"])
+        return {
+            "intent": "order_tracking",
+            "action": "list_recent_orders",
+            "entities": {"filter": "active", "active_only": True} if is_active else {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": "en",
+            "message_type": "normal",
+            "is_action": False,
+        }
+
     # Fast heuristic check for product search queries
     if _is_product_search_query(msg_low):
-        query = _extract_search_product_query(user_message)
+        query, is_browse = _extract_search_product_query(user_message)
+        if is_browse:
+            return {
+                "intent": "product_search",
+                "action": "get_recommendations",
+                "entities": {},
+                "confidence": 0.95,
+                "requires_confirmation": False,
+                "language": "en",
+                "message_type": "normal",
+                "is_action": False,
+            }
         return {
             "intent": "product_search",
             "action": "search_products",

@@ -233,24 +233,33 @@ def _shopify_nav_menu():
         <meta name="shopify-api-key" content="{api_key}">
         <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
         <style>
-            ui-nav-menu, ui-nav-menu * {{
+            ui-nav-menu, ui-nav-menu * {
                 display: none !important;
                 visibility: hidden !important;
+                position: absolute !important;
+                top: -9999px !important;
+                left: -9999px !important;
+                width: 0 !important;
                 height: 0 !important;
                 max-height: 0 !important;
                 overflow: hidden !important;
                 opacity: 0 !important;
                 font-size: 0 !important;
                 line-height: 0 !important;
-            }}
+                pointer-events: none !important;
+            }
+            ui-nav-menu a {
+                display: none !important;
+                visibility: hidden !important;
+                font-size: 0 !important;
+                line-height: 0 !important;
+            }
         </style>
     ''')
 
     # 2. Render official declarative <ui-nav-menu> web-component via JavaScript injection
     # Notice: we preserve current query parameters (?shop=..., host=...) on links.
-    # Note: We do NOT use ui.html() here because NiceGUI's DOMPurify sanitization strips
-    # custom elements like <ui-nav-menu>, causing bare <a> links to render as visible text
-    # above the navigation bar in the dashboard.
+    # Note: We append into document.head so browser can NEVER render links visually in the body.
     try:
         request = ui.context.client.request
         params = {k: v for k, v in request.query_params.items() if k in ("shop", "host", "embedded", "session", "id_token")}
@@ -270,17 +279,17 @@ def _shopify_nav_menu():
     links_html_json = json.dumps(links_html)
 
     # 3. Robust JavaScript creation for App Bridge
-    # Appends <ui-nav-menu> directly to document.body outside NiceGUI's Vue component tree.
+    # Appends <ui-nav-menu> directly to document.head outside NiceGUI's Vue component tree.
     ui.run_javascript(f'''
         (function() {{
             try {{
                 var menu = document.querySelector('ui-nav-menu');
                 if (!menu) {{
                     menu = document.createElement('ui-nav-menu');
-                    menu.style.setProperty('display', 'none', 'important');
+                    menu.style.cssText = 'display:none!important;visibility:hidden!important;position:absolute!important;top:-9999px!important;left:-9999px!important;width:0!important;height:0!important;overflow:hidden!important;font-size:0!important;';
                     menu.setAttribute('hidden', 'true');
                     menu.innerHTML = {links_html_json};
-                    document.body.appendChild(menu);
+                    document.head.appendChild(menu);
                 }}
             }} catch(e) {{
                 console.warn("[AppBridge NavMenu]", e);

@@ -418,6 +418,29 @@ def _safe_reply(action: str, data: dict, language: str, original_message: str, f
         return fallback
 
 
+_LEADING_ARTICLE = re.compile(r"^\s*(a|an|the)\s+", re.IGNORECASE)
+_SEARCH_LEAD_IN = re.compile(
+    r"^(?:can you\s+)?(?:please\s+)?(?:show\s+me|find(?:\s+me)?|search(?:\s+for)?|look(?:\s+up|\s+for)?|"
+    r"get(?:\s+me)?|i want(?:\s+to\s+see)?|i'm looking for|i am looking for|do you have(?:\s+any|\s+some)?|"
+    r"tell me about(?:\s+any|\s+some)?|are there(?:\s+any)?|browse|where can i find|what(?:'s|\s+is) your cheapest)\s+",
+    re.IGNORECASE,
+)
+_SEARCH_FILLER = re.compile(r"\b(products?|items?|please|for me|any|around|got|add|remove|delete|to my cart|from my cart|my cart|cart|some|few|available|your|the|best|all)\b", re.IGNORECASE)
+_ORDER_NO_RE = re.compile(r"#?\s*(\d{3,})")
+_MY_ORDERS_RE = re.compile(
+    r"\b(my|all|past|previous|recent|active|current|pending|open)\b[^.?!]{0,30}\borders\b"
+    r"|\blist of (my |the )?orders\b"
+    r"|\border (history|list)\b"
+    r"|\bwhat (have|did) i (order|ordered|bought|purchased)\b"
+    r"|\b(show|list|see|view|track|where are|check|what are) (me )?(my |the |all )?orders\b"
+    r"|\bmere saare orders dikhao\b|\bmere orders\b",
+    re.IGNORECASE,
+)
+_CHECKOUT_RE = re.compile(r"\b(check ?out|perform checkout|checkout for me|place (my|the|an?) order|buy (it )?now|purchase now)\b", re.IGNORECASE)
+_VIEW_CART_RE = re.compile(
+    r"\b(view (my )?cart|show (me )?(my )?cart|what('s| is) in my cart|check (my )?cart|cart (items?|contents?)|my cart contains?|what do i have in my cart|see (my )?cart)\b",
+    re.IGNORECASE,
+)
 _CART_LEAD_IN = re.compile(
     r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:add\s+to\s+(?:my\s+|the\s+)?cart|add|put|place|insert|buy|get)\s+",
     re.IGNORECASE,
@@ -441,20 +464,25 @@ def _is_add_to_cart(message: str) -> tuple[str, int] | None:
         return None
 
     qty = 1
-    m_qty = re.search(r"\b(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", msg_low)
     cleaned = _CART_LEAD_IN.sub("", msg)
     cleaned = _CART_TRAILING.sub("", cleaned)
     m_lead_qty = re.match(r"^\s*(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\s+(.+)$", cleaned, re.IGNORECASE)
     if m_lead_qty:
         qty = int(m_lead_qty.group(1))
         cleaned = m_lead_qty.group(2).strip()
-    elif m_qty:
+    else:
         m_verb_qty = re.search(r"^(?:can you\s+)?(?:please\s+)?(?:add|put)\s+(\d+)\s+(.+)$", msg_low)
         if m_verb_qty:
             qty = int(m_verb_qty.group(1))
             cleaned = _CART_TRAILING.sub("", m_verb_qty.group(2)).strip()
+        else:
+            m_mid_qty = re.search(r"\b(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", cleaned)
+            if m_mid_qty:
+                qty = int(m_mid_qty.group(1))
+                cleaned = re.sub(r"\b" + m_mid_qty.group(1) + r"\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", "", cleaned, flags=re.IGNORECASE).strip()
 
     cleaned = _LEADING_ARTICLE.sub("", cleaned).strip(" .,!?")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if not cleaned or cleaned.lower() in ("to cart", "cart", "it", "this"):
         return None
     return cleaned, qty
@@ -511,47 +539,62 @@ def _is_clear_cart(message: str) -> bool:
     }
 
 
-def _is_product_search(message: str) -> str | None:
+_NON_PRODUCT_SEARCH_KW = re.compile(
+    r"\b(cart|bag|basket|checkout|orders?|track|tracking|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up|policy|policies|shipping|contact|support|email|address|phone|help)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_product_search(message: str) -> tuple[str, bool] | None:
+    """Returns (search_query, is_browse) or None.
+    If is_browse=True, user asked to browse/show products in general.
+    If is_browse=False, user asked for a specific product name.
+    """
     msg = (message or "").strip()
     msg_low = msg.lower()
-    if any(q in msg_low for q in ["how to", "how do i", "when will", "why", "who are you", "what can you do"]):
+    if not msg:
         return None
-    if re.search(r"\b(cart|bag|basket|checkout|order|track|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up)\b", msg_low):
+    if any(q in msg_low for q in ["how to", "how do i", "when will", "why", "who are you", "what can you do", "where is my", "where are my"]):
         return None
+    if _NON_PRODUCT_SEARCH_KW.search(msg_low):
+        return None
+    if msg_low in _EXACT_GREETINGS:
+        return None
+
+    # 1. Lead-in phrases (e.g. 'show me some products', 'search for silence tshirt')
     if _SEARCH_LEAD_IN.search(msg_low):
         cleaned = _SEARCH_LEAD_IN.sub("", msg).strip()
-    else:
-        m = re.match(r"^(?:search|find|show|look\s+for|looking\s+for|do\s+you\s+have)\s+(?:for\s+)?(.+)$", msg, re.IGNORECASE)
-        cleaned = m.group(1).strip() if m else None
-    if cleaned:
+        content_only = _SEARCH_FILLER.sub("", cleaned).strip(" .,!?")
+        if not content_only:
+            return ("", True)  # Browse mode
         cleaned = _LEADING_ARTICLE.sub("", cleaned).strip(" .,!?")
-        if cleaned:
-            return cleaned
+        return (cleaned, False)
+
+    # 2. Standalone search verb match (e.g. 'find silence tshirt', 'show products')
+    m = re.match(r"^(?:search|find|show|look\s+for|looking\s+for|do\s+you\s+have)\s+(?:for\s+)?(.+)$", msg, re.IGNORECASE)
+    if m:
+        cleaned = m.group(1).strip()
+        content_only = _SEARCH_FILLER.sub("", cleaned).strip(" .,!?")
+        if not content_only:
+            return ("", True)  # Browse mode
+        cleaned = _LEADING_ARTICLE.sub("", cleaned).strip(" .,!?")
+        return (cleaned, False)
+
+    # 3. Short standalone phrases (1 to 5 words, like 'silence tshirt', 'cargo pants', 'black hoodie')
+    words = msg.split()
+    if 1 <= len(words) <= 5:
+        stopwords = {"ok", "okay", "yes", "no", "thanks", "thank", "bye", "good", "sure", "hi", "hello", "hey", "help"}
+        if not (set(w.lower() for w in words) & stopwords):
+            cleaned = _LEADING_ARTICLE.sub("", msg).strip(" .,!?")
+            content_only = _SEARCH_FILLER.sub("", cleaned).strip(" .,!?")
+            if not content_only:
+                return ("", True)
+            return (cleaned, False)
+
     return None
 
 
-_SEARCH_LEAD_IN = re.compile(
-    r"^(?:can you\s+)?(?:please\s+)?(?:show\s+me|find(?:\s+me)?|search(?:\s+for)?|look(?:\s+up|\s+for)?|"
-    r"get(?:\s+me)?|i want(?:\s+to\s+see)?|i'm looking for|i am looking for|do you have(?:\s+any|\s+some)?|"
-    r"tell me about(?:\s+any|\s+some)?|are there(?:\s+any)?|browse|where can i find|what(?:'s|\s+is) your cheapest)\s+",
-    re.IGNORECASE,
-)
-_SEARCH_FILLER = re.compile(r"\b(products?|items?|please|for me|any|around|got|add|remove|delete|to my cart|from my cart|my cart|cart|some|few|available|your|the|best|all)\b", re.IGNORECASE)
-_LEADING_ARTICLE = re.compile(r"^\s*(a|an|the)\s+", re.IGNORECASE)
-_CHECKOUT_RE = re.compile(r"\b(check ?out|perform checkout|checkout for me|place (my|the|an?) order|buy (it )?now|purchase now)\b", re.IGNORECASE)
-_VIEW_CART_RE = re.compile(
-    r"\b(view (my )?cart|show (me )?(my )?cart|what('s| is) in my cart|check (my )?cart|cart (items?|contents?)|my cart contains?|what do i have in my cart|see (my )?cart)\b",
-    re.IGNORECASE,
-)
-_ORDER_NO_RE = re.compile(r"#?\s*(\d{3,})")
-_MY_ORDERS_RE = re.compile(
-    r"\b(my|all|past|previous|recent|active|current|pending|open)\b[^.?!]{0,30}\borders\b"
-    r"|\blist of (my |the )?orders\b"
-    r"|\border (history|list)\b"
-    r"|\bwhat (have|did) i (order|ordered|bought|purchased)\b"
-    r"|\b(show|list|see|view|track|where are|check|what are) (me )?(my |the |all )?orders\b"
-    r"|\bmere saare orders dikhao\b|\bmere orders\b",
-    re.IGNORECASE)
+
 _RECOMMEND_RE = re.compile(
     r"\brecommend|\bsuggest|\bsomething for me\b|\bwhat (should|can|do) i (buy|get)\b|\bpick(s)? for me\b|\bwhat would i like\b|\bsomething i (would|might|could) like\b",
     re.IGNORECASE)
@@ -668,7 +711,19 @@ def _term_variants(word: str) -> set:
 
 
 def _product_card(p: dict, store) -> dict:
-    variant = (p.get("variants") or [{}])[0]
+    variants = p.get("variants") or [{}]
+    variant = variants[0]
+    for v in variants:
+        avail = v.get("availableForSale")
+        if avail is None:
+            is_managed = (v.get("inventory_management") or "").lower() == "shopify"
+            policy_continue = (v.get("inventory_policy") or "").lower() == "continue"
+            qty = v.get("inventory_quantity")
+            avail = not is_managed or policy_continue or (qty is not None and int(qty) > 0)
+        if avail:
+            variant = v
+            break
+
     price = variant.get("price")
     try:
         price = float(price)
@@ -684,7 +739,7 @@ def _product_card(p: dict, store) -> dict:
         avail = not is_managed or policy_continue or (qty is not None and int(qty) > 0)
 
     card = {
-        "id": str(variant.get("id")),
+        "id": str(_as_variant_id(variant.get("id"))),
         "name": p.get("title", "Unnamed product"),
         "title": p.get("title", "Unnamed product"),
         "price": price,
@@ -766,13 +821,15 @@ async def _resolve_product(store, text: str):
         return None, None
     wanted = (text or "").strip().lower()
     wanted_norm = re.sub(r"[^a-z0-9]+", "", wanted)
+    if not wanted_norm:
+        return None, None
 
     # 1. Try finding direct product via _find_store_product first
     try:
         prod, variant, in_stock, _ = await shopify_actions._find_store_product(store, text)
         if prod and variant:
             card = _product_card(prod, store)
-            card["id"] = str(variant.get("id"))
+            card["id"] = str(_as_variant_id(variant.get("id")))
             return card, None
     except Exception as e:
         print(f"chatbot_widget: _resolve_product _find_store_product error: {e!r}")
@@ -787,12 +844,14 @@ async def _resolve_product(store, text: str):
         if p_name == wanted or p_norm == wanted_norm:
             return p, None
 
-    # If first candidate is a match or starts with/contains wanted
-    if found:
-        first_norm = re.sub(r"[^a-z0-9]+", "", found[0].get("name", "").lower())
-        if wanted_norm in first_norm or first_norm in wanted_norm:
-            return found[0], None
-        return found[0], None
+    for p in found:
+        p_name = p.get("name", "").lower()
+        p_norm = re.sub(r"[^a-z0-9]+", "", p_name)
+        if wanted_norm in p_norm or p_norm in wanted_norm:
+            return p, None
+        sim = difflib.SequenceMatcher(None, wanted_norm, p_norm).ratio()
+        if sim >= 0.70:
+            return p, None
 
     return None, found
 
@@ -824,8 +883,10 @@ def _llm_view(data):
 
 
 def _as_variant_id(value):
-    s = str(value)
-    return int(s) if s.isdigit() else value
+    s = str(value or "").strip()
+    if "/" in s:
+        s = s.rstrip("/").split("/")[-1]
+    return int(s) if s.isdigit() else s
 
 
 # =======================================================================
@@ -1322,7 +1383,22 @@ async def _chat_impl(req: ChatRequest):
     _m_cart = _is_add_to_cart(message)
     _m_rem = _is_remove_from_cart(message)
     _m_search = _is_product_search(message)
-    if _m_cart:
+
+    if _MY_ORDERS_RE.search(message):
+        is_active = any(w in _msg_lower for w in ["active", "pending", "open", "in progress"])
+        intent, action = "order_tracking", "list_recent_orders"
+        entities = {"filter": "active", "active_only": True} if is_active else {}
+        language = "en"
+        classification = {
+            "intent": intent,
+            "action": action,
+            "entities": entities,
+            "language": language,
+            "requires_confirmation": False,
+            "message_type": "normal",
+            "is_action": False,
+        }
+    elif _m_cart:
         item_name, item_qty = _m_cart
         intent, action = "cart_management", "add_item"
         entities = {"product_name_or_id": item_name, "quantity": item_qty}
@@ -1366,8 +1442,32 @@ async def _chat_impl(req: ChatRequest):
             "is_action": True,
         }
     elif _m_search:
-        intent, action = "product_search", "search_products"
-        entities = {"query": _m_search}
+        search_query, is_browse = _m_search
+        if is_browse:
+            intent, action = "product_search", "get_recommendations"
+            entities = {}
+        else:
+            intent, action = "product_search", "search_products"
+            entities = {"query": search_query}
+        language = "en"
+        classification = {
+            "intent": intent,
+            "action": action,
+            "entities": entities,
+            "language": language,
+            "requires_confirmation": False,
+            "message_type": "normal",
+            "is_action": False,
+        }
+    elif any(w in _msg_lower for w in ["available", "in stock", "out of stock"]) and ("whether" in _msg_lower or "is " in _msg_lower or "check" in _msg_lower or "tell me" in _msg_lower or "available or not" in _msg_lower):
+        clean_p = re.sub(
+            r"\b(tell me whether|tell me if|is it|is this|are these|whether this|check availability|available or not|in stock|out of stock|available in stock|is|are|available|product|this item|this|it|that|the|do you have|got)\b",
+            "",
+            message,
+            flags=re.IGNORECASE,
+        ).strip("?.,! ")
+        intent, action = "product_search", "check_availability"
+        entities = {"product_title": clean_p} if clean_p and clean_p.lower() not in ("this", "it", "that", "item", "product") else {}
         language = "en"
         classification = {
             "intent": intent,
@@ -1640,14 +1740,12 @@ async def _chat_impl(req: ChatRequest):
                 return out
             quantity = int(entities.get("quantity") or 1)
             product, options = await _resolve_product(store, str(term))
-            if not product and options:
-                product = options[0]
 
             if not product:
                 prod, var, in_stk, _ = await shopify_actions._find_store_product(store, str(term))
                 if prod and var:
                     product = _product_card(prod, store)
-                    product["id"] = str(var.get("id"))
+                    product["id"] = str(_as_variant_id(var.get("id")))
 
             if product:
                 result = _add_to_cart_result(product, quantity, language, message)
@@ -3599,20 +3697,38 @@ WIDGET_JS = r"""
   }
 
   function cartAdd(variantId, quantity, btnEl) {
+    if (!variantId) {
+      if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Add to cart"; }
+      addBubble("Sorry, this item is currently unavailable or missing selectable options.", "bot");
+      return;
+    }
     if (btnEl) { btnEl.disabled = true; btnEl.textContent = "Adding\u2026"; }
+    var cleanId = parseInt(String(variantId).replace(/\D+/g, ""), 10) || variantId;
     fetch("/cart/add.js", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items: [{ id: variantId, quantity: quantity || 1 }] })
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ id: cleanId, quantity: quantity || 1 })
     })
-      .then(function (res) { if (!res.ok) throw new Error("add failed"); return res.json(); })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().then(function (data) {
+            throw new Error(data.description || data.message || "Could not add item to cart.");
+          }).catch(function (e) {
+            throw new Error(e.message || "Could not add item to cart.");
+          });
+        }
+        return res.json();
+      })
       .then(function () {
-        if (btnEl) btnEl.textContent = "Added \u2713";
+        if (btnEl) {
+          btnEl.textContent = "Added \u2713";
+          setTimeout(function() { if (btnEl) btnEl.disabled = false; }, 2000);
+        }
         notifyCartUpdate();
       })
-      .catch(function () {
+      .catch(function (err) {
         if (btnEl) { btnEl.disabled = false; btnEl.textContent = "Add to cart"; }
-        addBubble("Could not add item to cart. Please try again.", "bot");
+        addBubble(err.message || "Could not add item to cart. Please try again.", "bot");
       });
   }
 
