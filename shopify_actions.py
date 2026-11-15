@@ -2572,29 +2572,16 @@ async def _find_store_product(store, product_query: str, size: str = "", color: 
             break
 
     if not chosen_variant:
+        import direct_order_service
         for v in variants:
-            is_managed = (v.get("inventory_management") or "").lower() == "shopify"
-            policy_continue = (v.get("inventory_policy") or "").lower() == "continue"
-            qty = v.get("inventory_quantity")
-            if not is_managed or policy_continue or (qty is not None and int(qty) > 0):
+            if direct_order_service.is_variant_in_stock(v, best_p):
                 chosen_variant = v
                 break
         if not chosen_variant:
             chosen_variant = variants[0]
 
-    avail = chosen_variant.get("availableForSale")
-    if avail is None:
-        avail = chosen_variant.get("available")
-    if avail is False:
-        is_in_stock = False
-    elif qty is not None and int(qty) <= 0:
-        is_in_stock = False
-    elif not is_managed or policy_continue:
-        is_in_stock = True
-    elif qty is not None and int(qty) > 0:
-        is_in_stock = True
-    else:
-        is_in_stock = False
+    import direct_order_service
+    is_in_stock = direct_order_service.is_variant_in_stock(chosen_variant, best_p)
 
     return best_p, chosen_variant, is_in_stock, True
 

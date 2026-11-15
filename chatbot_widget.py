@@ -735,16 +735,11 @@ def _term_variants(word: str) -> set:
 
 
 def _product_card(p: dict, store) -> dict:
+    import direct_order_service
     variants = p.get("variants") or [{}]
     variant = variants[0]
     for v in variants:
-        avail = v.get("availableForSale")
-        if avail is None:
-            is_managed = (v.get("inventory_management") or "").lower() == "shopify"
-            policy_continue = (v.get("inventory_policy") or "").lower() == "continue"
-            qty = v.get("inventory_quantity")
-            avail = not is_managed or policy_continue or (qty is not None and int(qty) > 0)
-        if avail:
+        if direct_order_service.is_variant_in_stock(v, p):
             variant = v
             break
 
@@ -755,12 +750,7 @@ def _product_card(p: dict, store) -> dict:
     except (TypeError, ValueError):
         pass
 
-    avail = variant.get("availableForSale")
-    if avail is None:
-        is_managed = (variant.get("inventory_management") or "").lower() == "shopify"
-        policy_continue = (variant.get("inventory_policy") or "").lower() == "continue"
-        qty = variant.get("inventory_quantity")
-        avail = not is_managed or policy_continue or (qty is not None and int(qty) > 0)
+    avail = direct_order_service.is_variant_in_stock(variant, p)
 
     card = {
         "id": str(_as_variant_id(variant.get("id"))),
@@ -1441,6 +1431,25 @@ async def _chat_impl(req: ChatRequest):
     _m_cart = _is_add_to_cart(message)
     _m_rem = _is_remove_from_cart(message)
     _is_pol, _pol_type = _is_policy_query(_msg_lower)
+
+    # Direct Order Request: customer asks agent to order a product for them directly.
+    # Pre-fills customer and order details and takes customer straight to payment checkout page.
+    import direct_order_service
+    _is_dir, _dir_p, _dir_q = direct_order_service.is_direct_order_request(message)
+    if _is_dir:
+        last_prod = _SESSION_LAST_PRODUCT.get((req.shop, req.session_id))
+        dir_res = await direct_order_service.handle_direct_order_request(
+            store=store,
+            message=message,
+            session_id=req.session_id,
+            customer_id=customer_id,
+            customer_email=customer_email,
+            customer_name=customer_name,
+            last_product=last_prod,
+        )
+        if dir_res:
+            _log(req.shop, message, dir_res.get("status", "done"), "order_management", "direct_order", {"product": _dir_p, "quantity": _dir_q}, dir_res.get("reply", ""))
+            return dir_res
 
     # 1. Store Policies & FAQ (e.g. "can I pay with UPI?", "shipping policy", "what is your return policy?")
     if _is_pol:
