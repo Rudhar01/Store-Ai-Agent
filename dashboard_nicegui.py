@@ -98,7 +98,18 @@ STATUS_STYLES = {
     "inactive": {"bg": "#F3F4F6", "text": "#9CA3AF", "dot": "#EF4444", "label": "Inactive"},
 }
 
-THEME_SWATCHES = ["#4B5563", "#6B7280", "#9CA3AF", "#374151", "#1F2937"]
+THEME_SWATCHES = [
+    # Neutrals / Grays
+    "#111827", "#1f2937", "#374151", "#4b5563", "#6b7280", "#9ca3af",
+    # Warm: Reds, Oranges, Amber & Yellows
+    "#b91c1c", "#dc2626", "#ef4444", "#ea580c", "#f97316", "#f59e0b", "#eab308",
+    # Greens & Teals
+    "#65a30d", "#16a34a", "#22c55e", "#059669", "#0d9488", "#14b8a6",
+    # Blues & Indigos
+    "#0284c7", "#0ea5e9", "#2563eb", "#3b82f6", "#4f46e5", "#6366f1",
+    # Purples & Pinks
+    "#7c3aed", "#9333ea", "#c026d3", "#db2777", "#ec4899", "#f43f5e",
+]
 
 CARD_CLASSES = "bg-white rounded-2xl border border-gray-100 shadow-sm w-full"
 
@@ -496,22 +507,6 @@ def _layout(active_key: str, store: dict, agent: dict):
             ui.button("Log out", icon="logout", on_click=_logout).props("no-caps flat").classes(
                 "px-3 py-1.5 text-xs font-semibold"
             ).style("border:1px solid #E5E7EB;border-radius:999px;color:#4B5563;")
-
-    # ---- Navigation Bar (Responsive In-Frame Fallback & Quick Tab Bar) ----
-    # Renders the full navigation menu across the top of the dashboard
-    # ensuring instant access even if Shopify Admin sidebar is collapsed
-    # or App Bridge is connecting.
-    with ui.row().classes("w-full bg-white border-b border-gray-100 px-6 py-2 overflow-x-auto no-scrollbar gap-1.5 items-center"):
-        for key, label, icon in NAV_ITEMS:
-            is_active = (key.lower() == active_key.lower()) or (active_key == "dashboard" and key == "Dashboard")
-            bg_style = f"background:{BRAND_SOFT};color:{BRAND};font-weight:600;" if is_active else "color:#6B7280;font-weight:500;"
-            ui.button(
-                label,
-                icon=icon,
-                on_click=lambda k=key: _goto(f"/dashboard/{k}"),
-            ).props("flat no-caps dense").classes("px-3 py-1.5 rounded-lg text-xs").style(
-                f"{bg_style}transition:all 0.15s ease;"
-            )
 
     # ---- Content area ----
     content = ui.column().classes("w-full max-w-5xl mx-auto p-8 gap-4")
@@ -2543,26 +2538,55 @@ def appearance_page():
     with content:
         _page_header("Appearance", "Customize how the chat widget looks on your storefront.")
 
-        color_value = {"v": cfg.get("theme_color", "#2b2b2b")}
+        color_value = {"v": cfg.get("theme_color") or "#f97316"}
 
-        with ui.card().classes(CARD_CLASSES + " p-6 gap-3"):
-            ui.label("Theme color").classes("text-xs font-semibold text-gray-600")
-            with ui.row().classes("gap-2") as swatch_row:
-                pass
+        with ui.card().classes(CARD_CLASSES + " p-6 gap-4"):
+            with ui.column().classes("gap-1"):
+                ui.label("Theme color").classes("text-sm font-semibold text-gray-800")
+                ui.label("Pick any colour: use the colour wheel/spectrum, type a hex code, or choose a swatch.").classes("text-xs text-gray-500")
+
+            color_input = ui.color_input("Custom colour (hex)", value=color_value["v"], preview=True).classes("w-72")
+            color_input.button.classes("w-9 h-9 rounded-full shadow-sm")
+            color_input.button.style("color: white !important;")
+
+            with ui.row().classes("items-center gap-3 my-0.5"):
+                chat_preview_dot = ui.element("div").classes("w-9 h-9 rounded-full flex items-center justify-center shadow-md transition-all").style(
+                    f"background:{color_value['v']};"
+                )
+                with chat_preview_dot:
+                    ui.icon("chat_bubble", size="18px").style("color:white;")
+                ui.label("Preview of your chat button").classes("text-xs font-medium text-gray-500")
+
+            with ui.column().classes("w-full gap-2 mt-2"):
+                ui.label("Quick picks").classes("text-xs font-semibold text-gray-700")
+                swatch_container = ui.row().classes("gap-2 items-center").style("max-width:920px;")
+
+            def update_color(new_c: str):
+                if not new_c:
+                    return
+                new_c = str(new_c).strip()
+                if not new_c.startswith("#") and len(new_c) in (3, 6):
+                    new_c = "#" + new_c
+                color_value["v"] = new_c
+                color_input.value = new_c
+                chat_preview_dot.style(f"background:{new_c};")
+                render_swatches()
 
             def render_swatches():
-                swatch_row.clear()
-                with swatch_row:
+                swatch_container.clear()
+                with swatch_container:
                     for c in THEME_SWATCHES:
-                        selected = color_value["v"] == c
-                        dot = ui.element("div").classes("w-8 h-8 rounded-full cursor-pointer").style(
-                            f"background:{c};border:3px solid {'#111827' if selected else 'transparent'};"
+                        selected = (color_value["v"].lower() == c.lower())
+                        border_style = "border:2.5px solid #111827;box-shadow:0 0 0 1.5px white inset;" if selected else "border:2px solid transparent;"
+                        dot = ui.element("div").classes("w-7 h-7 rounded-full cursor-pointer transition-transform hover:scale-110").style(
+                            f"background:{c};{border_style}"
                         )
-                        dot.on("click", lambda c=c: (color_value.update(v=c), render_swatches()))
+                        dot.on("click", lambda c=c: update_color(c))
 
             render_swatches()
+            color_input.on_value_change(lambda e: update_color(e.value) if e.value else None)
 
-            welcome = ui.input("Welcome message", value=cfg.get("agent_title", "")).classes("w-full")
+            welcome = ui.input("Welcome message", value=cfg.get("agent_title", "") or "How can I help you today?").classes("w-full mt-2")
 
             saved_label = ui.label("").classes("text-xs text-gray-500 font-medium")
 
@@ -2573,14 +2597,14 @@ def appearance_page():
                     agent_title=welcome.value.strip() or cfg.get("agent_title", ""),
                 )
                 _trigger_widget_install_async(store)
-                saved_label.text = "Saved & synced to store ✓"
+                saved_label.text = "Saved ✓"
 
-            with ui.row().classes("items-center gap-2 mt-2"):
+            with ui.row().classes("items-center gap-3 mt-1"):
                 ui.button("Save changes", on_click=save).props("no-caps").style(
-                    f"background:{BRAND};color:white;border-radius:10px;"
+                    f"background:{BRAND};color:white;border-radius:10px;padding:8px 20px;font-weight:600;"
                 )
                 ui.button("Preview", icon="visibility", on_click=lambda: _open_preview(store)).props("no-caps flat").style(
-                    f"border:1px solid #E5E7EB;color:#4B5563;border-radius:10px;"
+                    "border:1px solid #E5E7EB;color:#4B5563;border-radius:10px;padding:8px 18px;font-weight:500;"
                 )
 
         with ui.card().classes(CARD_CLASSES + " p-6 gap-2"):
