@@ -239,6 +239,7 @@ _CUSTOMER_EMAILS: dict[tuple[str, str], str] = {}
 _CUSTOMER_NAMES: dict[tuple[str, str], str] = {}
 _CUSTOMER_VISITORS: dict[tuple[str, str], str] = {}
 _SESSION_TIMESTAMPS: dict[tuple[str, str], float] = {}
+_SESSION_LAST_PRODUCT: dict[tuple[str, str], dict] = {}
 
 
 def _clear_session(shop: str, session_id: str) -> None:
@@ -248,6 +249,7 @@ def _clear_session(shop: str, session_id: str) -> None:
     _CUSTOMER_NAMES.pop(key, None)
     _CUSTOMER_VISITORS.pop(key, None)
     _SESSION_TIMESTAMPS.pop(key, None)
+    _SESSION_LAST_PRODUCT.pop(key, None)
     HISTORY.pop(_pkey(shop, session_id), None)
 
 
@@ -717,7 +719,10 @@ def extract_search_term(message: str) -> str:
     m = re.sub(r"^\s*(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\s+", "", m, flags=re.IGNORECASE)
     m = _LEADING_ARTICLE.sub("", m)
     m = _SEARCH_FILLER.sub("", m)
-    return re.sub(r"\s+", " ", m).strip(" .,!?")
+    cleaned = re.sub(r"\s+", " ", m).strip(" .,!?")
+    if cleaned.lower() in ("it", "this", "that", "these", "those", "them", "to", "cart", "to cart", "one", "item", "the item", "product", "the product"):
+        return ""
+    return cleaned
 
 
 def _words(text: str) -> list[str]:
@@ -840,7 +845,7 @@ async def _resolve_product(store, text: str):
         return None, None
     wanted = (text or "").strip().lower()
     wanted_norm = re.sub(r"[^a-z0-9]+", "", wanted)
-    if not wanted_norm:
+    if not wanted_norm or wanted in ("it", "this", "that", "to", "cart", "item", "product", "one", "these", "those", "them"):
         return None, None
 
     # 1. Try finding direct product via _find_store_product first
@@ -849,6 +854,8 @@ async def _resolve_product(store, text: str):
         if prod and variant:
             card = _product_card(prod, store)
             card["id"] = str(_as_variant_id(variant.get("id")))
+            card["in_stock"] = bool(in_stock)
+            card["available"] = bool(in_stock)
             return card, None
     except Exception as e:
         print(f"chatbot_widget: _resolve_product _find_store_product error: {e!r}")
@@ -857,22 +864,47 @@ async def _resolve_product(store, text: str):
     if not found:
         return None, None
 
+    # Clean tokens and distinctive tokens from user text
+    tokens = shopify_actions._clean_search_tokens(text)
+    distinctive_tokens = [t for t in tokens if t.lower() not in shopify_actions._GENERIC_CAT_WORDS and len(t) >= 2]
+    if not distinctive_tokens and tokens:
+        distinctive_tokens = tokens
+
+    # 1. Exact title or normalized match
     for p in found:
         p_name = p.get("name", "").lower()
         p_norm = re.sub(r"[^a-z0-9]+", "", p_name)
         if p_name == wanted or p_norm == wanted_norm:
             return p, None
 
+    # 2. Strict distinctive token matching: candidate MUST match distinctive tokens
+    matching_candidates = []
     for p in found:
         p_name = p.get("name", "").lower()
+        p_words = set(re.findall(r"[a-z0-9]+", p_name))
         p_norm = re.sub(r"[^a-z0-9]+", "", p_name)
-        if wanted_norm in p_norm or p_norm in wanted_norm:
-            return p, None
-        sim = difflib.SequenceMatcher(None, wanted_norm, p_norm).ratio()
-        if sim >= 0.70:
-            return p, None
 
-    return None, found
+        if distinctive_tokens:
+            matched_dt = False
+            for dt in distinctive_tokens:
+                dt_clean = dt.lower()
+                dt_sing = dt_clean[:-1] if dt_clean.endswith("s") and len(dt_clean) > 3 else dt_clean
+                if dt_clean in p_norm or any(pw == dt_clean or pw == dt_sing or pw.startswith(dt_sing) for pw in p_words):
+                    matched_dt = True
+                    break
+                if any(difflib.SequenceMatcher(None, dt_clean, pw).ratio() >= 0.78 for pw in p_words if len(pw) >= 3):
+                    matched_dt = True
+                    break
+            if matched_dt:
+                matching_candidates.append(p)
+        else:
+            if wanted_norm in p_norm or difflib.SequenceMatcher(None, wanted_norm, p_norm).ratio() >= 0.75:
+                matching_candidates.append(p)
+
+    if matching_candidates:
+        return matching_candidates[0], matching_candidates
+
+    return None, None
 
 
 def _apply_price_filters(cards: list[dict], entities: dict) -> list[dict]:
@@ -952,6 +984,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
         first_prod = products[0]
         if isinstance(first_prod, dict) and first_prod.get("name"):
             entities["matched_product"] = first_prod["name"]
+            _SESSION_LAST_PRODUCT[(getattr(store, "shop_domain", ""), session_id)] = first_prod
     orders = None
     if action in {"list_recent_orders", "get_my_orders"} and isinstance(data, dict):
         if data.get("active_only") or entities.get("filter") == "active":
@@ -1066,7 +1099,7 @@ def _remove_from_cart_result(product_name: str, variant_id: any, quantity: int |
 
 def _ask(key: str, ptype: str, instruction: str, language: str, message: str, fallback: str, **extra) -> dict:
     _set_pending(key, type=ptype, language=language, **extra)
-    reply = _safe_reply("clarify", {"instruction": instruction}, language, message, fallback)
+    reply = _safe_reply("clarify", {"instruction": instruction, "message": fallback}, language, message, fallback)
     return {"status": "done", "reply": reply, "language": language}
 
 
@@ -1201,16 +1234,21 @@ async def _handle_followup(store, shop: str, key: str, pending: dict, message: s
         return result
 
     product, options = await _resolve_product(store, message)
-    if not product and options:
-        product = options[0]
     if not product:
         prod, var, in_stk, _ = await shopify_actions._find_store_product(store, message)
         if prod and var:
             product = _product_card(prod, store)
-            product["id"] = str(var.get("id"))
+            product["id"] = str(_as_variant_id(var.get("id")))
+            product["in_stock"] = bool(in_stk)
+            product["available"] = bool(in_stk)
     if product:
+        if not product.get("in_stock", True) and not product.get("available", True):
+            reply = f"'{product['name']}' is currently out of stock. Would you like me to notify you when it's back in stock or suggest similar items?"
+            _log(shop, message, "out_of_stock", intent, action, {"product_name_or_id": product["name"]}, reply)
+            return {"status": "out_of_stock", "reply": reply, "language": language}
         quantity = int((pending.get("entities") or {}).get("quantity") or 1)
         result = _add_to_cart_result(product, quantity, language, message)
+        _SESSION_LAST_PRODUCT[(shop, session_id)] = product
         _log(shop, message, "done", intent, action, {"product_name_or_id": product["name"]}, result["reply"])
         return result
     if options:
@@ -1760,6 +1798,15 @@ async def _chat_impl(req: ChatRequest):
             term = entities.get("product_name_or_id")
             if not term:
                 term = extract_search_term(message)
+            if term and str(term).strip().lower() in ("it", "this", "that", "these", "those", "them", "to", "one", "item", "product", "the product", "this product", "to cart", "cart", "in cart", "the item"):
+                term = ""
+
+            # Check if user meant the previously discussed/shown product in this session
+            if not term:
+                last_prod = _SESSION_LAST_PRODUCT.get((req.shop, req.session_id))
+                if last_prod and (last_prod.get("id") or last_prod.get("name") or last_prod.get("title")):
+                    term = last_prod.get("name") or last_prod.get("title")
+
             if term:
                 m_qty = re.match(r"^(\d+)\s*(?:x|units?|pieces?|items?|pcs?|of)?\s+(.+)$", str(term).strip(), re.IGNORECASE)
                 if m_qty:
@@ -1787,9 +1834,27 @@ async def _chat_impl(req: ChatRequest):
                 if prod and var:
                     product = _product_card(prod, store)
                     product["id"] = str(_as_variant_id(var.get("id")))
+                    product["in_stock"] = bool(in_stk)
+                    product["available"] = bool(in_stk)
 
             if product:
+                # Check stock availability
+                if not product.get("in_stock", True) and not product.get("available", True):
+                    reply = f"'{product['name']}' is currently out of stock. Would you like me to notify you when it's back in stock or suggest similar items?"
+                    _log(req.shop, message, "out_of_stock", intent, action, {**entities, "product_name_or_id": product["name"]}, reply)
+                    return {
+                        "status": "out_of_stock",
+                        "reply": reply,
+                        "language": language,
+                        "intent": "cart_management",
+                        "action": "add_item",
+                        "product_name": product["name"],
+                        "variant_id": product.get("id"),
+                        "in_stock": False,
+                    }
+
                 result = _add_to_cart_result(product, quantity, language, message)
+                _SESSION_LAST_PRODUCT[(req.shop, req.session_id)] = product
                 _log(req.shop, message, "done", intent, action, {**entities, "product_name_or_id": product["name"], "quantity": quantity}, result["reply"])
                 return result
 

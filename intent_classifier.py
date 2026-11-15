@@ -652,6 +652,8 @@ def _extract_cart_product_and_qty(user_message: str) -> tuple[str, int]:
         return var_id, qty
 
     if cleaned.isdigit():
+        if len(cleaned) <= 2:
+            return "", int(cleaned)
         return cleaned, 1
 
     m_lead_qty = re.match(r"^\s*(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\s+(.+)$", cleaned, re.IGNORECASE)
@@ -671,6 +673,15 @@ def _extract_cart_product_and_qty(user_message: str) -> tuple[str, int]:
 
     cleaned = re.sub(r"^\s*(?:a|an|the)\s+", "", cleaned, flags=re.IGNORECASE).strip(" .,!?")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    # Reject conversational pronouns or cart references so they don't search the catalog for "it" or "to"
+    if cleaned.lower() in (
+        "", "to cart", "cart", "it", "this", "that", "these", "those", "them",
+        "to", "one", "item", "the item", "product", "the product", "this product",
+        "in cart", "into cart", "it please", "this please", "of it", "of this",
+    ):
+        cleaned = ""
+
     return cleaned, qty
 
 

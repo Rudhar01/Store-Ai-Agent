@@ -976,7 +976,7 @@ async def _resolve_variant(store, product_query: str) -> dict | None:
             needle_norm = re.sub(r"[^a-z0-9]+", "", q_str.lower())
             for p in resp.json().get("products", []):
                 p_title_norm = re.sub(r"[^a-z0-9]+", "", (p.get("title") or "").lower())
-                if needle_norm == p_title_norm or needle_norm in p_title_norm:
+                if needle_norm and (needle_norm == p_title_norm or needle_norm in p_title_norm):
                     variant = (p.get("variants") or [{}])[0]
                     return {
                         "product_id": p.get("id"),
@@ -989,22 +989,20 @@ async def _resolve_variant(store, product_query: str) -> dict | None:
     except Exception as e:
         print(f"[_resolve_variant] API error: {e!r}")
 
-    # Fallback heuristic for test stores or when catalog lookup is offline
-    return {
-        "product_id": None,
-        "variant_id": abs(hash(q_str)) % 100000000 + 100000,
-        "variant_title": "",
-        "name": q_str,
-        "price": "19.99",
-        "image": "",
-    }
+    # Not found in catalog — return None so add_item never adds a bogus/wrong item
+    return None
 
 
 async def add_item(store, entities: dict, session_id: str) -> dict:
     query = entities.get("product_name_or_id", "")
     match = await _resolve_variant(store, query)
     if not match or not match.get("variant_id"):
-        return {"error": "not_found", "query": query}
+        return {
+            "error": "not_found",
+            "status": "not_found",
+            "query": query,
+            "message": f"I couldn't find \"{query}\" in our store catalog. Please check the product name or explore our collection.",
+        }
 
     quantity = int(entities.get("quantity") or 1)
     cart = await _get_or_create_cart(store, session_id)
@@ -2519,30 +2517,34 @@ async def _find_store_product(store, product_query: str, size: str = "", color: 
     if not all_products:
         return None, None, False, True
 
-    tokens = _clean_search_tokens(str(product_query))
+    q_str = str(product_query).strip()
+
+    # If numeric variant ID or product ID is given
+    if q_str.isdigit():
+        target_id = int(q_str)
+        for p in all_products:
+            if p.get("id") == target_id:
+                vars_list = p.get("variants") or []
+                v = vars_list[0] if vars_list else None
+                return p, v, bool(v.get("availableForSale", True) if v else False), True
+            for v in p.get("variants") or []:
+                if v.get("id") == target_id:
+                    return p, v, bool(v.get("availableForSale", True)), True
+
+    tokens = _clean_search_tokens(q_str)
     corrected_tokens = [_COMMON_TYPO_MAP.get(t, t) for t in tokens]
-    q_lower = str(product_query).lower().strip()
-    q_norm = re.sub(r"[^a-z0-9]+", "", q_lower)
+    distinctive_tokens = [t for t in tokens if t.lower() not in _GENERIC_CAT_WORDS and len(t) >= 2]
+    if not distinctive_tokens and tokens:
+        distinctive_tokens = tokens
+    corrected_distinctive = [_COMMON_TYPO_MAP.get(t, t) for t in distinctive_tokens]
 
     scored = []
     for p in all_products:
-        p_title = (p.get("title") or "").lower()
-        p_handle = (p.get("handle") or "").lower()
-        p_title_norm = re.sub(r"[^a-z0-9]+", "", p_title)
-        p_handle_norm = re.sub(r"[^a-z0-9]+", "", p_handle)
-
-        if q_lower == p_title or q_lower == p_handle or (q_norm and q_norm == p_title_norm) or (q_norm and q_norm == p_handle_norm):
-            score = 20.0
-        elif (q_norm and q_norm in p_title_norm) or (p_title_norm and p_title_norm in q_norm):
-            score = 15.0
-        elif q_lower in p_title or p_title in q_lower:
-            score = 10.0
-        elif corrected_tokens or tokens:
-            score = max(_score_product_match(p, corrected_tokens), _score_product_match(p, tokens))
-        else:
-            score = 0.0
-
-        if score >= 0.70:
+        is_match, score = _evaluate_product_search_match(p, q_str, tokens, distinctive_tokens)
+        if not is_match or score <= 0.0:
+            if corrected_tokens != tokens or corrected_distinctive != distinctive_tokens:
+                is_match, score = _evaluate_product_search_match(p, " ".join(corrected_tokens), corrected_tokens, corrected_distinctive)
+        if is_match and score > 0.0:
             scored.append((score, p))
 
     if not scored:
