@@ -490,10 +490,119 @@ def _is_clear_cart_query(msg_low: str) -> bool:
     }
 
 
+_EXACT_GREETINGS = {
+    "hi", "hello", "hey", "good morning", "good afternoon", "good evening",
+    "hey there", "hi there", "hello there", "namaste", "hola", "sup", "howdy",
+}
+_CHECKOUT_RE = re.compile(
+    r"\b(check ?out|perform checkout|checkout for me|place (my|the|an?) order|buy (it )?now|purchase now|pay now|proceed to checkout|go to checkout|take me to checkout|proceed to payment|complete checkout|pay for (my )?cart)\b",
+    re.IGNORECASE,
+)
+_EXACT_CHECKOUT = {
+    "checkout", "pay now", "proceed to checkout", "go to checkout",
+    "pay for my cart", "complete checkout", "take me to checkout",
+    "proceed to payment", "complete payment", "pay for cart",
+}
+_VIEW_CART_RE = re.compile(
+    r"\b(view (my )?cart|show (me )?(my )?cart|what('s| is) in my cart|check (my )?cart|cart (items?|contents?)|my cart contains?|what do i have in my cart|see (my )?cart|open cart|show my bag|view bag)\b",
+    re.IGNORECASE,
+)
+_EXACT_CART_VIEW = {
+    "view cart", "show cart", "view my cart", "show my cart", "my cart",
+    "what's in my cart", "whats in my cart", "see my cart", "check my cart",
+}
+
+
+def _is_greeting(msg_low: str) -> bool:
+    clean = msg_low.strip(" .,!?")
+    if clean in _EXACT_GREETINGS:
+        return True
+    return bool(re.match(r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))\b", clean))
+
+
+def _is_assistant_help(msg_low: str) -> bool:
+    clean = msg_low.strip(" .,!?")
+    if clean in {"help", "features", "who are you", "what can you do"}:
+        return True
+    return any(p in clean for p in [
+        "who are you", "what can you do", "help me", "what are your features",
+        "how can you help", "what do you do", "tell me what you can do",
+        "what can i ask", "how does this work",
+    ])
+
+
+def _is_view_cart_query(msg_low: str) -> bool:
+    clean = msg_low.strip(" .,!?")
+    if clean in _EXACT_CART_VIEW or clean in {"cart", "my bag", "the cart"}:
+        return True
+    return bool(_VIEW_CART_RE.search(clean))
+
+
+def _is_checkout_query(msg_low: str) -> bool:
+    clean = msg_low.strip(" .,!?")
+    if any(q in clean for q in ["can i pay with", "do you accept", "is cod", "is upi", "payment method", "how can i pay"]):
+        return False
+    if clean in _EXACT_CHECKOUT:
+        return True
+    return bool(_CHECKOUT_RE.search(clean))
+
+
+def _is_policy_query(msg_low: str) -> tuple[bool, str]:
+    clean = (msg_low or "").strip(" .,!?")
+    if any(k in clean for k in ["upi", "cod", "cash on delivery", "payment method", "payment methods", "payment option", "can i pay with", "do you accept", "how can i pay"]):
+        return True, "payment_policy"
+    if any(k in clean for k in ["shipping policy", "delivery policy", "shipping charge", "delivery time", "how long does delivery take", "how long to deliver", "when will i receive my delivery", "do you ship to", "courier partner"]):
+        return True, "shipping_policy"
+    if any(k in clean for k in ["return policy", "refund policy", "how to return", "days to return", "what is your return policy", "what is your refund policy", "policy on returns", "policy on refunds"]):
+        return True, "return_policy"
+    if any(k in clean for k in ["warranty policy", "warranty coverage", "warranty period", "do you offer warranty", "how to claim warranty", "guarantee"]):
+        return True, "warranty_policy"
+    if any(k in clean for k in ["privacy policy", "data privacy", "how do you use my data", "privacy"]):
+        return True, "privacy_policy"
+    return False, ""
+
+
+def _is_track_order_query(msg_low: str) -> tuple[bool, str | None]:
+    if any(q in msg_low for q in ["return", "cancel", "change address", "eligible", "policy"]):
+        return False, None
+    m = re.search(r"\b(?:track|where is|status of|where's|check status of)\s+(?:my\s+)?(?:order|package|shipment)\s*(?:#?\s*(\d{3,8}))?\b", msg_low, re.IGNORECASE)
+    if m:
+        ord_no = m.group(1) or _extract_order_number(msg_low)
+        return True, ord_no
+    if any(p in msg_low for p in ["track order", "track my order", "track package", "where is my order", "where is order", "status of order", "order status"]):
+        return True, _extract_order_number(msg_low)
+    return False, None
+
+
+def _is_restock_alert_query(msg_low: str) -> tuple[bool, str]:
+    if any(p in msg_low for p in ["notify me when", "alert me when", "tell me when", "email me when", "let me know when"]):
+        if any(w in msg_low for w in ["back in stock", "in stock", "restock", "restocked", "available"]):
+            clean = re.sub(r"^(?:can you\s+)?(?:please\s+)?(?:notify|alert|tell|email|let)\s+(?:me\s+)?(?:when\s+)?", "", msg_low)
+            clean = re.sub(r"\s+(?:is\s+)?(?:back\s+)?(?:in\s+stock|restocked|available)\s*$", "", clean)
+            return True, clean.strip()
+    return False, ""
+
+
+def _is_standing_instruction_query(msg_low: str) -> bool:
+    return any(p in msg_low for p in [
+        "drops below", "price drop", "drops to", "remind me to reorder", "reorder in",
+        "add this to my cart when", "add to cart when", "auto add when restocked",
+        "auto add", "notify me when price",
+    ])
+
+
+def _is_edit_address_query(msg_low: str) -> bool:
+    return any(p in msg_low for p in ["change address", "change shipping address", "update address", "edit address", "update delivery address"])
+
+
 def _is_product_search_query(msg_low: str) -> bool:
     if any(q in msg_low for q in ["how to", "how do i", "when will", "why", "who are you", "what can you do", "where is my", "where are my"]):
         return False
-    if re.search(r"\b(cart|bag|basket|checkout|orders?|track|tracking|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up|policy|policies|shipping|contact|support|email|address|phone|help)\b", msg_low):
+    if re.search(r"\b(cart|bag|basket|checkout|orders?|track|tracking|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up|policy|policies|shipping|delivery|contact|support|email|address|phone|help|pay|payment|payments|upi|cod|cash|card|cards|otp|reorder|remind|reminder|drop|drops|alert|restock|swap)\b", msg_low):
+        return False
+    if _is_greeting(msg_low) or _is_assistant_help(msg_low) or _is_view_cart_query(msg_low) or _is_checkout_query(msg_low):
+        return False
+    if _is_policy_query(msg_low)[0]:
         return False
     if _SEARCH_LEAD_IN_PATTERN.search(msg_low):
         return True
@@ -501,7 +610,7 @@ def _is_product_search_query(msg_low: str) -> bool:
         return True
     words = msg_low.split()
     if 1 <= len(words) <= 5:
-        stopwords = {"ok", "okay", "yes", "no", "thanks", "thank", "bye", "good", "sure", "hi", "hello", "hey", "help"}
+        stopwords = {"ok", "okay", "yes", "no", "thanks", "thank", "bye", "good", "sure", "hi", "hello", "hey", "help", "cool"}
         if not (set(words) & stopwords):
             return True
     return False
@@ -531,7 +640,20 @@ def _extract_cart_product_and_qty(user_message: str) -> tuple[str, int]:
         r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:add\s+to\s+(?:my\s+|the\s+)?cart|add|put|place|insert|buy|get)\s+",
         "", msg, flags=re.IGNORECASE,
     )
-    cleaned = re.sub(r"\s+(?:to|in|into|for)?\s*(?:my|the)?\s*(?:cart|bag|basket)\s*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+(?:to|in|into|for)?\s*(?:my|the)?\s*(?:cart|bag|basket)\s*$", "", cleaned, flags=re.IGNORECASE).strip()
+
+    # If it explicitly targets a variant ID or item ID (e.g. "variant 201", "variant_id 201", "item 201", "id 201")
+    m_var = re.search(r"\b(?:variant(?:\s*id)?|item(?:\s*id)?|id|product(?:\s*id)?)\s*#?\s*(\d{2,15})\b", cleaned, re.IGNORECASE)
+    if m_var:
+        var_id = m_var.group(1)
+        m_q = re.search(r"\b(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\s+(?:variant|item|id)", cleaned, re.IGNORECASE)
+        if m_q:
+            qty = int(m_q.group(1))
+        return var_id, qty
+
+    if cleaned.isdigit():
+        return cleaned, 1
+
     m_lead_qty = re.match(r"^\s*(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\s+(.+)$", cleaned, re.IGNORECASE)
     if m_lead_qty:
         qty = int(m_lead_qty.group(1))
@@ -542,7 +664,7 @@ def _extract_cart_product_and_qty(user_message: str) -> tuple[str, int]:
             qty = int(m_verb_qty.group(1))
             cleaned = re.sub(r"\s+(?:to|in|into|for)?\s*(?:my|the)?\s*(?:cart|bag|basket)\s*$", "", m_verb_qty.group(2), flags=re.IGNORECASE).strip()
         else:
-            m_mid_qty = re.search(r"\b(\d+)\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", cleaned)
+            m_mid_qty = re.search(r"\b(\d{1,2})\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", cleaned)
             if m_mid_qty:
                 qty = int(m_mid_qty.group(1))
                 cleaned = re.sub(r"\b" + m_mid_qty.group(1) + r"\s*(?:x|units?|pieces?|pcs?|items?|of)?\b", "", cleaned, flags=re.IGNORECASE).strip()
@@ -552,15 +674,69 @@ def _extract_cart_product_and_qty(user_message: str) -> tuple[str, int]:
     return cleaned, qty
 
 
-def _fallback(confidence: float = 0.0, language: str = "en", user_message: str = "") -> dict:
-    msg_low = str(user_message or "").strip().lower()
-    if _is_add_to_cart_query(msg_low):
-        prod, qty = _extract_cart_product_and_qty(user_message)
-        entities = {"product_name_or_id": prod, "quantity": qty}
+def _is_edit_quantity_query(msg_low: str) -> tuple[bool, str, int]:
+    m = re.search(r"\b(?:change|update|set|make|edit)\s+(?:the\s+)?quantity\s+(?:of\s+)?(.+?)\s+(?:to|as)\s+(\d+)\b", msg_low)
+    if m:
+        return True, m.group(1).strip(), int(m.group(2))
+    m2 = re.search(r"\b(?:change|update|set|make|edit)\s+(.+?)\s+quantity\s+(?:to|as)\s+(\d+)\b", msg_low)
+    if m2:
+        return True, m2.group(1).strip(), int(m2.group(2))
+    return False, "", 0
+
+
+def _fast_classify(user_message: str, language: str = "en") -> dict | None:
+    msg = str(user_message or "").strip()
+    msg_low = msg.lower()
+    if not msg_low:
+        return None
+
+    # 1. Store Policies
+    is_pol, pol_topic = _is_policy_query(msg_low)
+    if is_pol:
+        entities = {"topic": pol_topic, "policy_type": pol_topic} if pol_topic else {}
         return {
-            "intent": "cart_management",
-            "action": "add_item",
+            "intent": "policy_query",
+            "action": "answer_policy_question",
             "entities": entities,
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
+        }
+
+    # 2. Greetings
+    if _is_greeting(msg_low):
+        return {
+            "intent": "general_chat",
+            "action": "assistant_help",
+            "entities": {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
+        }
+
+    # 3. Capabilities / Help
+    if _is_assistant_help(msg_low):
+        return {
+            "intent": "general_chat",
+            "action": "assistant_help",
+            "entities": {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
+        }
+
+    # 4. Checkout
+    if _is_checkout_query(msg_low):
+        return {
+            "intent": "payment_checkout",
+            "action": "initiate_payment",
+            "entities": {},
             "confidence": 0.95,
             "requires_confirmation": False,
             "language": language,
@@ -568,6 +744,74 @@ def _fallback(confidence: float = 0.0, language: str = "en", user_message: str =
             "is_action": True,
         }
 
+    # 5. View Cart
+    if _is_view_cart_query(msg_low):
+        return {
+            "intent": "cart_management",
+            "action": "view_cart",
+            "entities": {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
+        }
+
+    # 6. Clear Cart
+    if _is_clear_cart_query(msg_low):
+        return {
+            "intent": "cart_management",
+            "action": "clear_cart",
+            "entities": {},
+            "confidence": 0.95,
+            "requires_confirmation": True,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    # 6b. Restock Alert
+    is_restock, restock_prod = _is_restock_alert_query(msg_low)
+    if is_restock:
+        return {
+            "intent": "restock_alert",
+            "action": "subscribe_restock",
+            "entities": {"product_name_or_id": restock_prod} if restock_prod else {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    # 6c. Standing Instructions (Price drops, reorders, auto-add on restock)
+    if _is_standing_instruction_query(msg_low):
+        return {
+            "intent": "standing_instruction",
+            "action": "create_instruction",
+            "entities": {"instruction": user_message},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    # 7. Add to Cart
+    if _is_add_to_cart_query(msg_low):
+        prod, qty = _extract_cart_product_and_qty(user_message)
+        return {
+            "intent": "cart_management",
+            "action": "add_item",
+            "entities": {"product_name_or_id": prod, "quantity": qty},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    # 8. Remove from Cart
     if _is_remove_from_cart_query(msg_low):
         prod, qty = _extract_remove_cart_product_and_qty(user_message)
         entities = {"product_name_or_id": prod}
@@ -584,11 +828,13 @@ def _fallback(confidence: float = 0.0, language: str = "en", user_message: str =
             "is_action": True,
         }
 
-    if _is_clear_cart_query(msg_low):
+    # 8b. Edit Quantity in Cart
+    is_eq, eq_prod, eq_qty = _is_edit_quantity_query(msg_low)
+    if is_eq:
         return {
             "intent": "cart_management",
-            "action": "clear_cart",
-            "entities": {},
+            "action": "edit_quantity",
+            "entities": {"product_name_or_id": eq_prod, "quantity": eq_qty},
             "confidence": 0.95,
             "requires_confirmation": False,
             "language": language,
@@ -596,8 +842,65 @@ def _fallback(confidence: float = 0.0, language: str = "en", user_message: str =
             "is_action": True,
         }
 
-    if _is_my_orders_query(msg_low):
-        is_active = any(w in msg_low for w in ["active", "pending", "open", "in progress"])
+    # 10. Cancel Order
+    if _is_cancel_order_query(msg_low):
+        ord_no = _extract_order_number(user_message)
+        return {
+            "intent": "order_management",
+            "action": "cancel_order",
+            "entities": {"order_number": ord_no} if ord_no else {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    # 11. Edit Address
+    if _is_edit_address_query(msg_low):
+        ord_no = _extract_order_number(user_message)
+        return {
+            "intent": "order_management",
+            "action": "edit_address",
+            "entities": {"order_number": ord_no} if ord_no else {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    # 12. Return Inquiry / Eligibility
+    if _is_return_inquiry(msg_low):
+        ord_no = _extract_order_number(user_message)
+        return {
+            "intent": "order_management",
+            "action": "check_return_eligibility",
+            "entities": {"order_number": ord_no} if ord_no else {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
+        }
+
+    # 13. Return Request
+    if _is_return_request(msg_low):
+        ord_no = _extract_order_number(user_message)
+        return {
+            "intent": "order_management",
+            "action": "request_order_return",
+            "entities": {"order_number": ord_no} if ord_no else {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "action",
+            "is_action": True,
+        }
+
+    # 14. Active / Recent Orders
+    if _is_active_orders_query(msg_low) or _is_my_orders_query(msg_low):
+        is_active = _is_active_orders_query(msg_low) or any(w in msg_low for w in ["active", "pending", "open", "in progress"])
         return {
             "intent": "order_tracking",
             "action": "list_recent_orders",
@@ -609,6 +912,35 @@ def _fallback(confidence: float = 0.0, language: str = "en", user_message: str =
             "is_action": False,
         }
 
+    # 15. Track Specific Order
+    is_track, ord_no = _is_track_order_query(msg_low)
+    if is_track:
+        return {
+            "intent": "order_tracking",
+            "action": "track_order",
+            "entities": {"order_number": ord_no} if ord_no else {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
+        }
+
+    # 16. Product Availability
+    if _is_availability_inquiry(msg_low):
+        clean_p = _extract_availability_product(user_message)
+        return {
+            "intent": "product_search",
+            "action": "check_availability",
+            "entities": {"product_title": clean_p} if clean_p else {},
+            "confidence": 0.95,
+            "requires_confirmation": False,
+            "language": language,
+            "message_type": "normal",
+            "is_action": False,
+        }
+
+    # 17. Product Search & Catalog Recommendations
     if _is_product_search_query(msg_low):
         query, is_browse = _extract_search_product_query(user_message)
         if is_browse:
@@ -633,74 +965,13 @@ def _fallback(confidence: float = 0.0, language: str = "en", user_message: str =
             "is_action": False,
         }
 
-    if _is_availability_inquiry(msg_low):
-        clean_p = _extract_availability_product(user_message)
-        entities = {"product_title": clean_p} if clean_p else {}
-        return {
-            "intent": "product_search",
-            "action": "check_availability",
-            "entities": entities,
-            "confidence": 0.90,
-            "requires_confirmation": False,
-            "language": language,
-            "message_type": "normal",
-            "is_action": False,
-        }
+    return None
 
-    if _is_return_inquiry(msg_low):
-        ord_no = _extract_order_number(user_message)
-        entities = {"order_number": ord_no} if ord_no else {}
-        return {
-            "intent": "order_management",
-            "action": "check_return_eligibility",
-            "entities": entities,
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": language,
-            "message_type": "normal",
-            "is_action": False,
-        }
 
-    if _is_return_request(msg_low):
-        ord_no = _extract_order_number(user_message)
-        entities = {"order_number": ord_no} if ord_no else {}
-        return {
-            "intent": "order_management",
-            "action": "request_order_return",
-            "entities": entities,
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": language,
-            "message_type": "action",
-            "is_action": True,
-        }
-
-    if _is_active_orders_query(msg_low):
-        return {
-            "intent": "order_tracking",
-            "action": "list_recent_orders",
-            "entities": {"filter": "active", "active_only": True},
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": language,
-            "message_type": "normal",
-            "is_action": False,
-        }
-
-    if _is_cancel_order_query(msg_low):
-        ord_no = _extract_order_number(user_message)
-        entities = {"order_number": ord_no} if ord_no else {}
-        return {
-            "intent": "order_management",
-            "action": "cancel_order",
-            "entities": entities,
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": language,
-            "message_type": "action",
-            "is_action": True,
-        }
-
+def _fallback(confidence: float = 0.0, language: str = "en", user_message: str = "") -> dict:
+    fast = _fast_classify(user_message, language=language)
+    if fast:
+        return fast
     return {
         "intent": "fallback",
         "action": "clarify",
@@ -724,161 +995,9 @@ def classify_intent(user_message: str, schema: dict | None = None, history: list
     and message_type/is_action tagging whether it's an action or normal message."""
     schema = schema or load_schema()
 
-    msg_low = str(user_message or "").strip().lower()
-
-    # Fast heuristic check for direct add-to-cart commands
-    if _is_add_to_cart_query(msg_low):
-        prod, qty = _extract_cart_product_and_qty(user_message)
-        entities = {"product_name_or_id": prod, "quantity": qty}
-        return {
-            "intent": "cart_management",
-            "action": "add_item",
-            "entities": entities,
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": "en",
-            "message_type": "action",
-            "is_action": True,
-        }
-
-    # Fast heuristic check for direct remove-from-cart commands
-    if _is_remove_from_cart_query(msg_low):
-        prod, qty = _extract_remove_cart_product_and_qty(user_message)
-        entities = {"product_name_or_id": prod}
-        if qty is not None:
-            entities["quantity"] = qty
-        return {
-            "intent": "cart_management",
-            "action": "remove_item",
-            "entities": entities,
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": "en",
-            "message_type": "action",
-            "is_action": True,
-        }
-
-    # Fast heuristic check for clear cart commands
-    if _is_clear_cart_query(msg_low):
-        return {
-            "intent": "cart_management",
-            "action": "clear_cart",
-            "entities": {},
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": "en",
-            "message_type": "action",
-            "is_action": True,
-        }
-
-    # Order heuristics checked BEFORE product search to prevent misrouting orders queries
-    if _is_my_orders_query(msg_low):
-        is_active = any(w in msg_low for w in ["active", "pending", "open", "in progress"])
-        return {
-            "intent": "order_tracking",
-            "action": "list_recent_orders",
-            "entities": {"filter": "active", "active_only": True} if is_active else {},
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": "en",
-            "message_type": "normal",
-            "is_action": False,
-        }
-
-    # Fast heuristic check for product search queries
-    if _is_product_search_query(msg_low):
-        query, is_browse = _extract_search_product_query(user_message)
-        if is_browse:
-            return {
-                "intent": "product_search",
-                "action": "get_recommendations",
-                "entities": {},
-                "confidence": 0.95,
-                "requires_confirmation": False,
-                "language": "en",
-                "message_type": "normal",
-                "is_action": False,
-            }
-        return {
-            "intent": "product_search",
-            "action": "search_products",
-            "entities": {"query": query},
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": "en",
-            "message_type": "normal",
-            "is_action": False,
-        }
-
-    # Fast heuristic check for product availability inquiries
-    if _is_availability_inquiry(msg_low):
-        clean_p = _extract_availability_product(user_message)
-        entities = {"product_title": clean_p} if clean_p else {}
-        return {
-            "intent": "product_search",
-            "action": "check_availability",
-            "entities": entities,
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": "en",
-            "message_type": "normal",
-            "is_action": False,
-        }
-
-    # Contextual order heuristics to avoid greedy/blind tracking
-    if _is_return_inquiry(msg_low):
-        ord_no = _extract_order_number(user_message)
-        entities = {"order_number": ord_no} if ord_no else {}
-        return {
-            "intent": "order_management",
-            "action": "check_return_eligibility",
-            "entities": entities,
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": "en",
-            "message_type": "normal",
-            "is_action": False,
-        }
-
-    if _is_return_request(msg_low):
-        ord_no = _extract_order_number(user_message)
-        entities = {"order_number": ord_no} if ord_no else {}
-        return {
-            "intent": "order_management",
-            "action": "request_order_return",
-            "entities": entities,
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": "en",
-            "message_type": "action",
-            "is_action": True,
-        }
-
-    if _is_active_orders_query(msg_low):
-        return {
-            "intent": "order_tracking",
-            "action": "list_recent_orders",
-            "entities": {"filter": "active", "active_only": True},
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": "en",
-            "message_type": "normal",
-            "is_action": False,
-        }
-
-    if _is_cancel_order_query(msg_low):
-        ord_no = _extract_order_number(user_message)
-        entities = {"order_number": ord_no} if ord_no else {}
-        return {
-            "intent": "order_management",
-            "action": "cancel_order",
-            "entities": entities,
-            "confidence": 0.95,
-            "requires_confirmation": False,
-            "language": "en",
-            "message_type": "action",
-            "is_action": True,
-        }
+    fast = _fast_classify(user_message)
+    if fast:
+        return fast
 
     # Optional context: the last few (role, text) turns, so follow-ups like
     # "the second one" can be resolved. Only the latest message is classified.

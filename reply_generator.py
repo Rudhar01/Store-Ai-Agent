@@ -290,18 +290,61 @@ def generate_reply(
                 return f"Removed {qty_str}'{data['removed']}' from your cart{rem_str}."
             if data.get("results") and isinstance(data["results"], list):
                 count = len(data["results"])
+                items_str = ", ".join(f"'{p.get('title') or p.get('name')}' (${p.get('price')})" for p in data["results"][:3])
+                suffix = f": {items_str}." if items_str else "."
                 if action_name in ("recommend_products", "get_recommendations"):
-                    return f"Here are {count} featured product{'s' if count != 1 else ''} from our collection:"
-                return f"Here are {count} product{'s' if count != 1 else ''} matching your search:"
+                    return f"Here are {count} featured product{'s' if count != 1 else ''} from our collection{suffix}"
+                return f"Here are {count} product{'s' if count != 1 else ''} matching your search{suffix}"
             if data.get("orders") and isinstance(data["orders"], list):
                 count = len(data["orders"])
                 if data.get("active_only"):
                     return f"Here {'are' if count != 1 else 'is'} your {count} active order{'s' if count != 1 else ''} in progress:"
                 return f"Here {'are' if count != 1 else 'is'} your {count} recent order{'s' if count != 1 else ''}:"
+            if action_name == "check_availability":
+                st = data.get("status")
+                prod = data.get("product_title") or "This item"
+                if st == "available":
+                    price_str = f" for ${data['price']}" if data.get("price") else ""
+                    return f"Great news! '{prod}' is in stock right now{price_str}. Would you like me to help add it to your cart?"
+                elif st == "out_of_stock":
+                    return f"'{prod}' is currently out of stock. Would you like to be notified when it arrives or see similar items?"
+                elif st == "product_required":
+                    return "Which product would you like me to check availability for?"
+                elif st == "not_found":
+                    return f"I couldn't find '{prod}' in our store catalog. Please check the spelling or browse our popular collections!"
+            if action_name == "check_return_eligibility":
+                st = data.get("status")
+                ord_num = data.get("order_number") or ""
+                if st == "order_number_required":
+                    return "I can certainly check that for you! Could you please share your order number?"
+                elif st == "eligible":
+                    return f"Good news! Order #{ord_num} is eligible for return within our 30-day return window. Would you like me to start the return process for you?"
+                elif st == "unfulfilled":
+                    return f"Order #{ord_num} hasn't been fulfilled or shipped yet, so returns aren't applicable yet. I can help cancel it or edit the shipping address if needed!"
+                elif st == "in_transit":
+                    return f"Order #{ord_num} is on its way to you! You can easily initiate a return once the package is delivered."
+                elif st == "expired":
+                    return f"Order #{ord_num} has passed the 30-day return window. If the product arrived damaged or defective, let me know and we can submit a warranty claim."
+                elif st == "order_not_found":
+                    return f"I couldn't find order #{ord_num}. Please double check the order number and try again."
+            if action_name in ("answer_policy_question", "policy_query") or data.get("policy_type") or (data.get("title") and data.get("body")):
+                title = data.get("title") or "Store Policy"
+                body = (data.get("body") or data.get("policy") or "").strip()
+                if body:
+                    clean_body = body.replace("###", "").replace("##", "").replace("#", "").strip()
+                    sentences = [s.strip() for s in clean_body.split("\n") if s.strip()]
+                    summary = " ".join(sentences[:3]) if sentences else clean_body
+                    if len(summary) > 280:
+                        summary = summary[:280].rstrip() + "..."
+                    return f"Here is our {title}: {summary}"
+                return f"For details on our {title}, please check our store policies page."
             if data.get("order_number") or data.get("order_id"):
                 oid = data.get("order_number") or data.get("order_id")
                 st = data.get("status") or "processing"
-                return f"Order #{oid} is currently {st}."
+                loc = f" at {data['current_location']}" if data.get("current_location") else ""
+                eta = f", estimated delivery: {data['estimated_delivery']}" if data.get("estimated_delivery") else ""
+                carr = f" with {data['carrier']}" if data.get("carrier") else ""
+                return f"Order #{oid} is currently {st}{loc}{carr}{eta}."
         if action_name == "assistant_help":
             return "Welcome! I'm here to help you shop. You can ask me to search products, check what's in stock, track orders, or manage your cart."
         return "I'm here to help! Let me know what you'd like to find, track, or add to your cart."

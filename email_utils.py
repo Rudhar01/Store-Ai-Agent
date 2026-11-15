@@ -309,6 +309,7 @@ def send_abandoned_cart_email(
     checkout_url: str = "",
     total_price: str = "",
     reply_to: str = None,
+    discount_code: str = "",
 ) -> bool:
     if not cart_items or not isinstance(cart_items, list):
         print(f"[email_utils] Aborting abandoned cart email to {to_email}: cart_items is empty. Refusing to send dummy or empty data.")
@@ -420,3 +421,33 @@ def send_order_cancellation_email(
     </html>
     """
     return send_html_email(to_email, subject, html_body, text_body, reply_to=reply_to, from_name=f"{store_name} Support via Dripire")
+
+
+def send_address_update_email(
+    to_email: str,
+    store_name: str,
+    order_number: str,
+    new_address: str,
+    reply_to: str = None,
+) -> bool:
+    subject = f"Shipping Address Updated for Order #{order_number} - {store_name}"
+    text_body = f"Hello,\n\nThe shipping address for your order #{order_number} has been updated to:\n{new_address}\n\nBest regards,\n{store_name}"
+    html_body = f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"></head>
+    <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F9FAFB;padding:24px;color:#1F2937;">
+      <div style="max-width:520px;margin:0 auto;background:#FFFFFF;border-radius:16px;padding:32px;border:1px solid #E5E7EB;">
+        <h2 style="font-size:20px;font-weight:800;color:#111827;">Address Updated for Order #{order_number}</h2>
+        <p style="font-size:14px;color:#4B5563;">Your shipping address has been updated to:</p>
+        <div style="background:#F3F4F6;padding:12px;border-radius:8px;font-weight:600;margin:16px 0;">{new_address}</div>
+        <p style="font-size:12px;color:#6B7280;">If you did not request this change, please contact us immediately.</p>
+      </div>
+    </body>
+    </html>
+    """
+    return send_html_email(to_email, subject, html_body, text_body, reply_to=reply_to, from_name=f"{store_name} via Dripire")
+
+
+send_abandoned_cart_recovery_email = send_abandoned_cart_email
+

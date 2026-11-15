@@ -540,9 +540,24 @@ def _is_clear_cart(message: str) -> bool:
 
 
 _NON_PRODUCT_SEARCH_KW = re.compile(
-    r"\b(cart|bag|basket|checkout|orders?|track|tracking|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up|policy|policies|shipping|contact|support|email|address|phone|help)\b",
+    r"\b(cart|bag|basket|checkout|orders?|track|tracking|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up|policy|policies|shipping|delivery|contact|support|email|address|phone|help|pay|payment|payments|upi|cod|cash|card|cards|otp|reorder|remind|reminder|drop|drops|alert|restock|swap)\b",
     re.IGNORECASE,
 )
+
+
+def _is_policy_query(msg_low: str) -> tuple[bool, str]:
+    clean = (msg_low or "").strip(" .,!?")
+    if any(k in clean for k in ["upi", "cod", "cash on delivery", "payment method", "payment methods", "payment option", "can i pay with", "do you accept", "how can i pay"]):
+        return True, "payment_policy"
+    if any(k in clean for k in ["shipping policy", "delivery policy", "shipping charge", "delivery time", "how long does delivery take", "how long to deliver", "when will i receive my delivery", "do you ship to", "courier partner"]):
+        return True, "shipping_policy"
+    if any(k in clean for k in ["return policy", "refund policy", "how to return", "days to return", "what is your return policy", "what is your refund policy", "policy on returns", "policy on refunds"]):
+        return True, "return_policy"
+    if any(k in clean for k in ["warranty policy", "warranty coverage", "warranty period", "do you offer warranty", "how to claim warranty", "guarantee"]):
+        return True, "warranty_policy"
+    if any(k in clean for k in ["privacy policy", "data privacy", "how do you use my data", "privacy"]):
+        return True, "privacy_policy"
+    return False, ""
 
 
 def _is_product_search(message: str) -> tuple[str, bool] | None:
@@ -558,7 +573,11 @@ def _is_product_search(message: str) -> tuple[str, bool] | None:
         return None
     if _NON_PRODUCT_SEARCH_KW.search(msg_low):
         return None
-    if msg_low in _EXACT_GREETINGS:
+    if msg_low in _EXACT_GREETINGS or msg_low in _EXACT_CHECKOUT or msg_low in _EXACT_CART_VIEW:
+        return None
+    if _CHECKOUT_RE.search(msg_low) or _VIEW_CART_RE.search(msg_low):
+        return None
+    if _is_policy_query(msg_low)[0]:
         return None
 
     # 1. Lead-in phrases (e.g. 'show me some products', 'search for silence tshirt')
@@ -967,6 +986,7 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
         "action": action,
         "message_type": msg_type,
         "is_action": is_act,
+        "data": data,
     }
     if products:
         out["products"] = products
@@ -1382,36 +1402,55 @@ async def _chat_impl(req: ChatRequest):
     _msg_lower = message.strip().lower()
     _m_cart = _is_add_to_cart(message)
     _m_rem = _is_remove_from_cart(message)
-    _m_search = _is_product_search(message)
+    _is_pol, _pol_type = _is_policy_query(_msg_lower)
 
-    if _MY_ORDERS_RE.search(message):
-        is_active = any(w in _msg_lower for w in ["active", "pending", "open", "in progress"])
-        intent, action = "order_tracking", "list_recent_orders"
-        entities = {"filter": "active", "active_only": True} if is_active else {}
+    # 1. Store Policies & FAQ (e.g. "can I pay with UPI?", "shipping policy", "what is your return policy?")
+    if _is_pol:
+        intent, action = "policy_query", "answer_policy_question"
+        entities = {"policy_type": _pol_type}
         language = "en"
         classification = {
-            "intent": intent,
-            "action": action,
-            "entities": entities,
-            "language": language,
-            "requires_confirmation": False,
-            "message_type": "normal",
-            "is_action": False,
+            "intent": intent, "action": action, "entities": entities, "language": language,
+            "requires_confirmation": False, "message_type": "normal", "is_action": False
         }
+    # 2. Greetings & Introductions
+    elif _msg_lower in _EXACT_GREETINGS or bool(re.match(r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))\b", _msg_lower)):
+        intent, action = "general_chat", "assistant_help"
+        entities = {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
+    # 3. Assistant Capabilities / Help
+    elif any(p in _msg_lower for p in ["who are you", "what can you do", "help me", "what are your features", "how can you help", "what do you do", "tell me what you can do"]) or _msg_lower in {"help", "features"}:
+        intent, action = "general_chat", "assistant_help"
+        entities = {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
+    # 4. Checkout / Pay Now
+    elif _msg_lower in _EXACT_CHECKOUT or bool(_CHECKOUT_RE.search(message)):
+        intent, action = "payment_checkout", "initiate_payment"
+        entities = {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "action", "is_action": True}
+    # 5. View Cart
+    elif _msg_lower in _EXACT_CART_VIEW or bool(_VIEW_CART_RE.search(message)):
+        intent, action = "cart_management", "view_cart"
+        entities = {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "action", "is_action": True}
+    # 6. Clear Cart
+    elif _is_clear_cart(message):
+        intent, action = "cart_management", "clear_cart"
+        entities = {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "action", "is_action": True}
+    # 7. Add to Cart
     elif _m_cart:
         item_name, item_qty = _m_cart
         intent, action = "cart_management", "add_item"
         entities = {"product_name_or_id": item_name, "quantity": item_qty}
         language = "en"
-        classification = {
-            "intent": intent,
-            "action": action,
-            "entities": entities,
-            "language": language,
-            "requires_confirmation": False,
-            "message_type": "action",
-            "is_action": True,
-        }
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "action", "is_action": True}
+    # 8. Remove from Cart
     elif _m_rem:
         item_name, item_qty = _m_rem
         intent, action = "cart_management", "remove_item"
@@ -1419,47 +1458,61 @@ async def _chat_impl(req: ChatRequest):
         if item_qty:
             entities["quantity"] = item_qty
         language = "en"
-        classification = {
-            "intent": intent,
-            "action": action,
-            "entities": entities,
-            "language": language,
-            "requires_confirmation": False,
-            "message_type": "action",
-            "is_action": True,
-        }
-    elif _is_clear_cart(message):
-        intent, action = "cart_management", "clear_cart"
-        entities = {}
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "action", "is_action": True}
+    # 9. Standing Instructions
+    elif any(p in _msg_lower for p in ["drops below", "price drop", "drops to", "remind me to reorder", "reorder in", "add this to my cart when", "add to cart when", "auto add when restocked"]):
+        intent, action = "standing_instruction", "create_instruction"
+        entities = {"instruction": message, "email": customer_email}
         language = "en"
-        classification = {
-            "intent": intent,
-            "action": action,
-            "entities": entities,
-            "language": language,
-            "requires_confirmation": False,
-            "message_type": "action",
-            "is_action": True,
-        }
-    elif _m_search:
-        search_query, is_browse = _m_search
-        if is_browse:
-            intent, action = "product_search", "get_recommendations"
-            entities = {}
-        else:
-            intent, action = "product_search", "search_products"
-            entities = {"query": search_query}
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "action", "is_action": True}
+    # 10. Order Cancellation
+    elif any(p in _msg_lower for p in ["cancel order", "cancel my order", "want to cancel", "cancel #", "please cancel"]):
+        intent, action = "order_management", "cancel_order"
+        m_ord = _ORDER_NO_RE.search(message)
+        entities = {"order_number": m_ord.group(1) if m_ord else "", "email": customer_email}
         language = "en"
-        classification = {
-            "intent": intent,
-            "action": action,
-            "entities": entities,
-            "language": language,
-            "requires_confirmation": False,
-            "message_type": "normal",
-            "is_action": False,
-        }
-    elif any(w in _msg_lower for w in ["available", "in stock", "out of stock"]) and ("whether" in _msg_lower or "is " in _msg_lower or "check" in _msg_lower or "tell me" in _msg_lower or "available or not" in _msg_lower):
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "action", "is_action": True}
+    # 11. Edit Shipping Address
+    elif any(p in _msg_lower for p in ["change address", "change shipping address", "update address", "edit address"]):
+        intent, action = "order_management", "edit_address"
+        m_ord = _ORDER_NO_RE.search(message)
+        entities = {"order_number": m_ord.group(1) if m_ord else "", "address": message, "email": customer_email}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "action", "is_action": True}
+    # 12. Return Eligibility Check
+    elif any(p in _msg_lower for p in ["can i return", "whether i can return", "eligible for return", "is my order returnable", "return policy for order", "return eligibility", "returnable or not", "can we return", "allowed to return", "possible to return"]) or ("return" in _msg_lower and any(w in _msg_lower for w in ["whether", "can i", "if i can", "possible", "policy", "allowed", "eligible", "or not"])):
+        intent, action = "order_management", "check_return_eligibility"
+        m_ord = _ORDER_NO_RE.search(message)
+        entities = {"order_number": m_ord.group(1) if m_ord else ""}
+        if customer_email:
+            entities["email"] = customer_email
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
+    # 13. Order Return Request
+    elif any(p in _msg_lower for p in ["return my order", "return order", "start return", "initiate return", "request return", "submit return", "want to return", "please return", "process return", "mujhe return karna hai"]):
+        intent, action = "order_management", "request_order_return"
+        m_ord = _ORDER_NO_RE.search(message)
+        entities = {"order_number": m_ord.group(1) if m_ord else ""}
+        if customer_email:
+            entities["email"] = customer_email
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "action", "is_action": True}
+    # 14. Order History / Active Orders
+    elif _MY_ORDERS_RE.search(message):
+        is_active = any(w in _msg_lower for w in ["active", "pending", "open", "in progress"])
+        intent, action = "order_tracking", "list_recent_orders"
+        entities = {"filter": "active", "active_only": True} if is_active else {}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
+    # 15. Track Specific Order
+    elif any(p in _msg_lower for p in ["track order", "track my order", "track package", "where is my order", "where is order", "status of order", "order status"]):
+        intent, action = "order_tracking", "track_order"
+        m_ord = _ORDER_NO_RE.search(message)
+        entities = {"order_number": m_ord.group(1) if m_ord else ""}
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
+    # 16. Product Availability Inquiry
+    elif any(w in _msg_lower for w in ["available", "in stock", "out of stock"]) and ("whether" in _msg_lower or "is " in _msg_lower or "check" in _msg_lower or "tell me" in _msg_lower or "available or not" in _msg_lower or "do you have" in _msg_lower):
         clean_p = re.sub(
             r"\b(tell me whether|tell me if|is it|is this|are these|whether this|check availability|available or not|in stock|out of stock|available in stock|is|are|available|product|this item|this|it|that|the|do you have|got)\b",
             "",
@@ -1469,30 +1522,18 @@ async def _chat_impl(req: ChatRequest):
         intent, action = "product_search", "check_availability"
         entities = {"product_title": clean_p} if clean_p and clean_p.lower() not in ("this", "it", "that", "item", "product") else {}
         language = "en"
-        classification = {
-            "intent": intent,
-            "action": action,
-            "entities": entities,
-            "language": language,
-            "requires_confirmation": False,
-            "message_type": "normal",
-            "is_action": False,
-        }
-    elif _msg_lower in _EXACT_GREETINGS:
-        intent, action = "general_chat", "assistant_help"
-        entities = {}
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
+    # 17. Product Search & Catalog Recommendations
+    elif _is_product_search(message):
+        search_query, is_browse = _is_product_search(message)
+        if is_browse:
+            intent, action = "product_search", "get_recommendations"
+            entities = {}
+        else:
+            intent, action = "product_search", "search_products"
+            entities = {"query": search_query}
         language = "en"
-        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
-    elif _msg_lower in _EXACT_CART_VIEW:
-        intent, action = "cart_management", "view_cart"
-        entities = {}
-        language = "en"
-        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
-    elif _msg_lower in _EXACT_CHECKOUT:
-        intent, action = "payment_checkout", "initiate_payment"
-        entities = {}
-        language = "en"
-        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
     elif any(p in _msg_lower for p in ["drops below", "price drop", "drops to", "remind me to reorder", "reorder in", "add this to my cart when", "add to cart when", "auto add when restocked"]):
         intent, action = "standing_instruction", "create_instruction"
         entities = {"instruction": message, "email": customer_email}

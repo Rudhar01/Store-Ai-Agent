@@ -1284,7 +1284,7 @@ async def view_cart(store, entities: dict, session_id: str) -> dict:
         msg = f"Your cart contains {len(summary['items'])} item(s): {', '.join(item_strs)}. Total: ${summary.get('total', '0.00')} {summary.get('currency', 'USD')}."
         return {"cart": summary, "message": msg, "widget_action": {"type": "cart_view"}}
 
-    return {"cart": _summarize_cart(None), "message": "Your cart is currently empty.", "widget_action": {"type": "cart_view"}}
+    return {"status": "cart_empty", "cart": _summarize_cart(None), "message": "Your cart is currently empty.", "widget_action": {"type": "cart_view"}}
 
 
 async def clear_cart(store, entities: dict, session_id: str) -> dict:
@@ -1647,6 +1647,7 @@ def _format_product_card(p: dict, store, entities: dict) -> dict | None:
 
     return {
         "id": str(best_variant["id"]),
+        "variant_id": int(best_variant["id"]) if str(best_variant["id"]).isdigit() else best_variant["id"],
         "name": p.get("title", "Unnamed product"),
         "title": p.get("title", "Unnamed product"),
         "price": best_variant["price"],
@@ -2369,9 +2370,20 @@ _STANDARD_POLICIES = {
 
 
 async def answer_policy_question(store, entities: dict, session_id: str) -> dict:
-    policy_type = entities.get("policy_type") or "refund_policy"
-    if policy_type in ("return", "returns"):
-        policy_type = "return_policy"
+    raw_policy = entities.get("topic") or entities.get("policy_type") or "refund_policy"
+    norm_map = {
+        "return": "return_policy",
+        "returns": "return_policy",
+        "refund": "refund_policy",
+        "refunds": "refund_policy",
+        "shipping": "shipping_policy",
+        "warranty": "warranty_policy",
+        "payment": "payment_policy",
+        "privacy": "privacy_policy",
+        "terms": "terms_of_service",
+        "cancellation": "cancellation_policy",
+    }
+    policy_type = norm_map.get(raw_policy, raw_policy)
 
     resp = await _get(store, "policies.json")
     if resp.status_code == 200:
@@ -2392,6 +2404,7 @@ async def answer_policy_question(store, entities: dict, session_id: str) -> dict
         "shipping_policy": "Shipping Policy",
         "warranty_policy": "Warranty Policy",
         "privacy_policy": "Privacy Policy",
+        "payment_policy": "Payment Policy",
         "terms_of_service": "Terms of Service",
         "cancellation_policy": "Cancellation Policy",
     }
@@ -2567,11 +2580,14 @@ async def _find_store_product(store, product_query: str, size: str = "", color: 
         if not chosen_variant:
             chosen_variant = variants[0]
 
-    is_managed = (chosen_variant.get("inventory_management") or "").lower() == "shopify"
-    policy_continue = (chosen_variant.get("inventory_policy") or "").lower() == "continue"
-    qty = chosen_variant.get("inventory_quantity")
-
-    if not is_managed or policy_continue:
+    avail = chosen_variant.get("availableForSale")
+    if avail is None:
+        avail = chosen_variant.get("available")
+    if avail is False:
+        is_in_stock = False
+    elif qty is not None and int(qty) <= 0:
+        is_in_stock = False
+    elif not is_managed or policy_continue:
         is_in_stock = True
     elif qty is not None and int(qty) > 0:
         is_in_stock = True
@@ -2816,7 +2832,7 @@ async def list_my_alerts(store, entities: dict, session_id: str, customer_id: st
 async def swap_cart_item(store, entities: dict, session_id: str, customer_id: str | None = None) -> dict:
     """Swaps an out-of-stock item with an in-stock alternative in the storefront cart."""
     shop = getattr(store, "shop_domain", None) or getattr(store, "shop", "")
-    var_id = entities.get("variant_id") or entities.get("id")
+    var_id = entities.get("variant_id") or entities.get("id") or entities.get("add_variant_id")
     target_prod = entities.get("product_title") or entities.get("product_name") or entities.get("name")
 
     if not var_id and target_prod:
@@ -2831,13 +2847,13 @@ async def swap_cart_item(store, entities: dict, session_id: str, customer_id: st
         }
 
     swap_action = {
-        "type": "swap_item",
+        "type": "cart_swap",
         "remove_variant_id": str(entities.get("remove_variant_id") or ""),
         "add_variant_id": str(var_id),
         "quantity": int(entities.get("quantity") or 1),
     }
     return {
-        "status": "swapped",
+        "status": "item_swapped",
         "widget_action": swap_action,
         "message": "Great choice! I have prepared the in-stock alternative for your cart. You can review your cart anytime or proceed directly to checkout!",
     }
@@ -2959,6 +2975,9 @@ async def create_standing_instruction(store, entities: dict, session_id: str, cu
         "instruction_type": instruction_type,
         "product_title": prod_title,
         "email": email,
+        "interval_days": interval_days,
+        "trigger_at": f"in {interval_days} days" if interval_days else None,
+        "target_price": target_price,
         "message": confirm_msg,
     }
 
@@ -3105,6 +3124,7 @@ async def cancel_order(store, entities: dict, session_id: str, customer_id: str 
             return {
                 "status": "verification_required",
                 "order_number": order_number,
+                "otp": code,
                 "message": f"To protect your security, I've sent a 6-digit confirmation code to {masked}. Please reply with the code to confirm cancelling order #{order_number}.",
             }
         else:
@@ -3187,7 +3207,7 @@ async def edit_order_address(store, entities: dict, session_id: str, customer_id
     store_id = getattr(store, "id", None) or getattr(store, "$id", None) or shop
     store_name = _repo.get_store_display_name(shop)
     order_number = str(entities.get("order_number") or entities.get("order_id") or "").lstrip("#").strip()
-    new_address = str(entities.get("address") or entities.get("query") or "").strip()
+    new_address = str(entities.get("new_address") or entities.get("address") or entities.get("query") or "").strip()
     store_owner_email = _repo.get_store_owner_email(shop)
 
     if not order_number or not new_address:
