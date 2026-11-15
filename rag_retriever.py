@@ -79,20 +79,32 @@ _BREAKER_FAILS, _BREAKER_SECONDS = 3, 30.0
 LOCAL_STORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "local_knowledge_cache.json")
 _local_store_lock = threading.Lock()
 _LOCAL_STORE_DOCUMENTS: dict[str, list[dict]] = {}
+_DELETED_DOC_IDS: dict[str, set[str]] = {}
 
 def _load_local_store():
-    global _LOCAL_STORE_DOCUMENTS
+    global _LOCAL_STORE_DOCUMENTS, _DELETED_DOC_IDS
     if os.path.exists(LOCAL_STORE_PATH):
         try:
             with open(LOCAL_STORE_PATH, "r", encoding="utf-8") as f:
-                _LOCAL_STORE_DOCUMENTS = json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict):
+                    if "_documents" in data or "_deleted" in data:
+                        _LOCAL_STORE_DOCUMENTS = data.get("_documents", {})
+                        _DELETED_DOC_IDS = {k: set(v) for k, v in data.get("_deleted", {}).items()}
+                    else:
+                        _LOCAL_STORE_DOCUMENTS = data
+                        _DELETED_DOC_IDS = {}
         except Exception as e:
             print(f"rag_retriever: note - could not load local_knowledge_cache: {e}")
 
 def _save_local_store():
     try:
         with open(LOCAL_STORE_PATH, "w", encoding="utf-8") as f:
-            json.dump(_LOCAL_STORE_DOCUMENTS, f, indent=2, ensure_ascii=False)
+            payload = {
+                "_documents": _LOCAL_STORE_DOCUMENTS,
+                "_deleted": {k: list(v) for k, v in _DELETED_DOC_IDS.items()},
+            }
+            json.dump(payload, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"rag_retriever: note - could not save local_knowledge_cache: {e}")
 
@@ -245,11 +257,18 @@ _STOPWORDS = {
     "you're", "you've", "your", "yours", "yourself", "yourselves"
 }
 
+def _get_deleted_doc_ids(tenant: str) -> set[str]:
+    tenant = (tenant or "default").strip().lower()
+    with _local_store_lock:
+        return set(_DELETED_DOC_IDS.get(tenant, set()))
+
 def _add_local_document(tenant: str, doc_id: str, text: str, title: str = "", kind: str = "document", **fields) -> None:
     tenant = (tenant or "default").strip().lower()
     with _local_store_lock:
         if tenant not in _LOCAL_STORE_DOCUMENTS:
             _LOCAL_STORE_DOCUMENTS[tenant] = []
+        if tenant in _DELETED_DOC_IDS and doc_id in _DELETED_DOC_IDS[tenant]:
+            _DELETED_DOC_IDS[tenant].discard(doc_id)
         existing = [d for d in _LOCAL_STORE_DOCUMENTS[tenant] if d.get("doc_id") == doc_id]
         entry = {
             "doc_id": doc_id,
@@ -268,20 +287,28 @@ def _add_local_document(tenant: str, doc_id: str, text: str, title: str = "", ki
 def _remove_local_document(tenant: str, doc_id: str) -> bool:
     tenant = (tenant or "default").strip().lower()
     with _local_store_lock:
+        if tenant not in _DELETED_DOC_IDS:
+            _DELETED_DOC_IDS[tenant] = set()
+        _DELETED_DOC_IDS[tenant].add(doc_id)
         if tenant in _LOCAL_STORE_DOCUMENTS:
-            before = len(_LOCAL_STORE_DOCUMENTS[tenant])
             _LOCAL_STORE_DOCUMENTS[tenant] = [d for d in _LOCAL_STORE_DOCUMENTS[tenant] if d.get("doc_id") != doc_id]
-            if len(_LOCAL_STORE_DOCUMENTS[tenant]) != before:
-                _save_local_store()
-                return True
-    return False
+        _save_local_store()
+        return True
 
 def _list_local_documents(tenant: str) -> list[dict]:
     tenant = (tenant or "default").strip().lower()
+    deleted = _get_deleted_doc_ids(tenant)
     results = []
+    custom_policy_types = set()
+
     # 1. Store-uploaded documents
     with _local_store_lock:
         for d in _LOCAL_STORE_DOCUMENTS.get(tenant, []):
+            if d.get("doc_id") in deleted:
+                continue
+            pt = d.get("policy_type")
+            if pt:
+                custom_policy_types.add(pt)
             results.append({
                 "doc_id": d.get("doc_id"),
                 "title": d.get("title", d.get("doc_id")),
@@ -290,8 +317,13 @@ def _list_local_documents(tenant: str) -> list[dict]:
                 "n_chunks": max(1, len(d.get("content", "")) // 500),
                 "updated_at": d.get("updated_at", int(time.time())),
             })
-    # 2. Built-in default sample policies
+
+    # 2. Built-in default sample policies (omitted if deleted or superseded by custom document)
     for p in DEFAULT_STORE_POLICIES:
+        if p["doc_id"] in deleted:
+            continue
+        if p.get("policy_type") in custom_policy_types:
+            continue
         results.append({
             "doc_id": p["doc_id"],
             "title": p["title"],
@@ -307,22 +339,35 @@ def _local_retrieve(tenant: str, query: str, top_k: int = 3, hints: dict | None 
     q_lower = query.lower().strip()
     q_tokens = [w for w in re.findall(r"\w+", q_lower) if len(w) > 2 and w not in _STOPWORDS]
     target_policy = (hints or {}).get("policy_type", "").lower()
+    deleted = _get_deleted_doc_ids(tenant)
 
     candidates = []
+    custom_policy_types = set()
+
     # 1. Custom uploaded documents for this tenant
     with _local_store_lock:
         custom_docs = list(_LOCAL_STORE_DOCUMENTS.get(tenant, []))
     for d in custom_docs:
+        if d.get("doc_id") in deleted:
+            continue
+        pt = d.get("policy_type", "")
+        if pt:
+            custom_policy_types.add(pt)
         candidates.append({
             "doc_id": d.get("doc_id", "custom"),
             "title": d.get("title", "Custom Document"),
             "content": d.get("content", ""),
             "kind": d.get("kind", "document"),
-            "policy_type": d.get("policy_type", ""),
+            "policy_type": pt,
             "is_custom": True,
         })
-    # 2. Built-in sample policies
+
+    # 2. Built-in sample policies (exclude deleted and custom-superseded)
     for p in DEFAULT_STORE_POLICIES:
+        if p["doc_id"] in deleted:
+            continue
+        if p.get("policy_type") in custom_policy_types:
+            continue
         candidates.append({
             "doc_id": p["doc_id"],
             "title": p["title"],
@@ -341,48 +386,70 @@ def _local_retrieve(tenant: str, query: str, top_k: int = 3, hints: dict | None 
         title_lower = title.lower()
 
         score = 0.0
-        # Title matches: strong weight
+        # Title matches: strong weight (much higher for custom store documents)
         for tok in q_tokens:
             if tok in title_lower:
-                score += 3.5
+                score += (8.0 if cand["is_custom"] else 3.5)
             if tok in text_lower:
-                score += 1.0
+                score += (3.0 if cand["is_custom"] else 1.0)
+
+        # Whole phrase match
+        for phrase in [q_lower] if len(q_lower) > 3 else []:
+            if phrase in text_lower or phrase in title_lower:
+                score += (15.0 if cand["is_custom"] else 6.0)
 
         # Exact policy type hint matching
         if target_policy and (target_policy in cand["doc_id"] or target_policy in ptype):
-            score += 6.0
+            score += (12.0 if cand["is_custom"] else 4.0)
         elif target_policy and target_policy.replace("_", " ") in title_lower:
-            score += 5.0
+            score += (10.0 if cand["is_custom"] else 3.0)
 
-        # Priority boost for custom uploaded store documents
-        if cand.get("is_custom") and score > 0:
-            score += 1.5
+        # Huge priority boost for custom uploaded store documents whenever relevant terms match
+        if cand["is_custom"] and score > 0:
+            score += 20.0
 
         if score > 0:
-            norm_score = min(0.96, 0.70 + (score / 25.0) * 0.25)
+            norm_score = min(0.99, 0.72 + (score / 25.0) * 0.25)
+            doc_content = f"[{cand['title']}]\n{text}"
             scored.append({
-                "content": text,
+                "content": doc_content,
+                "raw_content": text,
                 "score": round(norm_score, 3),
                 "document": title,
                 "title": title,
                 "kind": cand.get("kind", "document"),
                 "doc_id": cand.get("doc_id"),
-                "source": "local_knowledge_base",
+                "source": "uploaded_store_document" if cand["is_custom"] else "local_knowledge_base",
             })
 
     scored.sort(key=lambda x: x["score"], reverse=True)
 
+    # If no keyword matched, but the store has custom uploaded documents, return the custom documents!
     if not scored:
-        for p in DEFAULT_STORE_POLICIES[:top_k]:
-            scored.append({
-                "content": p["content"],
-                "score": 0.65,
-                "document": p["title"],
-                "title": p["title"],
-                "kind": p["kind"],
-                "doc_id": p["doc_id"],
-                "source": "local_knowledge_base",
-            })
+        custom_candidates = [c for c in candidates if c["is_custom"]]
+        if custom_candidates:
+            for c in custom_candidates[:top_k]:
+                scored.append({
+                    "content": f"[{c['title']}]\n{c['content']}",
+                    "score": 0.75,
+                    "document": c["title"],
+                    "title": c["title"],
+                    "kind": c["kind"],
+                    "doc_id": c["doc_id"],
+                    "source": "uploaded_store_document",
+                })
+        else:
+            for p in DEFAULT_STORE_POLICIES[:top_k]:
+                if p["doc_id"] not in deleted:
+                    scored.append({
+                        "content": f"[{p['title']}]\n{p['content']}",
+                        "score": 0.65,
+                        "document": p["title"],
+                        "title": p["title"],
+                        "kind": p["kind"],
+                        "doc_id": p["doc_id"],
+                        "source": "local_knowledge_base",
+                    })
 
     return scored[:top_k]
 
@@ -484,6 +551,7 @@ def retrieve_context(
     if not query or not query.strip() or not store_identifier:
         return []
     tenant, hints = _tenant(store_identifier), _auto_hints(query, hints)
+    deleted_ids = _get_deleted_doc_ids(tenant)
 
     # 1. When remote RAG is turned off, retrieve directly from internal local knowledge base
     if not USE_REMOTE_RAG:
@@ -500,13 +568,18 @@ def retrieve_context(
         with _cache_lock:
             hit = _cache.get(key)
         if hit:
-            return hit["chunks"]
+            return [c for c in hit["chunks"] if c.get("doc_id") not in deleted_ids]
     try:
         r = _client().post(f"{RAG_SERVICE_URL}/v1/retrieve", headers=_headers(), json=_payload(tenant, query, top_k, hints))
         r.raise_for_status()
         data = r.json()
         _record(True)
-        return _finish(tenant, data, score_threshold, key, use_cache)
+        chunks = _finish(tenant, data, score_threshold, key, use_cache)
+        chunks = [c for c in chunks if c.get("doc_id") not in deleted_ids]
+        if chunks:
+            return chunks
+        # If remote returned 0 results, fall back to internal local knowledge base
+        return _local_retrieve(tenant, query, top_k=top_k, hints=hints)
     except Exception as e:
         _record(False)
         print(f"rag_retriever: remote retrieval failed for '{tenant}' ({e!r}), falling back to local knowledge base")
@@ -519,6 +592,7 @@ async def aretrieve_context(store_identifier: str, query: str, top_k: int = 3, s
     if not query or not query.strip() or not store_identifier:
         return []
     tenant, hints = _tenant(store_identifier), _auto_hints(query, hints)
+    deleted_ids = _get_deleted_doc_ids(tenant)
 
     # 1. When remote RAG is turned off, retrieve directly from internal local knowledge base
     if not USE_REMOTE_RAG:
@@ -535,14 +609,19 @@ async def aretrieve_context(store_identifier: str, query: str, top_k: int = 3, s
         with _cache_lock:
             hit = _cache.get(key)
         if hit:
-            return hit["chunks"]
+            return [c for c in hit["chunks"] if c.get("doc_id") not in deleted_ids]
     try:
         async with httpx.AsyncClient(timeout=RAG_TIMEOUT_S) as c:
             r = await c.post(f"{RAG_SERVICE_URL}/v1/retrieve", headers=_headers(), json=_payload(tenant, query, top_k, hints))
         r.raise_for_status()
         data = r.json()
         _record(True)
-        return _finish(tenant, data, score_threshold, key, use_cache)
+        chunks = _finish(tenant, data, score_threshold, key, use_cache)
+        chunks = [c for c in chunks if c.get("doc_id") not in deleted_ids]
+        if chunks:
+            return chunks
+        # If remote returned 0 results, fall back to internal local knowledge base
+        return _local_retrieve(tenant, query, top_k=top_k, hints=hints)
     except Exception as e:
         _record(False)
         print(f"rag_retriever: remote retrieval failed for '{tenant}' ({e!r}), falling back to local knowledge base")
@@ -586,21 +665,39 @@ def ingest_text(store: str, doc_id: str, text: str, title: str = "", **fields) -
 def delete_document(store: str, doc_id: str) -> dict:
     tenant = _tenant(store)
     _remove_local_document(tenant, doc_id)
+    clear_cache()
     if USE_REMOTE_RAG and RAG_SERVICE_URL and RAG_API_KEY:
         try:
-            return _admin("DELETE", "/v1/documents", json={"tenant": tenant, "doc_id": doc_id})
-        except Exception:
-            pass
+            # Send both params and json for proxy and web server compatibility
+            return _admin("DELETE", "/v1/documents", params={"tenant": tenant, "doc_id": doc_id}, json={"tenant": tenant, "doc_id": doc_id})
+        except Exception as e:
+            print(f"rag_retriever: remote delete failed for '{doc_id}' ({e!r})")
     return {"status": "deleted", "doc_id": doc_id}
 
 
 def list_documents(store: str) -> list[dict]:
     tenant = _tenant(store)
+    deleted_ids = _get_deleted_doc_ids(tenant)
+    docs = []
     if USE_REMOTE_RAG and RAG_SERVICE_URL and RAG_API_KEY:
         try:
-            return _admin("GET", "/v1/documents", params={"tenant": tenant})["documents"]
+            res = _admin("GET", "/v1/documents", params={"tenant": tenant})
+            remote_docs = res.get("documents", []) if isinstance(res, dict) else []
+            docs = [d for d in remote_docs if d.get("doc_id") not in deleted_ids]
         except Exception:
-            pass
+            docs = []
+
+    if not docs:
+        docs = _list_local_documents(tenant)
+    else:
+        # Also merge locally uploaded documents not yet present on remote
+        seen = {d.get("doc_id") for d in docs}
+        for ld in _list_local_documents(tenant):
+            if ld.get("doc_id") not in seen and ld.get("doc_id") not in deleted_ids:
+                docs.append(ld)
+                seen.add(ld.get("doc_id"))
+
+    return [d for d in docs if d.get("doc_id") not in deleted_ids]
     return _list_local_documents(tenant)
 
 

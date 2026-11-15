@@ -2944,10 +2944,25 @@ def knowledge_page():
             error_label = ui.label("").classes("text-xs text-gray-500")
 
             def add_faq():
-                if not question.value.strip() or not answer.value.strip():
+                q_text = question.value.strip()
+                a_text = answer.value.strip()
+                if not q_text or not a_text:
                     error_label.text = "Both a question and an answer are required."
                     return
-                repo.add_faq(store["$id"], question.value.strip(), answer.value.strip())
+                repo.add_faq(store["$id"], q_text, a_text)
+                try:
+                    import time
+                    faq_doc_id = f"faq:{int(time.time())}"
+                    rag_retriever.ingest_text(
+                        shop_domain,
+                        faq_doc_id,
+                        f"Question: {q_text}\nAnswer: {a_text}",
+                        title=f"FAQ: {q_text[:60]}",
+                        kind="faq",
+                    )
+                    render_docs()
+                except Exception as ex:
+                    print(f"dashboard: failed to ingest FAQ into RAG: {ex!r}")
                 question.value = ""
                 answer.value = ""
                 error_label.text = ""
@@ -2971,11 +2986,20 @@ def knowledge_page():
                             ui.label(f["question"]).classes("text-sm font-semibold text-gray-800")
                             ui.label(f["answer"]).classes("text-xs text-gray-500")
 
-                        def delete_faq(faq_id=f["$id"]):
-                            repo.delete_faq(store["$id"], faq_id)
-                            render_faqs()
+                        def make_delete_faq(faq_id=f["$id"], q=f["question"]):
+                            def _del():
+                                repo.delete_faq(store["$id"], faq_id)
+                                try:
+                                    for doc in rag_retriever.list_documents(shop_domain):
+                                        if doc.get("title", "").startswith(f"FAQ: {q[:30]}") or doc.get("doc_id") == f"faq:{faq_id}":
+                                            rag_retriever.delete_document(shop_domain, doc["doc_id"])
+                                    render_docs()
+                                except Exception:
+                                    pass
+                                render_faqs()
+                            return _del
 
-                        ui.button(icon="delete", on_click=delete_faq).props("flat round dense").style("color:#D1D5DB;")
+                        ui.button(icon="delete", on_click=make_delete_faq(f["$id"], f["question"])).props("flat round dense").style("color:#EF4444;").tooltip("Delete FAQ")
 
         render_faqs()
 
