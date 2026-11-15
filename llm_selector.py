@@ -35,6 +35,7 @@ shape) — true for anything you can point the `openai` Python SDK's
 
 import json
 import os
+import re
 
 # Only wrap with Langfuse tracing if valid Langfuse keys are configured,
 # preventing OpenTelemetry batch export timeout errors and thread freezes.
@@ -52,7 +53,11 @@ else:
     except ImportError:
         OpenAI = None
 
+_DISCOVERED_PRIMARY_MODEL: str | None = None
+
+
 def _resolve_primary_config():
+    global _DISCOVERED_PRIMARY_MODEL
     api_key = (
         os.environ.get("PRIMARY_LLM_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
@@ -70,9 +75,19 @@ def _resolve_primary_config():
         elif os.environ.get("OPENAI_API_KEY"):
             base_url = "https://api.openai.com/v1"
 
-    model = os.environ.get("PRIMARY_LLM_MODEL")
+    if _DISCOVERED_PRIMARY_MODEL:
+        return api_key, base_url, _DISCOVERED_PRIMARY_MODEL
+
+    model = (
+        os.environ.get("PRIMARY_LLM_MODEL")
+        or os.environ.get("LLM_MODEL")
+        or os.environ.get("MODEL")
+        or os.environ.get("CUSTOM_MODEL")
+    )
     if not model:
-        if os.environ.get("OPENAI_API_KEY"):
+        if os.environ.get("PRIMARY_LLM_BASE_URL"):
+            model = os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+        elif os.environ.get("OPENAI_API_KEY"):
             model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         elif os.environ.get("GROQ_API_KEY"):
             model = "llama-3.3-70b-versatile"
@@ -85,8 +100,31 @@ def _resolve_primary_config():
 
 
 PRIMARY_API_KEY, PRIMARY_BASE_URL, PRIMARY_MODEL = _resolve_primary_config()
-PRIMARY_TIMEOUT = float(os.environ.get("PRIMARY_LLM_TIMEOUT", "6.0"))
-FALLBACK_TIMEOUT = float(os.environ.get("FALLBACK_LLM_TIMEOUT", "8.0"))
+PRIMARY_TIMEOUT = float(os.environ.get("PRIMARY_LLM_TIMEOUT", "20.0"))
+FALLBACK_TIMEOUT = float(os.environ.get("FALLBACK_LLM_TIMEOUT", "25.0"))
+
+
+def _probe_and_discover_primary_model(client: OpenAI, current_model: str) -> str:
+    global _DISCOVERED_PRIMARY_MODEL
+    if _DISCOVERED_PRIMARY_MODEL:
+        return _DISCOVERED_PRIMARY_MODEL
+    if os.environ.get("PRIMARY_LLM_MODEL"):
+        return os.environ.get("PRIMARY_LLM_MODEL").strip()
+
+    base_url = os.environ.get("PRIMARY_LLM_BASE_URL") or ""
+    if base_url and "api.openai.com" not in base_url:
+        try:
+            model_list = client.models.list()
+            data = getattr(model_list, "data", None)
+            if data and len(data) > 0:
+                first_model = getattr(data[0], "id", None) or (data[0].get("id") if isinstance(data[0], dict) else None)
+                if first_model:
+                    print(f"[llm_selector] Auto-discovered primary model from custom endpoint: '{first_model}'")
+                    _DISCOVERED_PRIMARY_MODEL = str(first_model).strip()
+                    return _DISCOVERED_PRIMARY_MODEL
+        except Exception:
+            pass
+    return current_model
 
 
 def _load_fallback_providers() -> list[dict]:
@@ -165,25 +203,58 @@ def create_chat_completion(*, messages, **kwargs):
     outright reject the request over — forwarding it blindly to every
     fallback defeats the whole purpose of having a fallback.
     """
+    global _DISCOVERED_PRIMARY_MODEL
     last_error: Exception | None = None
 
     try:
         _, _, model = _resolve_primary_config()
-        return _get_primary().chat.completions.create(model=model, messages=messages, **kwargs)
+        client = _get_primary()
+        if not os.environ.get("PRIMARY_LLM_MODEL") and not _DISCOVERED_PRIMARY_MODEL:
+            model = _probe_and_discover_primary_model(client, model)
+        return client.chat.completions.create(model=model, messages=messages, **kwargs)
     except Exception as e:
         last_error = e
+        err_str = str(e)
+        alias_match = re.search(
+            r'(?:valid aliases|valid models?|available models?|did you mean):\s*[`\'"]?([a-zA-Z0-9_\-\.\/]+)',
+            err_str,
+            re.IGNORECASE,
+        )
+        if alias_match:
+            discovered = alias_match.group(1).strip("`'\".,")
+            if discovered and discovered != model:
+                print(f"[llm_selector] Detected valid model alias '{discovered}' from endpoint error response. Auto-healing primary model and retrying...")
+                _DISCOVERED_PRIMARY_MODEL = discovered
+                try:
+                    return client.chat.completions.create(model=discovered, messages=messages, **kwargs)
+                except Exception as retry_err:
+                    print(f"[llm_selector] Primary retry with discovered model '{discovered}' failed: {retry_err!r}")
+                    last_error = retry_err
+
         if _FALLBACK_PROVIDERS:
-            print(f"[llm_selector] primary endpoint failed ({e!r}) — trying {len(_FALLBACK_PROVIDERS)} fallback(s)")
+            print(f"[llm_selector] primary endpoint failed ({last_error!r}) — trying {len(_FALLBACK_PROVIDERS)} fallback(s)")
 
     fallback_kwargs = {k: v for k, v in kwargs.items() if k != "extra_body"}
 
     for i, provider in enumerate(_FALLBACK_PROVIDERS):
+        provider_model = str(provider.get("model", "")).strip()
+        provider_url = str(provider.get("base_url", "")).strip()
+        if "generativelanguage.googleapis.com" in provider_url and provider_model.startswith("models/"):
+            provider_model = provider_model.removeprefix("models/")
+
         try:
             client = _get_fallback_client(i)
-            return client.chat.completions.create(model=provider["model"], messages=messages, **fallback_kwargs)
+            return client.chat.completions.create(model=provider_model, messages=messages, **fallback_kwargs)
         except Exception as e:
             last_error = e
-            print(f"[llm_selector] fallback provider #{i} ({provider.get('base_url')}) failed ({e!r})")
+            if "response_format" in fallback_kwargs:
+                try:
+                    no_rf = {k: v for k, v in fallback_kwargs.items() if k != "response_format"}
+                    client = _get_fallback_client(i)
+                    return client.chat.completions.create(model=provider_model, messages=messages, **no_rf)
+                except Exception as rf_err:
+                    last_error = rf_err
+            print(f"[llm_selector] fallback provider #{i} ({provider_url}) failed ({last_error!r})")
             continue
 
     print("[llm_selector] ALL providers (primary + every fallback) failed")

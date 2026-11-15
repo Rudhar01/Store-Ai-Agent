@@ -229,8 +229,8 @@ def _shopify_nav_menu():
     api_key = (SHOPIFY_API_KEY or os.environ.get("SHOPIFY_API_KEY") or os.environ.get("SHOPIFY_CLIENT_ID") or "").strip()
     
     # 1. Ensure App Bridge meta and script tag exist in head
-    ui.add_head_html(f'''
-        <meta name="shopify-api-key" content="{api_key}">
+    ui.add_head_html(f'<meta name="shopify-api-key" content="{api_key}">')
+    ui.add_head_html('''
         <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
         <style>
             ui-nav-menu, ui-nav-menu * {

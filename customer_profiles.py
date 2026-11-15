@@ -412,6 +412,22 @@ async def get_profile(shop: str, customer_id: str | None = None, email: str | No
     return None
 
 
+_GLOBAL_DISALLOWED_ATTRS: set[str] = set()
+
+
+def _overflow_to_preferences(data: dict, bad_key: str, bad_val: Any) -> None:
+    if bad_val is None or bad_key in ("preferences", "$id", "$createdAt", "$updatedAt", "$permissions", "$collectionId", "$databaseId"):
+        return
+    current_pref = data.get("preferences") or "{}"
+    try:
+        p_dict = json.loads(current_pref) if isinstance(current_pref, str) else dict(current_pref)
+    except Exception:
+        p_dict = {}
+    p_dict[bad_key] = bad_val
+    if "preferences" not in _GLOBAL_DISALLOWED_ATTRS:
+        data["preferences"] = json.dumps(p_dict, ensure_ascii=False)[:3990]
+
+
 async def save_profile(shop: str, customer_id: str | None = None, fields: dict | None = None, email: str | None = None) -> bool:
     """Upserts customer profile, safely handling schema and attribute evolution."""
     if not _configured() or not fields:
@@ -457,50 +473,59 @@ async def save_profile(shop: str, customer_id: str | None = None, fields: dict |
                 safe_data["preferences"] = json.dumps(p_dict, ensure_ascii=False)[:3990]
         data = safe_data
 
-    # Attempt 1: via databases SDK
-    if databases:
-        try:
-            # Check if document already exists
-            existing = None
+    # Strip any previously discovered disallowed attributes
+    for bad_k in list(_GLOBAL_DISALLOWED_ATTRS):
+        if bad_k in data:
+            val = data.pop(bad_k, None)
+            _overflow_to_preferences(data, bad_k, val)
+
+    for attempt in range(6):
+        # Attempt 1: via databases SDK
+        if databases:
             try:
-                existing = databases.get_document(DATABASE_ID, CUSTOMERS_COLLECTION_ID, doc_id)
-            except Exception:
                 existing = None
-
-            if existing:
-                databases.update_document(DATABASE_ID, CUSTOMERS_COLLECTION_ID, doc_id, data=data)
-            else:
-                databases.create_document(DATABASE_ID, CUSTOMERS_COLLECTION_ID, doc_id, data=data)
-            return True
-        except Exception as e:
-            err_msg = str(e)
-            # If an unknown attribute was rejected, strip it and retry
-            m = re.findall(r'Attribute\s*["\']?([a-zA-Z0-9_]+)["\']?\s*not found', err_msg, re.IGNORECASE)
-            if m:
-                for bad_key in m:
-                    data.pop(bad_key, None)
                 try:
-                    databases.create_document(DATABASE_ID, CUSTOMERS_COLLECTION_ID, doc_id, data=data)
-                    return True
+                    existing = databases.get_document(DATABASE_ID, CUSTOMERS_COLLECTION_ID, doc_id)
                 except Exception:
-                    try:
-                        databases.update_document(DATABASE_ID, CUSTOMERS_COLLECTION_ID, doc_id, data=data)
-                        return True
-                    except Exception:
-                        pass
-            print(f"[customer_profiles] databases SDK save failed: {e!r}")
+                    existing = None
 
-    # Attempt 2: REST fallback
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.patch(f"{_base_rest()}/{doc_id}", headers=_hdr_rest(), json={"data": data})
-            if resp.status_code == 404:
-                resp = await client.post(_base_rest(), headers=_hdr_rest(), json={"documentId": doc_id, "data": data})
-            if resp.status_code in (200, 201):
+                if existing:
+                    databases.update_document(DATABASE_ID, CUSTOMERS_COLLECTION_ID, doc_id, data=data)
+                else:
+                    databases.create_document(DATABASE_ID, CUSTOMERS_COLLECTION_ID, doc_id, data=data)
                 return True
-            print(f"[customer_profiles] REST save -> {resp.status_code} {resp.text[:200]}")
-    except Exception as e:
-        print(f"[customer_profiles] save_profile REST failed: {e!r}")
+            except Exception as e:
+                err_msg = str(e)
+                m = re.findall(r'(?:Attribute|Unknown attribute:?)\s*["\']?([a-zA-Z0-9_]+)["\']?', err_msg, re.IGNORECASE)
+                if m:
+                    for bad_key in m:
+                        _GLOBAL_DISALLOWED_ATTRS.add(bad_key)
+                        val = data.pop(bad_key, None)
+                        _overflow_to_preferences(data, bad_key, val)
+                    continue
+                print(f"[customer_profiles] databases SDK save failed: {e!r}")
+
+        # Attempt 2: REST fallback
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                resp = await client.patch(f"{_base_rest()}/{doc_id}", headers=_hdr_rest(), json={"data": data})
+                if resp.status_code == 404:
+                    resp = await client.post(_base_rest(), headers=_hdr_rest(), json={"documentId": doc_id, "data": data})
+                if resp.status_code in (200, 201):
+                    return True
+                if resp.status_code == 400:
+                    m = re.findall(r'(?:Attribute|Unknown attribute:?)\s*["\']?([a-zA-Z0-9_]+)["\']?', resp.text, re.IGNORECASE)
+                    if m:
+                        for bad_key in m:
+                            _GLOBAL_DISALLOWED_ATTRS.add(bad_key)
+                            val = data.pop(bad_key, None)
+                            _overflow_to_preferences(data, bad_key, val)
+                        continue
+                print(f"[customer_profiles] REST save -> {resp.status_code} {resp.text[:200]}")
+                break
+        except Exception as e:
+            print(f"[customer_profiles] save_profile REST failed: {e!r}")
+            break
 
     return False
 
