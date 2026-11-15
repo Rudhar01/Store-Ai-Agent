@@ -97,6 +97,9 @@
           "example_utterances": [
             "Where is my order?",
             "Track order #1042",
+            "What is in my order 1003?",
+            "What are the contents of order 1003",
+            "What did I buy in order 1003",
             "When will my package arrive?",
             "What is the status of order 1001",
             "Track shipment for #1055",

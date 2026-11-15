@@ -762,6 +762,11 @@ async def track_order(store, entities: dict, session_id: str, customer_id: str |
 
     orders = resp.json().get("orders", [])
     if not orders:
+        # Try without '#' prefix in case order name was saved without it
+        resp2 = await _get(store, "orders.json", {"name": str(order_number), "status": "any"})
+        if resp2.status_code == 200:
+            orders = resp2.json().get("orders", [])
+    if not orders:
         print(f"track_order: no order found for name=#{order_number}")
         return {"error": "not_found", "order_number": order_number}
 
@@ -783,6 +788,21 @@ async def track_order(store, entities: dict, session_id: str, customer_id: str |
             native_shipment_status = f.get("shipment_status")
             break
 
+    # Extract all line items and products in the order
+    order_items = []
+    for line in order.get("line_items", []):
+        it_name = line.get("title") or line.get("name") or "Product"
+        qty = line.get("quantity", 1)
+        price = line.get("price")
+        variant = line.get("variant_title") or ""
+        order_items.append({
+            "name": it_name,
+            "title": it_name,
+            "quantity": qty,
+            "price": price,
+            "variant": variant,
+        })
+
     result = {
         "order_number": order_number,
         "fulfillment_status": order.get("fulfillment_status") or "unfulfilled",
@@ -794,6 +814,11 @@ async def track_order(store, entities: dict, session_id: str, customer_id: str |
         "last_scan_message": None,
         "last_scan_time": None,
         "estimated_delivery": None,
+        "items": order_items,
+        "line_items": order_items,
+        "total_price": order.get("total_price"),
+        "currency": order.get("currency") or "USD",
+        "created_at": order.get("created_at"),
     }
 
     # AfterShip is the primary source for a real physical location and a

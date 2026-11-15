@@ -135,7 +135,11 @@ def generate_reply(
     tracking_clause = ""
     if action_name == "track_order":
         tracking_clause = (
-            " This is an order tracking reply — explicitly and clearly state three "
+            " This is an order tracking and order contents reply. "
+            "If the shopper asks what is in their order, what products or items they ordered, "
+            "or the contents of their order (e.g. 'what is in my order 1003', 'what are the contents of order 1003', 'what did I buy in order 1003'), "
+            "explicitly list each item in the order with its title and quantity (and variant if provided), along with the order's status. "
+            "When tracking info is requested, explicitly and clearly state three "
             "things when they're present in the data: the shipment's current status "
             "(e.g. in transit, out for delivery, delivered), its current location "
             "(current_location), and the estimated delivery date (estimated_delivery). "
@@ -340,10 +344,35 @@ def generate_reply(
                 return f"For details on our {title}, please check our store policies page."
             if data.get("order_number") or data.get("order_id"):
                 oid = data.get("order_number") or data.get("order_id")
-                st = data.get("status") or "processing"
+                st = data.get("status") or data.get("fulfillment_status") or "processing"
                 loc = f" at {data['current_location']}" if data.get("current_location") else ""
                 eta = f", estimated delivery: {data['estimated_delivery']}" if data.get("estimated_delivery") else ""
                 carr = f" with {data['carrier']}" if data.get("carrier") else ""
+                items = data.get("items") or data.get("line_items") or []
+                items_str = ""
+                if items:
+                    item_parts = []
+                    for it in items:
+                        if isinstance(it, dict):
+                            q = it.get("quantity", 1)
+                            n = it.get("name") or it.get("title") or "Item"
+                            v = f" ({it['variant']})" if it.get("variant") else ""
+                            item_parts.append(f"{q}x {n}{v}")
+                        elif isinstance(it, str):
+                            item_parts.append(it)
+                    if item_parts:
+                        items_str = ", ".join(item_parts)
+
+                u_msg = (original_message or "").lower()
+                asks_contents = any(w in u_msg for w in [
+                    "what is in", "what's in", "inside", "content", "contents", "item", "items",
+                    "what did i buy", "what did i order", "what i ordered", "products in", "show items", "tell me what"
+                ])
+
+                if asks_contents and items_str:
+                    return f"Order #{oid} contains: {items_str}. Current status: {st}{loc}{carr}{eta}."
+                if items_str:
+                    return f"Order #{oid} is currently {st}{loc}{carr}{eta}. Items: {items_str}."
                 return f"Order #{oid} is currently {st}{loc}{carr}{eta}."
         if action_name == "assistant_help":
             return "Welcome! I'm here to help you shop. You can ask me to search products, check what's in stock, track orders, or manage your cart."

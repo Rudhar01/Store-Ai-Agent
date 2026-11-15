@@ -44,6 +44,7 @@ EXAMPLES: dict[tuple[str, str], list[str]] = {
     ],
     ("order_tracking", "track_order"): [
         "where is my order", "track order 1042", "has my package shipped yet", "when will my order arrive",
+        "what is in my order 1003", "what's in order 1003", "contents of order 1003", "what did I buy in order 1003",
         "delivery status of my parcel", "my order hasn't arrived", "track my package", "where is order #1001",
         "mera order kahan hai", "mere order ka status batao", "parcel kab tak aayega",
         "मेरा ऑर्डर कहाँ है", "ਮੇਰਾ ਆਰਡਰ ਕਿੱਥੇ ਹੈ", "ਮੇਰਾ ਪਾਰਸਲ ਕਦੋਂ ਆਵੇਗਾ",

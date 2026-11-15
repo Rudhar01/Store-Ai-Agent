@@ -520,6 +520,64 @@ async def run_all_feature_tests():
     rep_no_orders = rg.generate_reply("list_recent_orders", {"orders": []}, "en", "show my orders")
     record_test(feat, "No orders found reply is polite and helpful", "no" in rep_no_orders.lower() or "find" in rep_no_orders.lower() or "order" in rep_no_orders.lower())
 
+    # 5.14 Order contents inquiry classification ("what is in my order 1003")
+    t_cont = ic.classify_intent("what is in my order 1003")
+    record_test(feat, "'what is in my order 1003' classified as track_order with order_number=1003", t_cont["intent"] == "order_tracking" and t_cont["action"] == "track_order" and t_cont["entities"].get("order_number") == "1003")
+
+    # 5.15 Order contents inquiry phrasing ("contents of order 1003", "what did I buy in order 1003")
+    t_cont2 = ic.classify_intent("contents of order 1003")
+    t_cont3 = ic.classify_intent("what did I buy in order 1003")
+    record_test(feat, "Alternative contents phrasing parsed as track_order", t_cont2["action"] == "track_order" and t_cont2["entities"].get("order_number") == "1003" and t_cont3["action"] == "track_order" and t_cont3["entities"].get("order_number") == "1003")
+
+    # 5.16 Reading and replying with order items/contents
+    sample_order_contents = {
+        "order_number": "1003",
+        "status": "processing",
+        "items": [
+            {"name": "Silence Graphic T-Shirt", "quantity": 1, "price": "799.00"},
+            {"name": "Akatsuki Beanie", "quantity": 2, "price": "599.00"}
+        ]
+    }
+    rep_order_items = rg.generate_reply("track_order", sample_order_contents, "en", "what is in my order 1003")
+    record_test(feat, "Reply explicitly lists items and quantities in order 1003", "silence graphic t-shirt" in rep_order_items.lower() and "akatsuki beanie" in rep_order_items.lower())
+
+    # 5.17 End-to-end Chatbot Widget chat for "what is in my order 1003"
+    orig_store_cw = cw._get_store
+    orig_sa_get = sa._get
+    cw._get_store = lambda s: store
+    async def mock_get_order_contents(st, path, params=None):
+        if path == "orders.json":
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"orders": [{
+                    "id": 1003,
+                    "name": "#1003",
+                    "email": "customer@dripire.com",
+                    "fulfillment_status": "unfulfilled",
+                    "financial_status": "paid",
+                    "line_items": [
+                        {"title": "Silence Graphic T-Shirt", "quantity": 1, "price": "799.00"},
+                        {"title": "Akatsuki Beanie", "quantity": 2, "price": "599.00"}
+                    ],
+                    "fulfillments": []
+                }]}
+            )
+        return SimpleNamespace(status_code=404, json=lambda: {})
+    sa._get = mock_get_order_contents
+    try:
+        cw._remember_customer("dripire-fkpefzp2.myshopify.com", "test_cw_ord_items", "cust_1003", "customer@dripire.com", "Customer")
+        cw_req_contents = cw.ChatRequest(
+            message="what is in my order 1003",
+            session_id="test_cw_ord_items",
+            shop="dripire-fkpefzp2.myshopify.com",
+            customer_email="customer@dripire.com"
+        )
+        cw_res_contents = await cw.chat(cw_req_contents)
+        record_test(feat, "End-to-end chat returns order 1003 contents accurately", "silence graphic t-shirt" in cw_res_contents.get("reply", "").lower())
+    finally:
+        cw._get_store = orig_store_cw
+        sa._get = orig_sa_get
+
 
     # =========================================================================
     # FEATURE 6: Order Returns & Return Eligibility / Policy (13 tests)

@@ -565,6 +565,24 @@ def _is_policy_query(msg_low: str) -> tuple[bool, str]:
 def _is_track_order_query(msg_low: str) -> tuple[bool, str | None]:
     if any(q in msg_low for q in ["return", "cancel", "change address", "eligible", "policy"]):
         return False, None
+    m_cont = re.search(
+        r"\b(?:what(?:'s|\s+is|\s+are)\s+(?:in|inside|(?:the\s+)?(?:contents?|items?|products?)\s+(?:of|in|inside))|"
+        r"(?:the\s+)?contents?\s+of|items?\s+(?:in|inside|of)|"
+        r"what\s+did\s+i\s+(?:order|buy|purchase|get)\s+in|"
+        r"show\s+(?:me\s+)?(?:the\s+)?(?:contents?|items?|products?)\s+(?:of|in|inside))\s+(?:my\s+)?order\s*(?:#?\s*(\d{3,8}))?\b",
+        msg_low,
+        re.IGNORECASE,
+    )
+    if m_cont:
+        ord_no = m_cont.group(1) or _extract_order_number(msg_low)
+        return True, ord_no
+    if any(p in msg_low for p in [
+        "what is in my order", "what's in my order", "what is in order", "what's in order",
+        "what is inside my order", "what is inside order", "contents of order", "contents of my order",
+        "items in my order", "items in order", "what did i buy in order", "what did i order in",
+        "show items in order", "show me items in order", "products in order"
+    ]):
+        return True, _extract_order_number(msg_low)
     m = re.search(r"\b(?:track|where is|status of|where's|check status of)\s+(?:my\s+)?(?:order|package|shipment)\s*(?:#?\s*(\d{3,8}))?\b", msg_low, re.IGNORECASE)
     if m:
         ord_no = m.group(1) or _extract_order_number(msg_low)

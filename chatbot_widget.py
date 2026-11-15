@@ -1551,11 +1551,18 @@ async def _chat_impl(req: ChatRequest):
         entities = {"filter": "active", "active_only": True} if is_active else {}
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
-    # 15. Track Specific Order
-    elif any(p in _msg_lower for p in ["track order", "track my order", "track package", "where is my order", "where is order", "status of order", "order status"]):
+    # 15. Track Specific Order or Order Contents
+    elif any(p in _msg_lower for p in [
+        "track order", "track my order", "track package", "where is my order", "where is order", "status of order", "order status",
+        "what is in my order", "what's in my order", "what is in order", "what's in order", "what is inside my order", "what is inside order",
+        "contents of order", "contents of my order", "items in order", "items in my order", "what did i buy in order", "what did i order in",
+        "show items in order", "show me items in order", "products in order", "what does order contain", "what did i get in order"
+    ]) or bool(re.search(r"\b(?:what(?:'s|\s+is|\s+are)\s+(?:in|inside|(?:the\s+)?(?:contents?|items?|products?)\s+(?:of|in))|contents?\s+of|items?\s+(?:in|inside|of)|what\s+did\s+i\s+(?:buy|order|purchase|get)\s+in)\s+(?:my\s+)?order\b", _msg_lower)):
         intent, action = "order_tracking", "track_order"
         m_ord = _ORDER_NO_RE.search(message)
         entities = {"order_number": m_ord.group(1) if m_ord else ""}
+        if customer_email:
+            entities["email"] = customer_email
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
     # 16. Product Availability Inquiry
