@@ -646,7 +646,7 @@ def _parse_storefront_cart(cart_data: dict | None) -> dict | None:
         return None
     raw_items = cart_data.get("items") or []
     items = []
-    currency = cart_data.get("currency") or "USD"
+    currency = cart_data.get("currency") or "INR"
     curr_sym = "₹" if currency == "INR" else ("$" if currency == "USD" else f"{currency} ")
     for it in raw_items:
         if not isinstance(it, dict):
