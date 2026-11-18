@@ -250,11 +250,26 @@ def _clear_session(shop: str, session_id: str) -> None:
     _CUSTOMER_VISITORS.pop(key, None)
     _SESSION_TIMESTAMPS.pop(key, None)
     _SESSION_LAST_PRODUCT.pop(key, None)
+    PENDING.pop(_pkey(shop, session_id), None)
     HISTORY.pop(_pkey(shop, session_id), None)
+    try:
+        import shopify_actions
+        shopify_actions._SESSION_CARTS.pop(session_id, None)
+    except Exception:
+        pass
 
 
 def _remember_customer(shop: str, session_id: str, customer_id: str | None, email: str | None = None, name: str | None = None, visitor_id: str | None = None) -> None:
     key = (shop, session_id)
+    old_cid = _CUSTOMER_SESSIONS.get(key)
+    old_email = _CUSTOMER_EMAILS.get(key)
+
+    # Detect account switch or logout on same session: clear previous account's cart and history
+    if (old_cid and customer_id and str(old_cid) != str(customer_id)) or \
+       (old_email and email and str(old_email).lower() != str(email).lower()) or \
+       (old_cid and not customer_id and not email):
+        _clear_session(shop, session_id)
+
     now = time.time()
     _SESSION_TIMESTAMPS[key] = now
     if customer_id:
@@ -711,6 +726,58 @@ def _parse_storefront_cart(cart_data: dict | None) -> dict | None:
     }
 
 
+_PRICE_UNDER_RE = re.compile(
+    r"(?:under|below|less\s+than|within|up\s+to|cheaper\s+than|max(?:imum)?|budget\s+of|not\s+more\s+than)\s*"
+    r"(?:(?:rs\.?|inr|usd|\$|€|£|₹)\s*)?(\d+(?:\.\d+)?)"
+    r"(?:\s*(?:rs\.?|inr|usd|bucks|\$|€|£|₹)\b)?",
+    re.IGNORECASE,
+)
+_PRICE_ABOVE_RE = re.compile(
+    r"(?:above|over|(?<!not\s)more\s+than|at\s+least|starting\s+(?:from|at)|min(?:imum)?)\s*"
+    r"(?:(?:rs\.?|inr|usd|\$|€|£|₹)\s*)?(\d+(?:\.\d+)?)"
+    r"(?:\s*(?:rs\.?|inr|usd|bucks|\$|€|£|₹)\b)?",
+    re.IGNORECASE,
+)
+_PRICE_BETWEEN_RE = re.compile(
+    r"(?:between|from)\s*(?:(?:rs\.?|inr|usd|\$|€|£|₹)\s*)?(\d+(?:\.\d+)?)\s*(?:and|to|-)\s*(?:(?:rs\.?|inr|usd|\$|€|£|₹)\s*)?(\d+(?:\.\d+)?)"
+    r"(?:\s*(?:rs\.?|inr|usd|bucks|\$|€|£|₹)\b)?",
+    re.IGNORECASE,
+)
+
+
+def extract_price_filters(text: str) -> tuple[dict, str]:
+    """Extracts price_min / price_max from text and returns (price_dict, text_without_price_clause)."""
+    if not text:
+        return {}, text
+    res = {}
+    cleaned = text
+    m_bet = _PRICE_BETWEEN_RE.search(text)
+    if m_bet:
+        try:
+            res["price_min"] = float(m_bet.group(1))
+            res["price_max"] = float(m_bet.group(2))
+            cleaned = _PRICE_BETWEEN_RE.sub("", cleaned).strip()
+        except (ValueError, TypeError):
+            pass
+    else:
+        m_und = _PRICE_UNDER_RE.search(text)
+        if m_und:
+            try:
+                res["price_max"] = float(m_und.group(1))
+                cleaned = _PRICE_UNDER_RE.sub("", cleaned).strip()
+            except (ValueError, TypeError):
+                pass
+        m_abv = _PRICE_ABOVE_RE.search(text)
+        if m_abv:
+            try:
+                res["price_min"] = float(m_abv.group(1))
+                cleaned = _PRICE_ABOVE_RE.sub("", cleaned).strip()
+            except (ValueError, TypeError):
+                pass
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return res, cleaned
+
+
 def extract_search_term(message: str) -> str:
     m = (message or "").strip()
     m = _CART_LEAD_IN.sub("", m)
@@ -897,18 +964,31 @@ async def _resolve_product(store, text: str):
     return None, None
 
 
+def _parse_card_price(val) -> float | None:
+    if val is None:
+        return None
+    try:
+        if isinstance(val, (int, float)):
+            return float(val)
+        c = re.sub(r"[^\d.]", "", str(val))
+        return float(c) if c else None
+    except (ValueError, TypeError):
+        return None
+
+
 def _apply_price_filters(cards: list[dict], entities: dict) -> list[dict]:
-    lo, hi = entities.get("price_min"), entities.get("price_max")
+    lo = _parse_card_price(entities.get("price_min"))
+    hi = _parse_card_price(entities.get("price_max"))
+    if lo is None and hi is None:
+        return cards
     out = []
     for c in cards:
-        try:
-            price = float(c.get("price"))
-        except (TypeError, ValueError):
-            out.append(c)
+        price = _parse_card_price(c.get("price"))
+        if price is None:
             continue
-        if lo is not None and price < float(lo):
+        if lo is not None and price < lo:
             continue
-        if hi is not None and price > float(hi):
+        if hi is not None and price > hi:
             continue
         out.append(c)
     return out
@@ -968,6 +1048,22 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                             data.pop("error", None)
                 except Exception as e:
                     print(f"chatbot_widget: fallback products fetch failed: {e!r}")
+
+        # Strictly enforce price ceiling / floor on all final products
+        if data.get("results") and (entities.get("price_max") is not None or entities.get("price_min") is not None):
+            data["results"] = _apply_price_filters(data["results"], entities)
+            if not data["results"]:
+                data["no_exact_match"] = True
+                hi_val = _parse_card_price(entities.get("price_max"))
+                lo_val = _parse_card_price(entities.get("price_min"))
+                p_clause = ""
+                if hi_val is not None and lo_val is not None:
+                    p_clause = f"between ₹{int(lo_val)} and ₹{int(hi_val)} "
+                elif hi_val is not None:
+                    p_clause = f"under ₹{int(hi_val)} "
+                elif lo_val is not None:
+                    p_clause = f"above ₹{int(lo_val)} "
+                data["message"] = f"I couldn't find any products {p_clause}in our store catalog."
 
     products = data.get("results") if action in {"search_products", "check_availability", "get_recommendations", "recommend_products", "assistant_help", "clarify", "subscribe_restock"} and isinstance(data, dict) else None
     if products and isinstance(products, list) and len(products) > 0:
@@ -1580,12 +1676,13 @@ async def _chat_impl(req: ChatRequest):
     # 17. Product Search & Catalog Recommendations
     elif _is_product_search(message):
         search_query, is_browse = _is_product_search(message)
+        price_extracted, search_query = extract_price_filters(search_query)
         if is_browse:
             intent, action = "product_search", "get_recommendations"
-            entities = {}
+            entities = dict(price_extracted)
         else:
             intent, action = "product_search", "search_products"
-            entities = {"query": search_query}
+            entities = {"query": search_query, **price_extracted}
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
     elif any(p in _msg_lower for p in ["drops below", "price drop", "drops to", "remind me to reorder", "reorder in", "add this to my cart when", "add to cart when", "auto add when restocked"]):
@@ -1749,6 +1846,17 @@ async def _chat_impl(req: ChatRequest):
         extracted = extract_search_term(message)
         if extracted:
             entities["query"] = extracted
+
+    # Extract and apply price filters across any product search / recommendation queries
+    msg_price_filters, _ = extract_price_filters(message)
+    if msg_price_filters:
+        for pk, pv in msg_price_filters.items():
+            if entities.get(pk) is None:
+                entities[pk] = pv
+    if entities.get("query"):
+        _, clean_q = extract_price_filters(entities["query"])
+        if clean_q:
+            entities["query"] = clean_q
 
     try:
         if customer_email and not entities.get("email"):
@@ -2800,6 +2908,10 @@ WIDGET_JS = r"""
     "#ai-chat-widget-root #expandToggle.active-expand .icon-expand { display:none; }",
     "#ai-chat-widget-root #expandToggle.active-expand .icon-collapse { display:block; }",
     "#ai-chat-widget-root .history-divider { text-align:center; font-size:10px; font-weight:600; color:#888; margin:8px 0 4px; }",
+    "#ai-chat-widget-root .history-pull-bar { display:flex; align-items:center; justify-content:center; gap:6px; background:#f1f5f9; border:1px solid #cbd5e1; border-radius:10px; padding:6px 12px; margin:4px 0 8px; font-size:11px; font-weight:600; color:#475569; cursor:pointer; user-select:none; transition:all .2s ease; box-shadow:0 1px 3px rgba(0,0,0,.04); }",
+    "#ai-chat-widget-root .history-pull-bar:hover { background:#e2e8f0; color:#1e293b; border-color:#94a3b8; }",
+    "#ai-chat-widget-root .history-pull-bar.loading { opacity:0.7; pointer-events:none; }",
+    "#ai-chat-widget-root .history-pull-bar.done { cursor:default; background:transparent; border:none; box-shadow:none; color:#94a3b8; font-size:10px; }",
 
     "#ai-chat-widget-root .order-card { background:#fff; border:1px solid rgba(0,0,0,.1); border-radius:12px; padding:10px; margin:6px 0; font-size:11px; color:#222; box-shadow:0 2px 8px rgba(0,0,0,.04); }",
     "#ai-chat-widget-root .order-card-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }",
@@ -3128,12 +3240,87 @@ WIDGET_JS = r"""
     return v;
   })();
 
+  function detectLiveShopifyCustomer() {
+    var detectedId = null;
+    var detectedEmail = null;
+    var detectedName = null;
+    var isDefinitelyGuest = false;
+
+    if (window.__st) {
+      if (window.__st.cid) detectedId = String(window.__st.cid);
+      else if (window.__st.rid && window.__st.rtyp === "customer") detectedId = String(window.__st.rid);
+    }
+    if (!detectedId && window.ShopifyAnalytics && window.ShopifyAnalytics.meta && window.ShopifyAnalytics.meta.page) {
+      if (window.ShopifyAnalytics.meta.page.customerId) {
+        detectedId = String(window.ShopifyAnalytics.meta.page.customerId);
+      }
+    }
+    if (window.Shopify && window.Shopify.customer) {
+      if (window.Shopify.customer.id) detectedId = String(window.Shopify.customer.id);
+      if (window.Shopify.customer.email) detectedEmail = String(window.Shopify.customer.email).trim().toLowerCase();
+      if (window.Shopify.customer.first_name) detectedName = String(window.Shopify.customer.first_name).trim();
+    }
+    if (window.ShopifyAnalytics && window.ShopifyAnalytics.lib && typeof window.ShopifyAnalytics.lib.user === "function") {
+      try {
+        var _u = window.ShopifyAnalytics.lib.user();
+        var _t = _u && typeof _u.traits === "function" ? _u.traits() : null;
+        if (_t) {
+          if (_t.uniqToken && !detectedId) detectedId = String(_t.uniqToken);
+          if (_t.email && !detectedEmail) detectedEmail = String(_t.email).trim().toLowerCase();
+          if (_t.firstName && !detectedName) detectedName = String(_t.firstName).trim();
+        }
+      } catch (e) {}
+    }
+
+    var isLogoutUrl = window.location.pathname.indexOf("/account/logout") !== -1 ||
+                      (window.location.search && window.location.search.indexOf("logged_out") !== -1);
+    if (isLogoutUrl) {
+      return { id: null, email: null, name: null, isGuest: true };
+    }
+
+    var shopifyLoaded = (window.__st && typeof window.__st.cid !== "undefined") ||
+                        (window.ShopifyAnalytics && window.ShopifyAnalytics.meta && window.ShopifyAnalytics.meta.page);
+    var logoutLink = document.querySelector('a[href*="/account/logout"], a[href*="logout"]');
+    var loginLink = document.querySelector('a[href*="/account/login"], a[href*="login"]');
+
+    if (detectedId) {
+      return { id: detectedId, email: detectedEmail, name: detectedName, isGuest: false };
+    }
+    if (shopifyLoaded && !logoutLink) {
+      return { id: null, email: null, name: null, isGuest: true };
+    }
+    if (loginLink && !logoutLink) {
+      return { id: null, email: null, name: null, isGuest: true };
+    }
+    return { id: null, email: detectedEmail, name: detectedName, isGuest: false };
+  }
+
+  var _liveCustomer = detectLiveShopifyCustomer();
   var customerToken = null;
-  // Bootstrap customer identity eagerly from localStorage so that getCurrentUserKey()
-  // returns the right key on first call (before syncCustomerSession runs).
-  var customerId   = (function() { try { return localStorage.getItem("ai_cust_id_" + SHOP) || null; } catch(e){ return null; } })();
-  var customerEmail= (function() { try { return localStorage.getItem("ai_cust_email_" + SHOP) || null; } catch(e){ return null; } })();
-  var customerName = (function() { try { return localStorage.getItem("ai_cust_name_" + SHOP) || null; } catch(e){ return null; } })();
+  var customerId = null;
+  var customerEmail = null;
+  var customerName = null;
+
+  if (_liveCustomer.isGuest) {
+    try {
+      localStorage.removeItem("ai_cust_id_" + SHOP);
+      localStorage.removeItem("ai_cust_email_" + SHOP);
+      localStorage.removeItem("ai_cust_name_" + SHOP);
+      sessionStorage.removeItem("ai_cust_id_" + SHOP);
+      sessionStorage.removeItem("ai_cust_email_" + SHOP);
+      sessionStorage.removeItem("ai_cust_name_" + SHOP);
+    } catch (e) {}
+  } else if (_liveCustomer.id) {
+    customerId = _liveCustomer.id;
+    customerEmail = _liveCustomer.email || null;
+    customerName = _liveCustomer.name || null;
+  } else {
+    try {
+      customerId = localStorage.getItem("ai_cust_id_" + SHOP) || null;
+      customerEmail = localStorage.getItem("ai_cust_email_" + SHOP) || null;
+      customerName = localStorage.getItem("ai_cust_name_" + SHOP) || null;
+    } catch (e) {}
+  }
 
   function getCurrentUserKey() {
     if (customerId) return "cust_" + String(customerId).replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -3154,7 +3341,11 @@ WIDGET_JS = r"""
     // Account Switch or Login/Logout detected!
     if (lastUser && lastUser !== uKey) {
       chatHistory = [];
+      if (typeof pendingPreviousHistory !== "undefined") pendingPreviousHistory = [];
       _historyLoaded = false;
+      lastKnownCart = null;
+      if (typeof _historyDividerEl !== "undefined") _historyDividerEl = null;
+      if (typeof _firstRevealedMessageNode !== "undefined") _firstRevealedMessageNode = null;
       if (conversation) {
         conversation.innerHTML = "";
         if (greetingBubble) {
@@ -3164,21 +3355,20 @@ WIDGET_JS = r"""
       }
       var historyBox = document.getElementById("chatHistoryBox");
       if (historyBox) historyBox.remove();
+      var pullBar = document.getElementById("historyPullBar");
+      if (pullBar) pullBar.remove();
 
       var sessKey = "aiChatSessionId_" + SHOP + "_" + uKey;
       var createdKey = sessKey + "_created";
-      var s = null;
-      try { s = localStorage.getItem(sessKey); } catch (e) {}
-      if (!s) {
-        s = "sess_" + uKey + "_" + VISITOR_ID.slice(-6) + "_" + Date.now();
-        try {
-          localStorage.setItem(sessKey, s);
-          localStorage.setItem(createdKey, String(Date.now()));
-        } catch (e) {}
-      }
+      var s = "sess_" + uKey + "_" + VISITOR_ID.slice(-6) + "_" + Date.now();
+      try {
+        localStorage.setItem(sessKey, s);
+        localStorage.setItem(createdKey, String(Date.now()));
+        localStorage.setItem(ACTIVE_USER_TRACKER, uKey);
+      } catch (e) {}
       SESSION_ID = s;
-      try { localStorage.setItem(ACTIVE_USER_TRACKER, uKey); } catch (e) {}
 
+      if (typeof refreshCartBadge === "function") refreshCartBadge();
       updateHeaderProfileBadge();
       updateOutsideGreetingText();
       return true;
@@ -3207,12 +3397,21 @@ WIDGET_JS = r"""
         localStorage.setItem(createdKey, String(now));
       } catch (e) {}
       chatHistory = [];
+      if (typeof pendingPreviousHistory !== "undefined") pendingPreviousHistory = [];
       _historyLoaded = false;
+      lastKnownCart = null;
+      if (typeof _historyDividerEl !== "undefined") _historyDividerEl = null;
+      if (typeof _firstRevealedMessageNode !== "undefined") _firstRevealedMessageNode = null;
       if (conversation && greetingBubble) {
         conversation.innerHTML = "";
         greetingBubble.style.display = "";
         conversation.appendChild(greetingBubble);
       }
+      var historyBox = document.getElementById("chatHistoryBox");
+      if (historyBox) historyBox.remove();
+      var pullBar = document.getElementById("historyPullBar");
+      if (pullBar) pullBar.remove();
+      if (typeof refreshCartBadge === "function") refreshCartBadge();
       return true;
     }
 
@@ -3230,7 +3429,6 @@ WIDGET_JS = r"""
   }
 
   enforceUserSessionIsolation();
-  var customerName = null;
 
   function updateHeaderProfileBadge() {
     var badgeEl = document.getElementById("headerCustBadge");
@@ -3288,10 +3486,8 @@ WIDGET_JS = r"""
 
   function syncCustomerSession() {
     try {
-      // Explicit logout detection: only clear customer data if URL indicates logout
-      var isLogoutUrl = window.location.pathname.indexOf("/account/logout") !== -1 ||
-                        (window.location.search && window.location.search.indexOf("logged_out") !== -1);
-      if (isLogoutUrl) {
+      var live = detectLiveShopifyCustomer();
+      if (live.isGuest) {
         customerId = null;
         customerEmail = null;
         customerName = null;
@@ -3305,6 +3501,9 @@ WIDGET_JS = r"""
           localStorage.removeItem("ai_cust_name_" + SHOP);
         } catch (e) {}
       } else {
+        if (live.id) customerId = live.id;
+        if (live.email) customerEmail = live.email;
+        if (live.name) customerName = live.name;
         customerId = customerId || sessionStorage.getItem("ai_cust_id_" + SHOP) || localStorage.getItem("ai_cust_id_" + SHOP) || null;
         customerEmail = customerEmail || sessionStorage.getItem("ai_cust_email_" + SHOP) || localStorage.getItem("ai_cust_email_" + SHOP) || null;
         customerName = customerName || sessionStorage.getItem("ai_cust_name_" + SHOP) || localStorage.getItem("ai_cust_name_" + SHOP) || null;
@@ -3470,8 +3669,14 @@ WIDGET_JS = r"""
     var el = document.createElement("div");
     el.className = "bubble " + who;
     el.textContent = text;
-    conversation.appendChild(el);
-    autoResizeConversation();
+    if (opts.insertBefore && opts.insertBefore.parentNode === conversation) {
+      conversation.insertBefore(el, opts.insertBefore);
+    } else {
+      conversation.appendChild(el);
+    }
+    if (!opts.silentScroll) {
+      autoResizeConversation();
+    }
     if (who.indexOf("typing") === -1 && opts.record !== false) {
       chatHistory.push({ type: "bubble", text: text, who: who });
       persistState();
@@ -3492,7 +3697,9 @@ WIDGET_JS = r"""
       name.className = "p-name"; name.textContent = p.name || "Unnamed product";
       var price = document.createElement("div");
       price.className = "p-price";
-      price.textContent = p.price !== undefined ? "$" + p.price : "";
+      var pStr = p.price !== undefined ? String(p.price) : "";
+      if (pStr && pStr.indexOf("₹") === -1 && pStr.indexOf("$") === -1) pStr = "₹" + pStr;
+      price.textContent = pStr;
       var btn = document.createElement("button");
       btn.textContent = "Add to cart";
       btn.addEventListener("click", function (e) {
@@ -3508,17 +3715,26 @@ WIDGET_JS = r"""
       card.appendChild(img); card.appendChild(name); card.appendChild(price); card.appendChild(btn);
       row.appendChild(card);
     });
-    conversation.appendChild(row);
-    autoResizeConversation();
+    if (opts.insertBefore && opts.insertBefore.parentNode === conversation) {
+      conversation.insertBefore(row, opts.insertBefore);
+    } else {
+      conversation.appendChild(row);
+    }
+    if (!opts.silentScroll) {
+      autoResizeConversation();
+    }
     if (opts.record !== false) { chatHistory.push({ type: "products", products: products }); persistState(); }
+    return row;
   }
 
   function addOrderPicker(orders, opts) {
     opts = opts || {};
+    var wrap = document.createElement("div");
+    wrap.className = "order-picker-wrap";
     var heading = document.createElement("div");
     heading.className = "history-divider";
     heading.textContent = "Your Orders (" + orders.length + ")";
-    conversation.appendChild(heading);
+    wrap.appendChild(heading);
 
     orders.forEach(function (o) {
       var stLower = String(o.status || o.fulfillment_status || "").toLowerCase();
@@ -3565,7 +3781,7 @@ WIDGET_JS = r"""
       if (o.total) {
         var total = document.createElement("div");
         total.className = "order-total";
-        total.textContent = "Total: " + (o.currency || "$") + " " + o.total;
+        total.textContent = "Total: " + (o.currency || "₹") + " " + o.total;
         card.appendChild(total);
       }
 
@@ -3589,11 +3805,20 @@ WIDGET_JS = r"""
       actionsRow.appendChild(claimBtn);
 
       card.appendChild(actionsRow);
-      conversation.appendChild(card);
+      wrap.appendChild(card);
     });
 
-    autoResizeConversation();
+    if (opts.insertBefore && opts.insertBefore.parentNode === conversation) {
+      conversation.insertBefore(wrap, opts.insertBefore);
+    } else {
+      conversation.appendChild(wrap);
+    }
+
+    if (!opts.silentScroll) {
+      autoResizeConversation();
+    }
     if (opts.record !== false) { chatHistory.push({ type: "orders", orders: orders }); persistState(); }
+    return wrap;
   }
 
   function addOtpPrompt(otp, amount, currency, paymentMethod) {
@@ -3977,6 +4202,146 @@ WIDGET_JS = r"""
 
   var SESSION_TTL_MS = (customerId || customerEmail) ? 7200000 : 1800000; // 2h logged-in, 30m anon
 
+  var pendingPreviousHistory = [];
+  var _historyDividerEl = null;
+  var _firstRevealedMessageNode = null;
+
+  function updateHistoryPullBar() {
+    if (!conversation) return;
+    var pullBar = document.getElementById("historyPullBar");
+    if (!pendingPreviousHistory || pendingPreviousHistory.length === 0) {
+      if (pullBar) {
+        pullBar.className = "history-pull-bar done";
+        pullBar.innerHTML = "<span>— Beginning of conversation —</span>";
+      }
+      return;
+    }
+
+    if (!pullBar) {
+      pullBar = document.createElement("div");
+      pullBar.id = "historyPullBar";
+      pullBar.className = "history-pull-bar";
+      if (conversation.firstChild) {
+        conversation.insertBefore(pullBar, conversation.firstChild);
+      } else {
+        conversation.appendChild(pullBar);
+      }
+
+      pullBar.addEventListener("click", function (e) {
+        e.stopPropagation();
+        revealPreviousHistorySlice();
+      });
+    }
+
+    var remaining = pendingPreviousHistory.length;
+    pullBar.className = "history-pull-bar";
+    pullBar.innerHTML = "<span>↓ Pull down to view previous messages (" + remaining + ")</span>";
+  }
+
+  function renderHistoryItem(item, insertBeforeNode) {
+    if (!item) return null;
+    var el = null;
+    if (item.type === "bubble") {
+      el = addBubble(item.text || "", item.who || "bot", {
+        record: false,
+        insertBefore: insertBeforeNode,
+        silentScroll: true
+      });
+    } else if (item.type === "products" && item.products) {
+      el = addProductRow(item.products, {
+        record: false,
+        insertBefore: insertBeforeNode,
+        silentScroll: true
+      });
+    } else if (item.type === "orders" && item.orders) {
+      el = addOrderPicker(item.orders, {
+        record: false,
+        insertBefore: insertBeforeNode,
+        silentScroll: true
+      });
+    }
+    return el;
+  }
+
+  function revealPreviousHistorySlice() {
+    if (!pendingPreviousHistory || pendingPreviousHistory.length === 0) {
+      updateHistoryPullBar();
+      return;
+    }
+    if (greetingBubble) greetingBubble.style.display = "none";
+
+    var pullBar = document.getElementById("historyPullBar");
+    if (pullBar) pullBar.classList.add("loading");
+
+    // Take up to 4 items from the end of pending history (most recent unrevealed)
+    var sliceCount = Math.min(4, pendingPreviousHistory.length);
+    var startIndex = pendingPreviousHistory.length - sliceCount;
+    var slice = pendingPreviousHistory.splice(startIndex, sliceCount);
+
+    if (!_historyDividerEl) {
+      _historyDividerEl = document.createElement("div");
+      _historyDividerEl.className = "history-divider";
+      _historyDividerEl.textContent = "— Previous messages —";
+      if (_firstRevealedMessageNode && _firstRevealedMessageNode.parentNode === conversation) {
+        conversation.insertBefore(_historyDividerEl, _firstRevealedMessageNode);
+      } else if (pullBar && pullBar.nextSibling) {
+        conversation.insertBefore(_historyDividerEl, pullBar.nextSibling);
+      } else {
+        conversation.appendChild(_historyDividerEl);
+      }
+    }
+
+    var insertTarget = _firstRevealedMessageNode || _historyDividerEl;
+    var firstNewNode = null;
+    slice.forEach(function (item) {
+      var node = renderHistoryItem(item, insertTarget);
+      if (node && !firstNewNode) {
+        firstNewNode = node;
+      }
+    });
+
+    if (firstNewNode) {
+      _firstRevealedMessageNode = firstNewNode;
+    }
+
+    if (pullBar) pullBar.classList.remove("loading");
+    updateHistoryPullBar();
+  }
+
+  // Pull down gestures (mouse wheel scroll up at top, or touch swipe down)
+  var _wheelThrottle = 0;
+  if (conversation) {
+    conversation.addEventListener("wheel", function (e) {
+      if (conversation.scrollTop <= 2 && e.deltaY < -20) {
+        var now = Date.now();
+        if (now - _wheelThrottle > 600) {
+          _wheelThrottle = now;
+          if (pendingPreviousHistory.length > 0) {
+            revealPreviousHistorySlice();
+          }
+        }
+      }
+    }, { passive: true });
+
+    var _touchStartY = 0;
+    conversation.addEventListener("touchstart", function (e) {
+      if (e.touches && e.touches.length > 0) {
+        _touchStartY = e.touches[0].clientY;
+      }
+    }, { passive: true });
+
+    conversation.addEventListener("touchend", function (e) {
+      if (conversation.scrollTop <= 5 && e.changedTouches && e.changedTouches.length > 0) {
+        var dy = e.changedTouches[0].clientY - _touchStartY;
+        if (dy > 45) {
+          if (pendingPreviousHistory.length > 0) {
+            revealPreviousHistorySlice();
+          }
+        }
+      }
+    }, { passive: true });
+  }
+
   function restoreState() {
     try {
       enforceUserSessionIsolation();
@@ -4004,36 +4369,23 @@ WIDGET_JS = r"""
         widget.classList.add("expanded");
         expandToggle.classList.add("active-expand");
       }
-      // Replay previous turns safely into the conversation div
-      if (saved.history && saved.history.length > 0 && conversation) {
-        if (greetingBubble) greetingBubble.style.display = "none";
-        if (!conversation.querySelector(".history-divider")) {
-          var divider = document.createElement("div");
-          divider.className = "history-divider";
-          divider.textContent = "— Continuing conversation —";
-          conversation.appendChild(divider);
-          saved.history.forEach(function (item) {
-            if (item.type === "bubble") {
-              var el = document.createElement("div");
-              el.className = "bubble " + (item.who || "bot");
-              el.textContent = item.text || "";
-              conversation.appendChild(el);
-            } else if (item.type === "products" && item.products) {
-              addProductRow(item.products, { record: false });
-            } else if (item.type === "orders" && item.orders) {
-              addOrderPicker(item.orders, { record: false });
-            }
-          });
-        }
-        chatHistory = saved.history;
-        autoResizeConversation();
+      // Keep previous history in pending queue so it only reveals 4 messages on pull-down
+      if (saved.history && saved.history.length > 0) {
+        pendingPreviousHistory = saved.history.slice();
+        chatHistory = saved.history.slice();
+        updateHistoryPullBar();
       }
     } catch (e) {}
   }
 
   var _historyLoaded = false;
-  function loadChatHistory() {
-    if (_historyLoaded) return;
+  function loadChatHistory(triggerReveal) {
+    if (_historyLoaded) {
+      if (triggerReveal && pendingPreviousHistory.length > 0) {
+        revealPreviousHistorySlice();
+      }
+      return;
+    }
     _historyLoaded = true;
     if (!CFG.chatHistoryEndpoint) return;
     var requestUserKey = getCurrentUserKey();
@@ -4049,41 +4401,25 @@ WIDGET_JS = r"""
         if (historyBtn) historyBtn.classList.remove("spinning");
         if (getCurrentUserKey() !== requestUserKey) return;
         if (!data || !data.chats || data.chats.length === 0) return;
-        var box = document.createElement("div");
-        box.className = "history-context-box";
-        box.id = "chatHistoryBox";
-        var header = document.createElement("div");
-        header.className = "history-context-header";
-        var indicator = document.createElement("span");
-        indicator.className = "history-indicator";
-        indicator.innerHTML = "&#x2713; Previous chats";
-        var closeBtn = document.createElement("button");
-        closeBtn.textContent = "\u00d7";
-        closeBtn.style.cssText = "background:none;border:none;cursor:pointer;font-size:14px;color:#94a3b8;line-height:1;padding:0;";
-        closeBtn.addEventListener("click", function () { box.remove(); });
-        header.appendChild(indicator);
-        header.appendChild(closeBtn);
-        box.appendChild(header);
+        var serverItems = [];
         data.chats.forEach(function (chat) {
-          var item = document.createElement("div");
-          item.className = "history-item";
-          var uMsg = document.createElement("div");
-          uMsg.className = "history-user-msg";
-          uMsg.textContent = "\uD83D\uDC64 " + (chat.user_message || "");
-          var aRep = document.createElement("div");
-          aRep.className = "history-agent-reply";
-          aRep.textContent = "\uD83E\uDD16 " + (chat.agent_reply || "");
-          item.appendChild(uMsg);
-          item.appendChild(aRep);
-          box.appendChild(item);
+          if (chat.user_message) {
+            serverItems.push({ type: "bubble", who: "user", text: chat.user_message });
+          }
+          if (chat.agent_reply) {
+            serverItems.push({ type: "bubble", who: "bot", text: chat.agent_reply });
+          }
         });
-        if (conversation) {
-          conversation.insertBefore(box, conversation.firstChild);
-          var divider = document.createElement("div");
-          divider.className = "history-divider";
-          divider.textContent = "— Previous conversation history —";
-          conversation.insertBefore(divider, box.nextSibling);
-          autoResizeConversation();
+        var existingTexts = {};
+        pendingPreviousHistory.forEach(function (it) { if (it.text) existingTexts[it.text] = true; });
+        chatHistory.forEach(function (it) { if (it.text) existingTexts[it.text] = true; });
+        var newServerItems = serverItems.filter(function (it) { return !existingTexts[it.text]; });
+        if (newServerItems.length > 0) {
+          pendingPreviousHistory = newServerItems.concat(pendingPreviousHistory);
+          updateHistoryPullBar();
+        }
+        if (triggerReveal) {
+          revealPreviousHistorySlice();
         }
       })
       .catch(function () {
@@ -4094,10 +4430,12 @@ WIDGET_JS = r"""
 
   if (historyBtn) {
     historyBtn.addEventListener("click", function () {
-      _historyLoaded = false; // force reload on manual click
-      var existing = document.getElementById("chatHistoryBox");
-      if (existing) existing.remove();
-      loadChatHistory();
+      if (pendingPreviousHistory.length > 0) {
+        revealPreviousHistorySlice();
+      } else {
+        _historyLoaded = false;
+        loadChatHistory(true);
+      }
     });
   }
 

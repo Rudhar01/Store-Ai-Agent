@@ -1579,11 +1579,41 @@ def _generate_shopify_search_queries(raw_query: str) -> list[str]:
     return list(dict.fromkeys(queries))
 
 
+def _parse_price_value(v) -> float | None:
+    if v is None:
+        return None
+    try:
+        if isinstance(v, (int, float)):
+            return float(v)
+        c = re.sub(r"[^\d.]", "", str(v))
+        return float(c) if c else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _apply_price_filters(cards: list[dict], entities: dict) -> list[dict]:
+    lo = _parse_price_value(entities.get("price_min"))
+    hi = _parse_price_value(entities.get("price_max"))
+    if lo is None and hi is None:
+        return cards
+    out = []
+    for c in cards:
+        price = _parse_price_value(c.get("price"))
+        if price is None:
+            continue
+        if lo is not None and price < lo:
+            continue
+        if hi is not None and price > hi:
+            continue
+        out.append(c)
+    return out
+
+
 def _format_product_card(p: dict, store, entities: dict) -> dict | None:
     """Normalizes both GraphQL nodes and REST product dictionaries into a standard card,
     evaluating price, color, and size filters on variants."""
-    price_min = entities.get("price_min")
-    price_max = entities.get("price_max")
+    price_min = _parse_price_value(entities.get("price_min"))
+    price_max = _parse_price_value(entities.get("price_max"))
     color = (entities.get("color") or "").lower()
     size = (entities.get("size") or "").lower()
 
@@ -1598,13 +1628,13 @@ def _format_product_card(p: dict, store, entities: dict) -> dict | None:
     for v in var_list:
         raw_price = v.get("price")
         if isinstance(raw_price, dict):
-            price = float(raw_price.get("amount", 0) or 0)
+            price = _parse_price_value(raw_price.get("amount", 0)) or 0.0
         else:
-            price = float(raw_price or 0)
+            price = _parse_price_value(raw_price) or 0.0
 
-        if price_min is not None and price < float(price_min):
+        if price_min is not None and price < price_min:
             continue
-        if price_max is not None and price > float(price_max):
+        if price_max is not None and price > price_max:
             continue
 
         opts = []
@@ -1639,7 +1669,7 @@ def _format_product_card(p: dict, store, entities: dict) -> dict | None:
     if not best_variant and var_list and not has_filters:
         v0 = var_list[0]
         raw_p = v0.get("price")
-        p0 = float(raw_p.get("amount", 0)) if isinstance(raw_p, dict) else float(raw_p or 0)
+        p0 = _parse_price_value(raw_p.get("amount", 0)) if isinstance(raw_p, dict) else (_parse_price_value(raw_p) or 0.0)
         avail0 = v0.get("availableForSale")
         if avail0 is None:
             is_managed = (v0.get("inventory_management") or "").lower() == "shopify"
@@ -1943,14 +1973,25 @@ async def search_products(store, entities: dict, session_id: str) -> dict:
         reverse=True
     )
     cards = [item[1] for item in scored_cards[:6]]
+    if entities.get("price_max") is not None or entities.get("price_min") is not None:
+        cards = _apply_price_filters(cards, entities)
 
     if not cards:
+        hi_val = _parse_price_value(entities.get("price_max"))
+        lo_val = _parse_price_value(entities.get("price_min"))
+        p_clause = ""
+        if hi_val is not None and lo_val is not None:
+            p_clause = f"between ₹{int(lo_val)} and ₹{int(hi_val)} "
+        elif hi_val is not None:
+            p_clause = f"under ₹{int(hi_val)} "
+        elif lo_val is not None:
+            p_clause = f"above ₹{int(lo_val)} "
         return {
             "results": [],
             "no_exact_match": True,
             "searched_query": raw_query,
             "filters_applied": entities,
-            "message": f"I couldn't find any products matching '{raw_query}' in our store catalog.",
+            "message": f"I couldn't find any products {p_clause}matching '{raw_query}' in our store catalog." if raw_query else f"I couldn't find any products {p_clause}in our store catalog.",
         }
 
     return {"results": cards, "filters_applied": entities}
