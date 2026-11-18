@@ -473,6 +473,9 @@ def _is_add_to_cart(message: str) -> tuple[str, int] | None:
     msg_low = msg.lower()
     if any(q in msg_low for q in ["how to", "how do i", "can i add", "what did i add", "when will", "why"]):
         return None
+    # Exclude direct order placement requests (e.g. "place an order", "place order for ...", "create an order")
+    if bool(re.search(r"\b(?:place|create|proceed\s+with)\s+(?:an?\s+|the\s+|my\s+)?order\b", msg_low)):
+        return None
     has_cart_kw = bool(re.search(r"\b(cart|bag|basket)\b", msg_low))
     starts_add = bool(re.match(r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:add|put|place|insert)\s+", msg_low))
     if not (has_cart_kw or starts_add):
@@ -600,9 +603,10 @@ def _is_product_search(message: str) -> tuple[str, bool] | None:
     # 1. Lead-in phrases (e.g. 'show me some products', 'search for silence tshirt')
     if _SEARCH_LEAD_IN.search(msg_low):
         cleaned = _SEARCH_LEAD_IN.sub("", msg).strip()
-        content_only = _SEARCH_FILLER.sub("", cleaned).strip(" .,!?")
+        _, p_stripped = extract_price_filters(cleaned)
+        content_only = _SEARCH_FILLER.sub("", p_stripped).strip(" .,!?")
         if not content_only:
-            return ("", True)  # Browse mode
+            return (cleaned, True)  # Browse mode
         cleaned = _LEADING_ARTICLE.sub("", cleaned).strip(" .,!?")
         return (cleaned, False)
 
@@ -610,9 +614,10 @@ def _is_product_search(message: str) -> tuple[str, bool] | None:
     m = re.match(r"^(?:search|find|show|look\s+for|looking\s+for|do\s+you\s+have)\s+(?:for\s+)?(.+)$", msg, re.IGNORECASE)
     if m:
         cleaned = m.group(1).strip()
-        content_only = _SEARCH_FILLER.sub("", cleaned).strip(" .,!?")
+        _, p_stripped = extract_price_filters(cleaned)
+        content_only = _SEARCH_FILLER.sub("", p_stripped).strip(" .,!?")
         if not content_only:
-            return ("", True)  # Browse mode
+            return (cleaned, True)  # Browse mode
         cleaned = _LEADING_ARTICLE.sub("", cleaned).strip(" .,!?")
         return (cleaned, False)
 
@@ -622,9 +627,10 @@ def _is_product_search(message: str) -> tuple[str, bool] | None:
         stopwords = {"ok", "okay", "yes", "no", "thanks", "thank", "bye", "good", "sure", "hi", "hello", "hey", "help"}
         if not (set(w.lower() for w in words) & stopwords):
             cleaned = _LEADING_ARTICLE.sub("", msg).strip(" .,!?")
-            content_only = _SEARCH_FILLER.sub("", cleaned).strip(" .,!?")
+            _, p_stripped = extract_price_filters(cleaned)
+            content_only = _SEARCH_FILLER.sub("", p_stripped).strip(" .,!?")
             if not content_only:
-                return ("", True)
+                return (cleaned, True)
             return (cleaned, False)
 
     return None
@@ -1066,6 +1072,21 @@ async def _execute_and_reply(store: SimpleNamespace, intent: str, action: str, e
                 data["message"] = f"I couldn't find any products {p_clause}in our store catalog."
 
     products = data.get("results") if action in {"search_products", "check_availability", "get_recommendations", "recommend_products", "assistant_help", "clarify", "subscribe_restock"} and isinstance(data, dict) else None
+    if products and (entities.get("price_max") is not None or entities.get("price_min") is not None):
+        products = _apply_price_filters(products, entities)
+        if isinstance(data, dict):
+            data["results"] = products
+            if not products and not data.get("message"):
+                hi_val = _parse_card_price(entities.get("price_max"))
+                lo_val = _parse_card_price(entities.get("price_min"))
+                p_clause = ""
+                if hi_val is not None and lo_val is not None:
+                    p_clause = f"between ₹{int(lo_val)} and ₹{int(hi_val)} "
+                elif hi_val is not None:
+                    p_clause = f"under ₹{int(hi_val)} "
+                elif lo_val is not None:
+                    p_clause = f"above ₹{int(lo_val)} "
+                data["message"] = f"I couldn't find any products {p_clause}in our store catalog."
     if products and isinstance(products, list) and len(products) > 0:
         first_prod = products[0]
         if isinstance(first_prod, dict) and first_prod.get("name"):
@@ -1542,6 +1563,7 @@ async def _chat_impl(req: ChatRequest):
             customer_email=customer_email,
             customer_name=customer_name,
             last_product=last_prod,
+            cart_data=req.cart_data,
         )
         if dir_res:
             _log(req.shop, message, dir_res.get("status", "done"), "order_management", "direct_order", {"product": _dir_p, "quantity": _dir_q}, dir_res.get("reply", ""))
@@ -1677,7 +1699,11 @@ async def _chat_impl(req: ChatRequest):
     elif _is_product_search(message):
         search_query, is_browse = _is_product_search(message)
         price_extracted, search_query = extract_price_filters(search_query)
-        if is_browse:
+        clean_kw = _SEARCH_FILLER.sub("", search_query).strip(" .,!?")
+        if not clean_kw:
+            search_query = ""
+            is_browse = True
+        if is_browse or not search_query:
             intent, action = "product_search", "get_recommendations"
             entities = dict(price_extracted)
         else:
@@ -3368,7 +3394,20 @@ WIDGET_JS = r"""
       } catch (e) {}
       SESSION_ID = s;
 
-      if (typeof refreshCartBadge === "function") refreshCartBadge();
+      if (typeof cartClear === "function") {
+        cartClear();
+      } else {
+        try { fetch("/cart/clear.js", { method: "POST" }); } catch (e) {}
+      }
+      lastKnownCart = null;
+      if (cartBadge) {
+        cartBadge.textContent = "0";
+        cartBadge.classList.remove("show");
+      }
+      try {
+        sessionStorage.removeItem("ai_cart_" + SHOP);
+        localStorage.removeItem("ai_cart_" + SHOP);
+      } catch (e) {}
       updateHeaderProfileBadge();
       updateOutsideGreetingText();
       return true;
@@ -3411,7 +3450,20 @@ WIDGET_JS = r"""
       if (historyBox) historyBox.remove();
       var pullBar = document.getElementById("historyPullBar");
       if (pullBar) pullBar.remove();
-      if (typeof refreshCartBadge === "function") refreshCartBadge();
+      if (typeof cartClear === "function") {
+        cartClear();
+      } else {
+        try { fetch("/cart/clear.js", { method: "POST" }); } catch (e) {}
+      }
+      lastKnownCart = null;
+      if (cartBadge) {
+        cartBadge.textContent = "0";
+        cartBadge.classList.remove("show");
+      }
+      try {
+        sessionStorage.removeItem("ai_cart_" + SHOP);
+        localStorage.removeItem("ai_cart_" + SHOP);
+      } catch (e) {}
       return true;
     }
 
@@ -4184,7 +4236,12 @@ WIDGET_JS = r"""
         cartClear();
         break;
       case "checkout":
-        setTimeout(function () { window.location.href = action.url || "/checkout"; }, 600);
+        if (action.variant_id) {
+          cartAdd(action.variant_id, action.quantity || 1, null);
+          setTimeout(function () { window.location.href = action.url || "/checkout"; }, 500);
+        } else {
+          setTimeout(function () { window.location.href = action.url || "/checkout"; }, 600);
+        }
         break;
     }
   }

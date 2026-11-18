@@ -1847,6 +1847,14 @@ def _evaluate_product_search_match(p: dict, query_str: str, tokens: list[str], d
     tags = str(p.get("tags") or "").lower()
     p_type = (p.get("product_type") or "").lower()
 
+    # Category conflict detection: e.g. "shorts" must not match "short sleeve" t-shirts/tops
+    tokens_low = [t.lower() for t in tokens]
+    if "shorts" in tokens_low or "short" in tokens_low:
+        is_top = any(tw in title or tw in p_type for tw in ["shirt", "t-shirt", "tee", "top", "hoodie", "jacket", "sweater", "sweatshirt", "pants", "cargo", "jeans", "trouser"])
+        is_explicit_shorts = "shorts" in title or "shorts" in p_type or ("short" in title and "sleeve" not in title and "shirt" not in title)
+        if is_top and not is_explicit_shorts:
+            return False, 0.0
+
     title_norm = re.sub(r"[^a-z0-9]+", "", title)
     query_norm = re.sub(r"[^a-z0-9]+", "", (query_str or "").lower())
     haystack_words = set(re.findall(r"[a-z0-9]+", f"{title} {handle} {tags} {p_type}"))
@@ -1863,6 +1871,9 @@ def _evaluate_product_search_match(p: dict, query_str: str, tokens: list[str], d
             if dt_norm and (dt_norm in title_norm or dt_norm in handle or dt_norm in haystack_norm):
                 matched_distinctive = True
                 break
+            # If distinctive keyword is 'shorts', do not count 'short' from sleeve descriptions
+            if dt_clean == "shorts" and "shorts" not in haystack_words:
+                continue
             if any(hw == dt_clean or hw == dt_sing or hw.startswith(dt_sing) for hw in haystack_words):
                 matched_distinctive = True
                 break
@@ -1946,13 +1957,36 @@ async def search_products(store, entities: dict, session_id: str) -> dict:
     except Exception as e:
         print(f"shopify_actions: in-memory fallback search failed: {e!r}")
 
+    # If raw_query is just generic filler words ("products", "items", etc.), treat as empty/browse query!
+    clean_query_check = re.sub(r"\b(products?|items?|collection|things?|stuff|anything|clothes|clothing)\b", "", raw_query, flags=re.IGNORECASE).strip()
+    if not clean_query_check:
+        raw_query = ""
+
     # If no search query was given, return top catalog products
-    if not raw_query.strip() and not tokens:
+    if not raw_query.strip():
         cards = []
         for p in candidate_products.values():
             card = _format_product_card(p, store, entities)
             if card:
                 cards.append(card)
+        if entities.get("price_max") is not None or entities.get("price_min") is not None:
+            cards = _apply_price_filters(cards, entities)
+        if not cards:
+            hi_val = _parse_price_value(entities.get("price_max"))
+            lo_val = _parse_price_value(entities.get("price_min"))
+            p_clause = ""
+            if hi_val is not None and lo_val is not None:
+                p_clause = f"between ₹{int(lo_val)} and ₹{int(hi_val)} "
+            elif hi_val is not None:
+                p_clause = f"under ₹{int(hi_val)} "
+            elif lo_val is not None:
+                p_clause = f"above ₹{int(lo_val)} "
+            return {
+                "results": [],
+                "no_exact_match": True,
+                "filters_applied": entities,
+                "message": f"I couldn't find any products {p_clause}in our store catalog.",
+            }
         return {"results": cards[:6], "filters_applied": entities}
 
     # Evaluate, strictly filter, and score candidates
@@ -2487,7 +2521,7 @@ async def assistant_help(store, entities: dict, session_id: str, customer_id: st
     resp = await _get(store, "products.json", {"status": "active", "limit": 6})
     sample_products = []
     if resp.status_code == 200:
-        for p in resp.json().get("products", [])[:4]:
+        for p in resp.json().get("products", [])[:6]:
             var = (p.get("variants") or [{}])[0]
             sample_products.append({
                 "id": str(var.get("id")),
@@ -2497,6 +2531,8 @@ async def assistant_help(store, entities: dict, session_id: str, customer_id: st
                 "handle": p.get("handle", ""),
                 "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
             })
+    if entities.get("price_max") is not None or entities.get("price_min") is not None:
+        sample_products = _apply_price_filters(sample_products, entities)
     store_name = getattr(store, "shop_domain", "our store").split(".")[0].replace("-", " ").title()
     return {
         "store_name": store_name,
@@ -2517,24 +2553,41 @@ async def recommend_products(store, entities: dict, session_id: str, customer_id
     try:
         recs = await get_recommendations(store, entities, session_id, customer_id=customer_id)
         if isinstance(recs, dict) and recs.get("results"):
-            return recs
+            if entities.get("price_max") is not None or entities.get("price_min") is not None:
+                recs["results"] = _apply_price_filters(recs["results"], entities)
+            if recs.get("results"):
+                return recs
     except Exception:
         pass
-    resp = await _get(store, "products.json", {"status": "active", "limit": 6})
+    resp = await _get(store, "products.json", {"status": "active", "limit": 12})
     featured = []
     if resp.status_code == 200:
-        for p in resp.json().get("products", [])[:4]:
-            var = (p.get("variants") or [{}])[0]
-            featured.append({
-                "id": str(var.get("id")),
-                "name": p.get("title", "Featured Item"),
-                "price": float(var.get("price", 0) or 0),
-                "image": (p.get("image") or {}).get("src", ""),
-                "handle": p.get("handle", ""),
-                "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
-            })
+        for p in resp.json().get("products", []):
+            card = _format_product_card(p, store, entities)
+            if card:
+                featured.append(card)
+    if entities.get("price_max") is not None or entities.get("price_min") is not None:
+        featured = _apply_price_filters(featured, entities)
+
+    if not featured and (entities.get("price_max") is not None or entities.get("price_min") is not None):
+        hi_val = _parse_price_value(entities.get("price_max"))
+        lo_val = _parse_price_value(entities.get("price_min"))
+        p_clause = ""
+        if hi_val is not None and lo_val is not None:
+            p_clause = f"between ₹{int(lo_val)} and ₹{int(hi_val)} "
+        elif hi_val is not None:
+            p_clause = f"under ₹{int(hi_val)} "
+        elif lo_val is not None:
+            p_clause = f"above ₹{int(lo_val)} "
+        return {
+            "results": [],
+            "no_exact_match": True,
+            "filters_applied": entities,
+            "message": f"I couldn't find any products {p_clause}in our store catalog.",
+        }
+
     return {
-        "results": featured,
+        "results": featured[:6],
         "message": "Here are some of our top recommended items right now:"
     }
 
@@ -2556,6 +2609,8 @@ async def clarify(store, entities: dict, session_id: str) -> dict:
                 "handle": p.get("handle", ""),
                 "url": f"https://{store.shop_domain}/products/{p.get('handle', '')}" if p.get("handle") else "",
             })
+    if entities.get("price_max") is not None or entities.get("price_min") is not None:
+        sample = _apply_price_filters(sample, entities)
     return {
         "status": "clarify",
         "results": sample,

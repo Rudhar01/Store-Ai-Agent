@@ -92,8 +92,8 @@ def is_product_in_stock(product: dict | None) -> bool:
 
 _DIRECT_ORDER_RE = re.compile(
     r"^(?:can you\s+)?(?:could you\s+)?(?:please\s+)?(?:i\s+want\s+to\s+)?"
-    r"(?:order|buy|purchase|place\s+(?:an?\s+)?order\s+for|create\s+(?:an?\s+)?order\s+for)\s+"
-    r"(.+?)(?:\s+for\s+me)?$",
+    r"(?:order|buy|purchase|place\s+(?:an?\s+)?order\s*(?:for|of)?|create\s+(?:an?\s+)?order\s*(?:for|of)?)"
+    r"(?:\s+(.+?))?(?:\s+for\s+me)?$",
     re.IGNORECASE,
 )
 
@@ -132,9 +132,9 @@ def is_direct_order_request(message: str) -> tuple[bool, str, int]:
     if not m:
         return False, "", 1
 
-    raw_item = m.group(1).strip()
-    if not raw_item:
-        return False, "", 1
+    raw_item = (m.group(1) or "").strip()
+    if not raw_item or raw_item.lower() in ("me", "for me", "it", "this", "that", "the item", "product", "the product", "order", "an order", "the order"):
+        return True, "", 1
 
     # Parse quantity and clean product name
     qty = 1
@@ -148,9 +148,8 @@ def is_direct_order_request(message: str) -> tuple[bool, str, int]:
 
     # Strip trailing punctuation or fillers
     prod_name = re.sub(r"\s+for\s+me$", "", prod_name, flags=re.IGNORECASE).strip(" .,!?")
-
-    if not prod_name:
-        return False, "", 1
+    if prod_name.lower() in ("me", "for me", "it", "this", "that", "the item", "product", "the product", "order", "an order", "the order"):
+        prod_name = ""
 
     return True, prod_name, max(1, qty)
 
@@ -371,6 +370,7 @@ async def handle_direct_order_request(
     customer_email: str | None = None,
     customer_name: str | None = None,
     last_product: dict | None = None,
+    cart_data: dict | None = None,
 ) -> dict:
     """Processes a direct product order request:
     1. Identifies the requested product and variant.
@@ -384,6 +384,38 @@ async def handle_direct_order_request(
     is_req, prod_query, qty = is_direct_order_request(message)
     if not is_req:
         return {}
+
+    # If no specific product mentioned in "place an order":
+    if not prod_query:
+        # 1. If cart has items, proceed directly to checkout to pay!
+        cart_items = []
+        if isinstance(cart_data, dict):
+            cart_items = cart_data.get("items") or []
+        if cart_items:
+            item_count = sum(it.get("quantity", 1) for it in cart_items)
+            item_text = f"{item_count} item" if item_count == 1 else f"{item_count} items"
+            checkout_url = f"/checkout?checkout[email]={quote(customer_email)}" if customer_email else "/checkout"
+            reply_msg = f"Taking you directly to the payment page to complete your order with {item_text}."
+            return {
+                "status": "checkout_redirect",
+                "reply": reply_msg,
+                "checkout_url": checkout_url,
+                "widget_action": {
+                    "type": "checkout",
+                    "url": checkout_url,
+                },
+                "message_type": "action",
+                "is_action": True,
+            }
+        # 2. If cart is empty, check if shopper previously viewed/asked about a product
+        if last_product and (last_product.get("name") or last_product.get("title")):
+            prod_query = last_product.get("name") or last_product.get("title")
+        else:
+            return {
+                "status": "cart_empty",
+                "reply": "Your cart is currently empty. Which product would you like me to order for you?",
+                "message_type": "normal",
+            }
 
     # Check for pronoun / referential product
     if prod_query.lower() in ("this", "this product", "it", "that", "the item", "the product") and last_product:
@@ -476,7 +508,7 @@ async def handle_direct_order_request(
     note_str = f" with your {', '.join(prefill_notes)} already filled in" if prefill_notes else " with your order details pre-filled"
     reply_msg = (
         f"I've created your order for {qty}x '{prod_title}' (Total: ₹{total_price}){note_str}! "
-        f"Taking you directly to the payment page to complete your purchase..."
+        f"Adding it to your cart and taking you directly to the payment page to complete your purchase..."
     )
 
     return {
@@ -489,6 +521,10 @@ async def handle_direct_order_request(
         "widget_action": {
             "type": "checkout",
             "url": payment_url,
+            "variant_id": variant_id,
+            "quantity": qty,
         },
         "customer_prefilled": bool(cust_details.get("email") or cust_details.get("shipping_address")),
+        "message_type": "action",
+        "is_action": True,
     }

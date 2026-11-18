@@ -75,9 +75,18 @@ def _num_id(value) -> str:
 
 def _price(product: dict) -> float | None:
     try:
-        variants = product.get("variants") or [{}]
-        return float(variants[0].get("price"))
-    except (TypeError, ValueError, AttributeError, IndexError):
+        variants = product.get("variants") or []
+        if isinstance(variants, dict):
+            variants = variants.get("nodes") or []
+        if isinstance(variants, list) and variants:
+            raw = variants[0].get("price")
+            if isinstance(raw, dict):
+                return float(raw.get("amount", 0))
+            if raw is not None:
+                cleaned = re.sub(r"[^\d.]", "", str(raw))
+                return float(cleaned) if cleaned else None
+        return None
+    except Exception:
         return None
 
 
@@ -197,7 +206,7 @@ async def recommend_products(
     if price_cap or category_words:
         def _fits(p):
             p_price = _price(p)
-            if price_cap and p_price is not None and p_price > price_cap:
+            if price_cap is not None and (p_price is None or p_price > price_cap):
                 return False
             if category_words:
                 meta = p.get("_metadata", {})
