@@ -1722,7 +1722,8 @@ def fetch_metric(store: dict, metric: str, days: int) -> dict:
     if fn is None:
         return _result(reason="No data source is connected for this metric yet.")
     try:
-        raw, used = _invoke(fn, store["$id"], days=days, limit=8)
+        target = store if metric in ("sales_daily", "product_purchases", "category_popularity") else store["$id"]
+        raw, used = _invoke(fn, target, days=days, limit=8)
     except Exception as exc:
         friendly = getattr(exc, "user_message", None)  # e.g. repo.AnalyticsUnavailable
         if friendly:
@@ -1742,7 +1743,11 @@ def fetch_metric(store: dict, metric: str, days: int) -> dict:
 def load_analytics(store: dict, days: int) -> dict:
     """Blocking — run via run.io_bound(). Scoped to the logged-in store only."""
     sid = store["$id"]
-    bundle = {"days": days, "metrics": {m: fetch_metric(store, m, days) for m in _REPO_METRICS}}
+    bundle = {
+        "days": days,
+        "currency": store.get("currency") or store.get("currency_code") or "",
+        "metrics": {m: fetch_metric(store, m, days) for m in _REPO_METRICS},
+    }
     try:
         bundle["features"] = dict(repo.ensure_features(sid))
     except Exception:
@@ -1816,6 +1821,8 @@ def _derive_kpis(b: dict) -> dict:
     k["revenue"] = _series_total(b, "sales_daily", "revenue")
     sales = _data(b, "sales_daily")
     k["currency"] = next((r["_currency"] for r in (sales or {"rows": {}})["rows"].values() if r.get("_currency")), "")
+    if not k["currency"]:
+        k["currency"] = b.get("currency") or ""
     return k
 
 
@@ -2128,12 +2135,12 @@ def _render_analytics(b: dict, grain: str):
     period = ANALYTICS_RANGES.get(b["days"], "")
 
     with ui.element("div").classes("w-full grid grid-cols-2 md:grid-cols-3 gap-3"):
-        _kpi_card("receipt_long", "Number of orders", _fmt(k["orders"]) if k["orders"] is not None else None,
+        _kpi_card("receipt_long", "Orders Received", _fmt(k["orders"]) if k["orders"] is not None else None,
                   period, _why("sales_daily", "Order data not connected"), accent_color="#3B82F6")
-        _kpi_card("payments", "Revenue",
+        _kpi_card("payments", "Live Revenue",
                   (f"{cur} " if cur else "") + _fmt(k["revenue"], 2) if k["revenue"] is not None else None,
                   period, _why("sales_daily", "Sales data not connected"), accent_color="#10B981")
-        _kpi_card("emoji_events", "Most bought product", top_buy[0] if top_buy else None,
+        _kpi_card("emoji_events", "Most Bought Product", top_buy[0] if top_buy else None,
                   f"{_fmt(top_buy[1])} units sold" if top_buy else "",
                   _why("product_purchases", "No purchases yet") if not bought else "No purchases in this period",
                   compact=True, accent_color="#F59E0B")
@@ -2235,6 +2242,10 @@ async def analytics_page():
     async def refresh():
         state["req"] += 1
         my_req = state["req"]
+        try:
+            repo.clear_orders_cache()
+        except Exception:
+            pass
         body.clear()
         with body:
             with ui.row().classes("w-full items-center justify-center py-16 gap-3"):

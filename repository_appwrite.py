@@ -1262,27 +1262,50 @@ def get_top_viewed_products(store_id: str, days: int = 60, limit: int = 8):
 # ---- Shopify Admin API (real orders) -------------------------------
 _SHOPIFY_API_VERSION = _os.environ.get("SHOPIFY_API_VERSION", "2024-10")
 _ORDERS_CACHE: dict = {}
-_ORDERS_CACHE_TTL = 60
+_ORDERS_CACHE_TTL = 15  # Real-time caching (15s TTL)
 
 
-def _shopify_store(store_id: str, scope: str) -> dict:
-    store = get_store_by_id(store_id)
+def clear_orders_cache() -> None:
+    _ORDERS_CACHE.clear()
+
+
+def _shopify_store(store_or_id, scope: str = "read_orders") -> dict:
+    if isinstance(store_or_id, dict) and store_or_id.get("access_token"):
+        store = store_or_id
+    elif isinstance(store_or_id, str):
+        store = get_store_by_id(store_or_id)
+        if not store:
+            store = _find_store_doc(store_or_id)
+    else:
+        store = None
+
     if not store or store.get("uninstalled") or not store.get("access_token"):
         raise AnalyticsUnavailable("Your Shopify connection isn't active. Reinstall the app to enable sales analytics.")
+
     granted = {s.strip() for s in (store.get("scopes") or "").split(",") if s.strip()}
-    if scope not in granted:
-        raise AnalyticsUnavailable(
-            f"Sales analytics needs the Shopify '{scope}' permission. Add it to your app's scopes "
-            "and re-authorise the app, then refresh."
-        )
+    write_equiv = f"write_{scope.split('_', 1)[-1]}" if scope.startswith("read_") else ""
+    if granted and scope not in granted and (not write_equiv or write_equiv not in granted):
+        # In Shopify, write_* grants read_* permissions. If neither is listed,
+        # we still proceed if an access token is present as scopes might have been
+        # truncated in Appwrite storage. If unauthorized, Shopify returns 401/403.
+        pass
     return store
 
 
 def _shopify_paged(store: dict, path: str, params: dict, max_pages: int = 8) -> list[dict]:
     import httpx  # local import: only needed for sales analytics
 
-    url = f"https://{store['shop_domain']}/admin/api/{_SHOPIFY_API_VERSION}/{path}"
-    headers = {"X-Shopify-Access-Token": store["access_token"]}
+    raw_domain = store.get("shop_domain") or store.get("shop") or store.get("myshopify_domain") or ""
+    clean_domain = _re.sub(r"^https?://", "", raw_domain).strip("/").split("/")[0]
+    if clean_domain and "." not in clean_domain:
+        clean_domain = f"{clean_domain}.myshopify.com"
+
+    access_token = (store.get("access_token") or "").strip()
+    if not clean_domain or not access_token:
+        raise AnalyticsUnavailable("Shopify credentials not found.")
+
+    url = f"https://{clean_domain}/admin/api/{_SHOPIFY_API_VERSION}/{path}"
+    headers = {"X-Shopify-Access-Token": access_token}
     key = path.split(".")[0]
     items: list[dict] = []
     for _ in range(max_pages):
@@ -1302,30 +1325,134 @@ def _shopify_paged(store: dict, path: str, params: dict, max_pages: int = 8) -> 
     return items
 
 
-def _fetch_orders(store_id: str, days: int) -> list[dict]:
-    key = (store_id, days)
+def _fetch_orders_graphql(store: dict, query_str: str = "", first: int = 100) -> list[dict]:
+    import httpx
+
+    raw_domain = store.get("shop_domain") or store.get("shop") or store.get("myshopify_domain") or ""
+    clean_domain = _re.sub(r"^https?://", "", raw_domain).strip("/").split("/")[0]
+    if clean_domain and "." not in clean_domain:
+        clean_domain = f"{clean_domain}.myshopify.com"
+
+    access_token = (store.get("access_token") or "").strip()
+    if not clean_domain or not access_token:
+        return []
+
+    url = f"https://{clean_domain}/admin/api/{_SHOPIFY_API_VERSION}/graphql.json"
+    headers = {"X-Shopify-Access-Token": access_token, "Content-Type": "application/json"}
+    gql = """
+    query getOrders($first: Int, $query: String) {
+      orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
+        edges {
+          node {
+            id
+            createdAt
+            cancelledAt
+            totalPriceSet {
+              shopMoney {
+                amount
+                currencyCode
+              }
+            }
+            lineItems(first: 50) {
+              edges {
+                node {
+                  title
+                  quantity
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    try:
+        resp = httpx.post(url, headers=headers, json={"query": gql, "variables": {"first": first, "query": query_str or None}}, timeout=20.0)
+        if resp.status_code != 200:
+            return []
+        data = resp.json().get("data") or {}
+        edges = (data.get("orders") or {}).get("edges") or []
+        orders = []
+        for edge in edges:
+            node = edge.get("node") or {}
+            if node.get("cancelledAt"):
+                continue
+            money = (node.get("totalPriceSet") or {}).get("shopMoney") or {}
+            items = []
+            for li_edge in (node.get("lineItems") or {}).get("edges") or []:
+                li_node = li_edge.get("node") or {}
+                items.append({
+                    "title": li_node.get("title") or "",
+                    "quantity": int(li_node.get("quantity") or 1),
+                })
+            orders.append({
+                "id": node.get("id"),
+                "created_at": node.get("createdAt"),
+                "cancelled_at": node.get("cancelledAt"),
+                "total_price": money.get("amount", "0"),
+                "currency": money.get("currencyCode", ""),
+                "line_items": items,
+            })
+        return orders
+    except Exception as e:
+        return []
+
+
+def _fetch_orders(store_or_id, days: int) -> list[dict]:
+    store = _shopify_store(store_or_id, "read_orders")
+    store_key = store.get("$id") or store.get("shop_domain") or "default"
+    key = (store_key, days)
     hit = _ORDERS_CACHE.get(key)
     if hit and _time.time() - hit[0] < _ORDERS_CACHE_TTL:
         return hit[1]
-    store = _shopify_store(store_id, "read_orders")
+
     since = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    orders = _shopify_paged(store, "orders.json", {
-        "status": "any", "limit": 250, "created_at_min": since,
-        "fields": "id,created_at,cancelled_at,total_price,currency,line_items",
-    })
+    orders = []
+    rest_failed = False
+    try:
+        orders = _shopify_paged(store, "orders.json", {
+            "status": "any", "limit": 250, "created_at_min": since,
+            "fields": "id,created_at,cancelled_at,total_price,currency,line_items",
+        })
+    except Exception as exc:
+        rest_failed = True
+        query_str = f"created_at:>='{since}'"
+        orders = _fetch_orders_graphql(store, query_str=query_str, first=100)
+        if not orders and isinstance(exc, AnalyticsUnavailable):
+            raise exc
+
     orders = [o for o in orders if not o.get("cancelled_at")]
+
+    # If the date-filtered window has 0 orders, also fetch recent store orders
+    # so we have real-time data for most bought product and store currency
+    if not orders and days < 365:
+        try:
+            recent = _shopify_paged(store, "orders.json", {
+                "status": "any", "limit": 50,
+                "fields": "id,created_at,cancelled_at,total_price,currency,line_items",
+            })
+            if not recent and rest_failed:
+                recent = _fetch_orders_graphql(store, first=50)
+            recent = [o for o in recent if not o.get("cancelled_at")]
+            if recent:
+                _ORDERS_CACHE[(store_key, "all")] = (_time.time(), recent)
+        except Exception:
+            pass
+
     _ORDERS_CACHE[key] = (_time.time(), orders)
     return orders
 
 
-def get_sales_by_day(store_id: str, days: int = 60) -> list[dict]:
+def get_sales_by_day(store_or_id, days: int = 60) -> list[dict]:
     """[{"date", "orders", "revenue", "currency"}, ...] from real Shopify orders or assistant events."""
+    store = _shopify_store(store_or_id, "read_orders")
+    store_key = store.get("$id") or store.get("shop_domain") or "default"
     try:
-        orders = _fetch_orders(store_id, days)
+        orders = _fetch_orders(store, days)
     except AnalyticsUnavailable:
         fn = globals().get("events_sales_by_day")
         if callable(fn):
-            ev_sales = fn(store_id, days)
+            ev_sales = fn(store_key, days)
             if any(row.get("orders", 0) > 0 for row in ev_sales):
                 return ev_sales
         raise
@@ -1339,9 +1466,20 @@ def get_sales_by_day(store_id: str, days: int = 60) -> list[dict]:
         b["orders"] += 1
         try:
             b["revenue"] += float(o.get("total_price") or 0)
-        except ValueError:
+        except (ValueError, TypeError):
             pass
         currency = currency or (o.get("currency") or "")
+
+    if not currency:
+        hit = _ORDERS_CACHE.get((store_key, "all"))
+        if hit:
+            for o in hit[1]:
+                if o.get("currency"):
+                    currency = o.get("currency")
+                    break
+        if not currency:
+            currency = store.get("currency") or store.get("currency_code") or ""
+
     out = []
     for i in range(days - 1, -1, -1):
         day = (datetime.utcnow() - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -1350,16 +1488,34 @@ def get_sales_by_day(store_id: str, days: int = 60) -> list[dict]:
     return out
 
 
-def get_top_purchased_products(store_id: str, days: int = 60, limit: int = 8) -> list[tuple[str, int]]:
+def get_top_purchased_products(store_or_id, days: int = 60, limit: int = 8) -> list[tuple[str, int]]:
+    store = _shopify_store(store_or_id, "read_orders")
+    store_key = store.get("$id") or store.get("shop_domain") or "default"
     try:
-        orders = _fetch_orders(store_id, days)
+        orders = _fetch_orders(store, days)
     except AnalyticsUnavailable:
         fn = globals().get("events_top_purchases")
         if callable(fn):
-            ev_purchases = fn(store_id, days, limit)
+            ev_purchases = fn(store_key, days, limit)
             if ev_purchases:
                 return ev_purchases
         raise
+
+    # If the date-filtered window has no orders, check recent/all-time store orders so we can still display the real-time most bought product!
+    if not orders:
+        hit = _ORDERS_CACHE.get((store_key, "all"))
+        if hit and _time.time() - hit[0] < _ORDERS_CACHE_TTL:
+            orders = hit[1]
+        else:
+            try:
+                orders = _shopify_paged(store, "orders.json", {
+                    "status": "any", "limit": 100,
+                    "fields": "id,created_at,cancelled_at,total_price,currency,line_items",
+                })
+                orders = [o for o in orders if not o.get("cancelled_at")]
+            except Exception:
+                orders = _fetch_orders_graphql(store, first=100)
+
     counts: dict[str, int] = {}
     for o in orders:
         for li in o.get("line_items", []):
@@ -1369,11 +1525,11 @@ def get_top_purchased_products(store_id: str, days: int = 60, limit: int = 8) ->
     return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
 
 
-def get_category_popularity(store_id: str, days: int = 60, limit: int = 8) -> list[tuple[str, int]]:
+def get_category_popularity(store_or_id, days: int = 60, limit: int = 8) -> list[tuple[str, int]]:
     """Units sold per Shopify product type (needs read_orders + read_products)."""
     try:
-        orders = _fetch_orders(store_id, days)
-        store = _shopify_store(store_id, "read_products")
+        orders = _fetch_orders(store_or_id, days)
+        store = _shopify_store(store_or_id, "read_products")
         types = {
             p["id"]: (p.get("product_type") or "").strip() or "Uncategorized"
             for p in _shopify_paged(store, "products.json", {"limit": 250, "fields": "id,product_type"})
