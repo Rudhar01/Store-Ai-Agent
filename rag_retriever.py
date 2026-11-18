@@ -81,6 +81,24 @@ _local_store_lock = threading.Lock()
 _LOCAL_STORE_DOCUMENTS: dict[str, list[dict]] = {}
 _DELETED_DOC_IDS: dict[str, set[str]] = {}
 
+def _infer_policy_type(title: str, text: str) -> str | None:
+    combined = f"{title or ''}\n{text or ''}".lower()
+    if re.search(r"\b(refund|return|exchange|money[- ]back|store credit|restocking)\b", combined):
+        return "refund_policy"
+    if re.search(r"\b(shipping|delivery|dispatch|transit|carrier|courier|freight)\b", combined):
+        return "shipping_policy"
+    if re.search(r"\b(cancell?ation|modify order|change order|cancel my order)\b", combined):
+        return "cancellation_policy"
+    if re.search(r"\b(privacy|personal data|gdpr|cookies?|ccpa)\b", combined):
+        return "privacy_policy"
+    if re.search(r"\b(warranty|guarantee|defect|repair|manufacturer warranty)\b", combined):
+        return "warranty_policy"
+    if re.search(r"\b(faq|frequently asked|q&a|questions and answers)\b", combined):
+        return "faq"
+    if re.search(r"\b(terms of service|terms and conditions|tos|terms of use)\b", combined):
+        return "terms_of_service"
+    return None
+
 def _load_local_store():
     global _LOCAL_STORE_DOCUMENTS, _DELETED_DOC_IDS
     if os.path.exists(LOCAL_STORE_PATH):
@@ -94,6 +112,14 @@ def _load_local_store():
                     else:
                         _LOCAL_STORE_DOCUMENTS = data
                         _DELETED_DOC_IDS = {}
+                    # Automatically ensure all custom documents have their policy_type inferred
+                    for store_key, doc_list in _LOCAL_STORE_DOCUMENTS.items():
+                        if isinstance(doc_list, list):
+                            for d in doc_list:
+                                if isinstance(d, dict) and not d.get("policy_type"):
+                                    pt = _infer_policy_type(d.get("title", ""), d.get("content", ""))
+                                    if pt:
+                                        d["policy_type"] = pt
         except Exception as e:
             print(f"rag_retriever: note - could not load local_knowledge_cache: {e}")
 
@@ -257,19 +283,89 @@ _STOPWORDS = {
     "you're", "you've", "your", "yours", "yourself", "yourselves"
 }
 
+def _tenant(store_identifier: str) -> str:
+    raw = (store_identifier or "").strip().lower()
+    raw = re.sub(r"^https?://", "", raw)
+    raw = raw.split("/")[0].split(":")[0].strip()
+    if raw and "." not in raw and raw != "default":
+        raw = f"{raw}.myshopify.com"
+    return raw or "default"
+
+def _get_tenant_aliases(tenant: str) -> list[str]:
+    norm = _tenant(tenant)
+    aliases = [norm]
+    if norm.endswith(".myshopify.com"):
+        short = norm.split(".myshopify.com")[0]
+        if short and short not in aliases:
+            aliases.append(short)
+    elif norm != "default" and "." not in norm:
+        full = f"{norm}.myshopify.com"
+        if full not in aliases:
+            aliases.append(full)
+    if "default" not in aliases:
+        aliases.append("default")
+    return aliases
+
 def _get_deleted_doc_ids(tenant: str) -> set[str]:
-    tenant = (tenant or "default").strip().lower()
+    aliases = _get_tenant_aliases(tenant)
+    deleted = set()
     with _local_store_lock:
-        return set(_DELETED_DOC_IDS.get(tenant, set()))
+        for alias in aliases:
+            deleted.update(_DELETED_DOC_IDS.get(alias, set()))
+    return deleted
+
+def _get_tenant_documents(tenant: str) -> list[dict]:
+    aliases = _get_tenant_aliases(tenant)
+    seen_ids = set()
+    docs = []
+    with _local_store_lock:
+        for alias in aliases:
+            for d in _LOCAL_STORE_DOCUMENTS.get(alias, []):
+                doc_id = d.get("doc_id")
+                if doc_id and doc_id not in seen_ids:
+                    seen_ids.add(doc_id)
+                    entry = dict(d)
+                    if not entry.get("policy_type"):
+                        inferred = _infer_policy_type(entry.get("title", ""), entry.get("content", ""))
+                        if inferred:
+                            entry["policy_type"] = inferred
+                    docs.append(entry)
+        if not docs:
+            for store_key, store_docs in _LOCAL_STORE_DOCUMENTS.items():
+                if store_key.startswith("_"):
+                    continue
+                matches = any(alias != "default" and (alias in store_key or store_key in alias) for alias in aliases)
+                if matches:
+                    for d in store_docs:
+                        doc_id = d.get("doc_id")
+                        if doc_id and doc_id not in seen_ids:
+                            seen_ids.add(doc_id)
+                            entry = dict(d)
+                            if not entry.get("policy_type"):
+                                inferred = _infer_policy_type(entry.get("title", ""), entry.get("content", ""))
+                                if inferred:
+                                    entry["policy_type"] = inferred
+                            docs.append(entry)
+    return docs
 
 def _add_local_document(tenant: str, doc_id: str, text: str, title: str = "", kind: str = "document", **fields) -> None:
-    tenant = (tenant or "default").strip().lower()
+    norm_tenant = _tenant(tenant)
     with _local_store_lock:
-        if tenant not in _LOCAL_STORE_DOCUMENTS:
-            _LOCAL_STORE_DOCUMENTS[tenant] = []
-        if tenant in _DELETED_DOC_IDS and doc_id in _DELETED_DOC_IDS[tenant]:
-            _DELETED_DOC_IDS[tenant].discard(doc_id)
-        existing = [d for d in _LOCAL_STORE_DOCUMENTS[tenant] if d.get("doc_id") == doc_id]
+        if norm_tenant not in _LOCAL_STORE_DOCUMENTS:
+            _LOCAL_STORE_DOCUMENTS[norm_tenant] = []
+        for alias in _get_tenant_aliases(tenant):
+            if alias in _DELETED_DOC_IDS:
+                _DELETED_DOC_IDS[alias].discard(doc_id)
+        if "default" in _DELETED_DOC_IDS:
+            _DELETED_DOC_IDS["default"].discard(doc_id)
+
+        ptype = fields.get("policy_type")
+        if not ptype:
+            ptype = _infer_policy_type(title, text)
+            if ptype:
+                fields["policy_type"] = ptype
+
+        existing = [d for d in _LOCAL_STORE_DOCUMENTS[norm_tenant] if d.get("doc_id") == doc_id]
         entry = {
             "doc_id": doc_id,
             "title": (title or doc_id).strip(),
@@ -281,42 +377,67 @@ def _add_local_document(tenant: str, doc_id: str, text: str, title: str = "", ki
         if existing:
             existing[0].update(entry)
         else:
-            _LOCAL_STORE_DOCUMENTS[tenant].append(entry)
+            _LOCAL_STORE_DOCUMENTS[norm_tenant].append(entry)
         _save_local_store()
 
 def _remove_local_document(tenant: str, doc_id: str) -> bool:
-    tenant = (tenant or "default").strip().lower()
+    aliases = _get_tenant_aliases(tenant)
     with _local_store_lock:
-        if tenant not in _DELETED_DOC_IDS:
-            _DELETED_DOC_IDS[tenant] = set()
-        _DELETED_DOC_IDS[tenant].add(doc_id)
-        if tenant in _LOCAL_STORE_DOCUMENTS:
-            _LOCAL_STORE_DOCUMENTS[tenant] = [d for d in _LOCAL_STORE_DOCUMENTS[tenant] if d.get("doc_id") != doc_id]
+        for alias in aliases:
+            if alias not in _DELETED_DOC_IDS:
+                _DELETED_DOC_IDS[alias] = set()
+            _DELETED_DOC_IDS[alias].add(doc_id)
+            if alias in _LOCAL_STORE_DOCUMENTS:
+                _LOCAL_STORE_DOCUMENTS[alias] = [
+                    d for d in _LOCAL_STORE_DOCUMENTS[alias] if d.get("doc_id") != doc_id
+                ]
+
+        if doc_id.startswith("policy:"):
+            if "default" not in _DELETED_DOC_IDS:
+                _DELETED_DOC_IDS["default"] = set()
+            _DELETED_DOC_IDS["default"].add(doc_id)
+            for k in _DELETED_DOC_IDS:
+                _DELETED_DOC_IDS[k].add(doc_id)
+
+        for store_key in list(_LOCAL_STORE_DOCUMENTS.keys()):
+            if store_key.startswith("_"):
+                continue
+            matches = any(alias != "default" and (alias in store_key or store_key in alias) for alias in aliases)
+            has_doc = any(d.get("doc_id") == doc_id for d in _LOCAL_STORE_DOCUMENTS.get(store_key, []))
+            if matches or has_doc:
+                _LOCAL_STORE_DOCUMENTS[store_key] = [
+                    d for d in _LOCAL_STORE_DOCUMENTS[store_key] if d.get("doc_id") != doc_id
+                ]
+                if store_key not in _DELETED_DOC_IDS:
+                    _DELETED_DOC_IDS[store_key] = set()
+                _DELETED_DOC_IDS[store_key].add(doc_id)
+
         _save_local_store()
         return True
 
 def _list_local_documents(tenant: str) -> list[dict]:
-    tenant = (tenant or "default").strip().lower()
     deleted = _get_deleted_doc_ids(tenant)
     results = []
     custom_policy_types = set()
 
     # 1. Store-uploaded documents
-    with _local_store_lock:
-        for d in _LOCAL_STORE_DOCUMENTS.get(tenant, []):
-            if d.get("doc_id") in deleted:
-                continue
-            pt = d.get("policy_type")
-            if pt:
-                custom_policy_types.add(pt)
-            results.append({
-                "doc_id": d.get("doc_id"),
-                "title": d.get("title", d.get("doc_id")),
-                "kind": d.get("kind", "document"),
-                "source": "uploaded_store_document",
-                "n_chunks": max(1, len(d.get("content", "")) // 500),
-                "updated_at": d.get("updated_at", int(time.time())),
-            })
+    custom_docs = _get_tenant_documents(tenant)
+    for d in custom_docs:
+        doc_id = d.get("doc_id", "")
+        if doc_id in deleted:
+            continue
+        pt = d.get("policy_type") or _infer_policy_type(d.get("title", ""), d.get("content", ""))
+        if pt:
+            custom_policy_types.add(pt)
+        results.append({
+            "doc_id": doc_id,
+            "title": d.get("title", doc_id),
+            "kind": d.get("kind", "document"),
+            "policy_type": pt,
+            "source": "uploaded_store_document",
+            "n_chunks": max(1, len(d.get("content", "")) // 500),
+            "updated_at": d.get("updated_at", int(time.time())),
+        })
 
     # 2. Built-in default sample policies (omitted if deleted or superseded by custom document)
     for p in DEFAULT_STORE_POLICIES:
@@ -328,6 +449,7 @@ def _list_local_documents(tenant: str) -> list[dict]:
             "doc_id": p["doc_id"],
             "title": p["title"],
             "kind": p["kind"],
+            "policy_type": p.get("policy_type", ""),
             "source": "built_in_sample_policy",
             "n_chunks": max(1, len(p["content"]) // 500),
             "updated_at": int(time.time()),
@@ -345,16 +467,16 @@ def _local_retrieve(tenant: str, query: str, top_k: int = 3, hints: dict | None 
     custom_policy_types = set()
 
     # 1. Custom uploaded documents for this tenant
-    with _local_store_lock:
-        custom_docs = list(_LOCAL_STORE_DOCUMENTS.get(tenant, []))
+    custom_docs = _get_tenant_documents(tenant)
     for d in custom_docs:
-        if d.get("doc_id") in deleted:
+        doc_id = d.get("doc_id", "custom")
+        if doc_id in deleted:
             continue
-        pt = d.get("policy_type", "")
+        pt = d.get("policy_type") or _infer_policy_type(d.get("title", ""), d.get("content", "")) or ""
         if pt:
             custom_policy_types.add(pt)
         candidates.append({
-            "doc_id": d.get("doc_id", "custom"),
+            "doc_id": doc_id,
             "title": d.get("title", "Custom Document"),
             "content": d.get("content", ""),
             "kind": d.get("kind", "document"),
@@ -389,27 +511,34 @@ def _local_retrieve(tenant: str, query: str, top_k: int = 3, hints: dict | None 
         # Title matches: strong weight (much higher for custom store documents)
         for tok in q_tokens:
             if tok in title_lower:
-                score += (8.0 if cand["is_custom"] else 3.5)
+                score += (10.0 if cand["is_custom"] else 2.0)
             if tok in text_lower:
-                score += (3.0 if cand["is_custom"] else 1.0)
+                score += (4.0 if cand["is_custom"] else 1.0)
 
         # Whole phrase match
         for phrase in [q_lower] if len(q_lower) > 3 else []:
             if phrase in text_lower or phrase in title_lower:
-                score += (15.0 if cand["is_custom"] else 6.0)
+                score += (20.0 if cand["is_custom"] else 5.0)
 
         # Exact policy type hint matching
         if target_policy and (target_policy in cand["doc_id"] or target_policy in ptype):
-            score += (12.0 if cand["is_custom"] else 4.0)
+            score += (25.0 if cand["is_custom"] else 4.0)
         elif target_policy and target_policy.replace("_", " ") in title_lower:
-            score += (10.0 if cand["is_custom"] else 3.0)
+            score += (20.0 if cand["is_custom"] else 3.0)
+
+        # Substring matching on target policy tokens
+        if target_policy:
+            tp_words = [w for w in target_policy.split("_") if len(w) > 3]
+            for tp_w in tp_words:
+                if tp_w in title_lower or tp_w in text_lower:
+                    score += (12.0 if cand["is_custom"] else 2.0)
 
         # Huge priority boost for custom uploaded store documents whenever relevant terms match
         if cand["is_custom"] and score > 0:
-            score += 20.0
+            score += 35.0
 
         if score > 0:
-            norm_score = min(0.99, 0.72 + (score / 25.0) * 0.25)
+            norm_score = min(0.99, 0.75 + (score / 30.0) * 0.24)
             doc_content = f"[{cand['title']}]\n{text}"
             scored.append({
                 "content": doc_content,
@@ -424,6 +553,12 @@ def _local_retrieve(tenant: str, query: str, top_k: int = 3, hints: dict | None 
 
     scored.sort(key=lambda x: x["score"], reverse=True)
 
+    # If any custom store documents matched, return ONLY the custom store documents!
+    # Do not dilute or contradict the merchant's real documents with generic sample policies!
+    custom_scored = [s for s in scored if s.get("source") == "uploaded_store_document"]
+    if custom_scored:
+        return custom_scored[:top_k]
+
     # If no keyword matched, but the store has custom uploaded documents, return the custom documents!
     if not scored:
         custom_candidates = [c for c in candidates if c["is_custom"]]
@@ -431,7 +566,8 @@ def _local_retrieve(tenant: str, query: str, top_k: int = 3, hints: dict | None 
             for c in custom_candidates[:top_k]:
                 scored.append({
                     "content": f"[{c['title']}]\n{c['content']}",
-                    "score": 0.75,
+                    "raw_content": c["content"],
+                    "score": 0.85,
                     "document": c["title"],
                     "title": c["title"],
                     "kind": c["kind"],
@@ -443,6 +579,7 @@ def _local_retrieve(tenant: str, query: str, top_k: int = 3, hints: dict | None 
                 if p["doc_id"] not in deleted:
                     scored.append({
                         "content": f"[{p['title']}]\n{p['content']}",
+                        "raw_content": p["content"],
                         "score": 0.65,
                         "document": p["title"],
                         "title": p["title"],
@@ -463,10 +600,6 @@ def _client() -> httpx.Client:
 
 def _headers() -> dict:
     return {"Authorization": f"Bearer {RAG_API_KEY}"}
-
-
-def _tenant(store_identifier: str) -> str:
-    return (store_identifier or "").strip().lower()
 
 
 def _auto_hints(query: str, hints: dict | None) -> dict:
@@ -577,6 +710,12 @@ def retrieve_context(
         chunks = _finish(tenant, data, score_threshold, key, use_cache)
         chunks = [c for c in chunks if c.get("doc_id") not in deleted_ids]
         if chunks:
+            # Check if internal store documents exist and match; store documents always take precedence
+            local_custom = [c for c in _local_retrieve(tenant, query, top_k=top_k, hints=hints) if c.get("source") == "uploaded_store_document"]
+            if local_custom:
+                seen_ids = {c.get("doc_id") for c in local_custom}
+                remaining = [c for c in chunks if c.get("doc_id") not in seen_ids]
+                return (local_custom + remaining)[:top_k]
             return chunks
         # If remote returned 0 results, fall back to internal local knowledge base
         return _local_retrieve(tenant, query, top_k=top_k, hints=hints)
@@ -619,6 +758,11 @@ async def aretrieve_context(store_identifier: str, query: str, top_k: int = 3, s
         chunks = _finish(tenant, data, score_threshold, key, use_cache)
         chunks = [c for c in chunks if c.get("doc_id") not in deleted_ids]
         if chunks:
+            local_custom = [c for c in _local_retrieve(tenant, query, top_k=top_k, hints=hints) if c.get("source") == "uploaded_store_document"]
+            if local_custom:
+                seen_ids = {c.get("doc_id") for c in local_custom}
+                remaining = [c for c in chunks if c.get("doc_id") not in seen_ids]
+                return (local_custom + remaining)[:top_k]
             return chunks
         # If remote returned 0 results, fall back to internal local knowledge base
         return _local_retrieve(tenant, query, top_k=top_k, hints=hints)
@@ -698,7 +842,6 @@ def list_documents(store: str) -> list[dict]:
                 seen.add(ld.get("doc_id"))
 
     return [d for d in docs if d.get("doc_id") not in deleted_ids]
-    return _list_local_documents(tenant)
 
 
 def crawl_site(store: str, url: str, limit: int = 25, include_paths: list[str] | None = None,
@@ -762,4 +905,8 @@ def ingest_file_document(store: str, filename: str, content: bytes, doc_title: s
     title = (doc_title or "").strip() or filename
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
     fmt = "html" if ext in ("html", "htm") else "markdown"
-    return ingest_text(store, doc_id=doc_id, text=text, title=title, kind=doc_kind, format=fmt)
+    inferred_pt = _infer_policy_type(title, text)
+    extra_fields = {}
+    if inferred_pt:
+        extra_fields["policy_type"] = inferred_pt
+    return ingest_text(store, doc_id=doc_id, text=text, title=title, kind=doc_kind, format=fmt, **extra_fields)

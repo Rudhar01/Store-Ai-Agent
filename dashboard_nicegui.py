@@ -2699,7 +2699,9 @@ def knowledge_page():
     if not store:
         return
     cfg = repo.ensure_customization(store["$id"])
-    shop_domain = store.get("shop_domain", "")
+    shop_domain = (store.get("shop_domain") or store.get("shop") or store.get("myshopify_domain") or store.get("domain") or "").strip().lower()
+    if not shop_domain:
+        shop_domain = str(store.get("$id") or "default")
 
     content = _layout("knowledge", store, cfg)
     with content:
@@ -2912,7 +2914,7 @@ def knowledge_page():
                                             ui.label(f"[{kind}]").classes("text-[10px] text-indigo-500 uppercase font-semibold")
 
                             def make_delete_doc(target_id=doc_id, target_title=title):
-                                def _del():
+                                def _del(*_):
                                     try:
                                         rag_retriever.delete_document(shop_domain, target_id)
                                         ui.notify(f"Deleted '{target_title}' from vector index.", type="info")
@@ -2987,11 +2989,11 @@ def knowledge_page():
                             ui.label(f["answer"]).classes("text-xs text-gray-500")
 
                         def make_delete_faq(faq_id=f["$id"], q=f["question"]):
-                            def _del():
+                            def _del(*_):
                                 repo.delete_faq(store["$id"], faq_id)
                                 try:
                                     for doc in rag_retriever.list_documents(shop_domain):
-                                        if doc.get("title", "").startswith(f"FAQ: {q[:30]}") or doc.get("doc_id") == f"faq:{faq_id}":
+                                        if doc.get("title", "").startswith(f"FAQ: {q[:30]}") or doc.get("doc_id") in (f"faq:{faq_id}", str(faq_id)):
                                             rag_retriever.delete_document(shop_domain, doc["doc_id"])
                                     render_docs()
                                 except Exception:
