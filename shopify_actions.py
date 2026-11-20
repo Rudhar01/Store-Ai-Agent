@@ -1625,6 +1625,7 @@ def _format_product_card(p: dict, store, entities: dict) -> dict | None:
         var_list = []
 
     best_variant = None
+    first_matching = None
     for v in var_list:
         raw_price = v.get("price")
         if isinstance(raw_price, dict):
@@ -1656,33 +1657,22 @@ def _format_product_card(p: dict, store, entities: dict) -> dict | None:
             qty = v.get("inventory_quantity")
             avail = not is_managed or policy_continue or (qty is not None and int(qty) > 0)
 
-        best_variant = {
+        variant_info = {
             "id": str(v.get("id", "")).split("/")[-1],
             "price": price,
             "title": v.get("title", ""),
             "available": bool(avail),
             "in_stock": bool(avail),
         }
-        break
+        if first_matching is None:
+            first_matching = variant_info
+        # Prioritize in-stock variant over out-of-stock variant
+        if avail:
+            best_variant = variant_info
+            break
 
-    has_filters = (price_min is not None) or (price_max is not None) or bool(color) or bool(size)
-    if not best_variant and var_list and not has_filters:
-        v0 = var_list[0]
-        raw_p = v0.get("price")
-        p0 = _parse_price_value(raw_p.get("amount", 0)) if isinstance(raw_p, dict) else (_parse_price_value(raw_p) or 0.0)
-        avail0 = v0.get("availableForSale")
-        if avail0 is None:
-            is_managed = (v0.get("inventory_management") or "").lower() == "shopify"
-            policy_continue = (v0.get("inventory_policy") or "").lower() == "continue"
-            qty = v0.get("inventory_quantity")
-            avail0 = not is_managed or policy_continue or (qty is not None and int(qty) > 0)
-        best_variant = {
-            "id": str(v0.get("id", "")).split("/")[-1],
-            "price": p0,
-            "title": v0.get("title", ""),
-            "available": bool(avail0),
-            "in_stock": bool(avail0),
-        }
+    if not best_variant:
+        best_variant = first_matching
 
     if not best_variant:
         return None
@@ -2703,6 +2693,30 @@ async def _find_store_product(store, product_query: str, size: str = "", color: 
 
     import direct_order_service
     is_in_stock = direct_order_service.is_variant_in_stock(chosen_variant, best_p)
+
+    # Real-time stock verification: if REST says out of stock, check Shopify GraphQL live
+    # so immediate in-stock changes in Shopify Admin are recognized without cache delays
+    if not is_in_stock and store and best_p.get("id"):
+        try:
+            gql_nodes = await _search_shopify_graphql(store, f"id:{best_p.get('id')}", first=5)
+            if gql_nodes:
+                target_pid = str(best_p.get("id")).split("/")[-1]
+                target_title = (best_p.get("title") or "").strip().lower()
+                for gn in gql_nodes:
+                    gn_pid = str(gn.get("id") or "").split("/")[-1]
+                    gn_title = (gn.get("title") or "").strip().lower()
+                    if gn_pid == target_pid or (target_title and gn_title == target_title):
+                        g_vars = (gn.get("variants") or {}).get("nodes", [])
+                        for gv in g_vars:
+                            if gv.get("availableForSale"):
+                                is_in_stock = True
+                                if isinstance(chosen_variant, dict):
+                                    chosen_variant["availableForSale"] = True
+                                    chosen_variant["inventory_quantity"] = 1
+                                break
+                        break
+        except Exception:
+            pass
 
     return best_p, chosen_variant, is_in_stock, True
 

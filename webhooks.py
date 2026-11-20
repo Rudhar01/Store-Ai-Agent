@@ -140,6 +140,39 @@ async def products_webhook(request: Request):
                                 reply_to=reply_to,
                             )
                             repo.mark_standing_instruction_triggered(inst.get("$id"))
+
+            # Check restock alerts for this product if any variant is in stock
+            any_in_stock = any(
+                (v.get("inventory_quantity") is not None and int(v.get("inventory_quantity") or 0) > 0)
+                or v.get("availableForSale") is True
+                or (v.get("inventory_policy") or "").lower() == "continue"
+                for v in (payload.get("variants") or [])
+            )
+            if any_in_stock:
+                alerts = repo.list_restock_alerts(store_id=shop, status="active")
+                for a in alerts:
+                    match = False
+                    if a.get("product_id") and str(a.get("product_id")) == prod_id:
+                        match = True
+                    elif a.get("product_title") and (
+                        a["product_title"].lower() in prod_title.lower()
+                        or prod_title.lower() in a["product_title"].lower()
+                    ):
+                        match = True
+                    if match:
+                        p_url = a.get("product_url") or prod_url or f"https://{shop}"
+                        p_img = a.get("product_image") or img_src
+                        p_price = a.get("price") or ""
+                        email_utils.send_restock_notification_email(
+                            to_email=a["customer_email"],
+                            store_name=store_name,
+                            product_title=prod_title or a.get("product_title", "Item"),
+                            product_url=p_url,
+                            product_image=p_img,
+                            price=p_price,
+                            reply_to=reply_to,
+                        )
+                        repo.mark_restock_alert_notified(a.get("$id"))
         except Exception as e:
             print(f"webhooks: products_webhook price check error: {e!r}")
     return PlainTextResponse("ok")
@@ -307,6 +340,16 @@ async def inventory_webhook(request: Request):
         import email_utils
         behavioral_recommender.invalidate_catalog_cache(shop)
         try:
+            payload = json.loads(body or b"{}")
+            # If inventory was reduced to 0 or less, this is a sale/depletion, not a restock
+            avail_qty = payload.get("available")
+            if avail_qty is not None:
+                try:
+                    if int(avail_qty) <= 0:
+                        return PlainTextResponse("ok")
+                except (ValueError, TypeError):
+                    pass
+
             reply_to = repo.get_store_owner_email(shop)
             store_name = repo.get_store_display_name(shop)
             alerts = repo.list_restock_alerts(store_id=shop, status="active")

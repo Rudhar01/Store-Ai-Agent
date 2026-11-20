@@ -560,7 +560,7 @@ def _is_clear_cart(message: str) -> bool:
 
 
 _NON_PRODUCT_SEARCH_KW = re.compile(
-    r"\b(cart|bag|basket|checkout|orders?|track|tracking|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up|policy|policies|shipping|delivery|contact|support|email|address|phone|help|pay|payment|payments|upi|cod|cash|card|cards|otp|reorder|remind|reminder|drop|drops|alert|restock|swap)\b",
+    r"\b(cart|bag|basket|checkout|orders?|track|tracking|refund|return|cancel|warranty|claim|login|register|logout|sign in|sign up|policy|policies|shipping|delivery|contact|support|email|address|phone|help|pay|payment|payments|upi|cod|cash|card|cards|otp|reorder|remind|reminder|drop|drops|alert|restock|swap|notify|notification|back in stock|when available|when it restocks|when restocked|when will|can you|could you|please|for me)\b",
     re.IGNORECASE,
 )
 
@@ -646,16 +646,25 @@ _POPULAR_RE = re.compile(
 _GREETING_RE = re.compile(
     r"^(?:hi|hello|hey|hey there|howdy|hola|namaste|who are you|what can you do|what do you do|help me|tell me about (?:your|this) store|what is this store)\b",
     re.IGNORECASE)
-_PAY_RE = re.compile(r"\b(pay(ment)?|pay now|pay for (my )?(cart|order)|complete payment|proceed to pay(ment)?|buy now with card)\b", re.IGNORECASE)
+_PAY_RE = re.compile(
+    r"\b(pay(ment)?|pay now|pay for (?:me|it|this|my\s+(?:cart|order)|cart|order)|complete payment|proceed to pay(ment)?|buy now with card|make payment)\b",
+    re.IGNORECASE,
+)
 _OTP_RE = re.compile(r"\b(?:otp\s*(?:is|code)?\s*[:=]?\s*)?(\d{6})\b", re.IGNORECASE)
 _WARRANTY_RE = re.compile(r"\b(warranty|guarantee|claim|replace|broken|damaged|defective)\b", re.IGNORECASE)
 
 _EXACT_GREETINGS = {"hi", "hello", "hey", "hey there", "howdy", "hola", "namaste"}
+_EXACT_THANKS = {"thank you", "thanks", "thanks a lot", "thank you so much", "many thanks", "appreciate it", "thank u", "thx"}
+_EXACT_FAREWELL = {"bye", "goodbye", "see you", "see ya", "talk to you later", "have a good day", "take care", "bye bye"}
+_EXACT_CHITCHAT = {"how are you", "how are you doing", "how's it going", "how is it going", "what's up", "whats up"}
+_EXACT_ACK = {"ok", "okay", "alright", "got it", "cool", "great", "awesome", "perfect", "sounds good", "understood", "sure"}
 _EXACT_CART_VIEW = {"view cart", "show cart", "my cart", "view my cart", "show my cart", "check cart", "check my cart"}
 _EXACT_CHECKOUT = {
     "checkout", "pay now", "proceed to checkout", "go to checkout",
     "pay for my cart", "complete checkout", "take me to checkout",
-    "proceed to payment", "complete payment", "pay for cart"
+    "proceed to payment", "complete payment", "pay for cart",
+    "pay for me", "pay for it", "pay for this", "pay", "proceed to pay",
+    "make payment",
 }
 
 EMAIL_RE = re.compile(r"[\w.+\-]+@[\w\-]+\.[\w.\-]+")
@@ -1584,6 +1593,26 @@ async def _chat_impl(req: ChatRequest):
         entities = {}
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
+    # 2b. Thanks & Gratitude
+    elif _msg_lower in _EXACT_THANKS or any(p in _msg_lower for p in ["thank you", "thanks a lot", "thank you so much", "appreciate it"]):
+        reply = "You're very welcome! Let me know if you need help with anything else."
+        _log(req.shop, message, "done", "general_chat", "assistant_help", {}, reply)
+        return {"status": "done", "reply": reply, "language": "en"}
+    # 2c. Farewell & Goodbye
+    elif _msg_lower in _EXACT_FAREWELL or any(p in _msg_lower for p in ["goodbye", "see you later", "talk to you later", "have a great day"]):
+        reply = "Goodbye! Have a great day and visit us again anytime."
+        _log(req.shop, message, "done", "general_chat", "assistant_help", {}, reply)
+        return {"status": "done", "reply": reply, "language": "en"}
+    # 2d. Friendly Chit-Chat / How Are You
+    elif _msg_lower in _EXACT_CHITCHAT or any(p in _msg_lower for p in ["how are you", "how's it going", "what's up", "how do you do"]):
+        reply = "I'm doing great, thank you! How can I assist you with your shopping today?"
+        _log(req.shop, message, "done", "general_chat", "assistant_help", {}, reply)
+        return {"status": "done", "reply": reply, "language": "en"}
+    # 2e. Acknowledgement
+    elif _msg_lower in _EXACT_ACK:
+        reply = "Awesome! Let me know if there's anything else you'd like to check out or do."
+        _log(req.shop, message, "done", "general_chat", "assistant_help", {}, reply)
+        return {"status": "done", "reply": reply, "language": "en"}
     # 3. Assistant Capabilities / Help
     elif any(p in _msg_lower for p in ["who are you", "what can you do", "help me", "what are your features", "how can you help", "what do you do", "tell me what you can do"]) or _msg_lower in {"help", "features"}:
         intent, action = "general_chat", "assistant_help"
@@ -1591,7 +1620,7 @@ async def _chat_impl(req: ChatRequest):
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
     # 4. Checkout / Pay Now
-    elif _msg_lower in _EXACT_CHECKOUT or bool(_CHECKOUT_RE.search(message)):
+    elif _msg_lower in _EXACT_CHECKOUT or bool(_CHECKOUT_RE.search(message)) or bool(_PAY_RE.search(message)):
         intent, action = "payment_checkout", "initiate_payment"
         entities = {}
         language = "en"
@@ -1695,7 +1724,20 @@ async def _chat_impl(req: ChatRequest):
         entities = {"product_title": clean_p} if clean_p and clean_p.lower() not in ("this", "it", "that", "item", "product") else {}
         language = "en"
         classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False, "message_type": "normal", "is_action": False}
-    # 17. Product Search & Catalog Recommendations
+    # 17. Restock / Stock Alert Subscription (must come BEFORE product search to
+    #     avoid "notify me when X is available" being misrouted as a product query)
+    elif any(p in _msg_lower for p in ["notify me when", "back in stock", "restock alert", "when it restocks", "when restocked", "alert me when", "notify me if price drops", "notify me if", "let me know when", "tell me when", "inform me when"]):
+        intent, action = "restock_alert", "subscribe_restock"
+        clean_prod = re.sub(r"\b(notify me when|notify me if|alert me when|email me when|tell me when|tell me if|let me know when|inform me when|is back in stock|back in stock|restocks|restocked|available again|notify me|is available|becomes available|is in stock|comes back|available|in stock)\b", "", message, flags=re.IGNORECASE).strip(" .,!?")
+        if clean_prod.lower() in ("the product", "this product", "product", "it", "this", "that", "the item", "item", "the", ""):
+            last_p = _SESSION_LAST_PRODUCT.get((req.shop, req.session_id))
+            clean_prod = (last_p.get("name") or last_p.get("title")) if last_p else ""
+        entities = {"product_name_or_id": clean_prod or message}
+        if customer_email:
+            entities["email"] = customer_email
+        language = "en"
+        classification = {"intent": intent, "action": action, "entities": entities, "language": language, "requires_confirmation": False}
+    # 17b. Product Search & Catalog Recommendations
     elif _is_product_search(message):
         search_query, is_browse = _is_product_search(message)
         price_extracted, search_query = extract_price_filters(search_query)
@@ -1915,12 +1957,20 @@ async def _chat_impl(req: ChatRequest):
                 except Exception as _ce:
                     print(f"[chatbot_widget] cart sync error: {_ce!r}")
 
-        # 0. Restock Alert: extract inline email if shopper provided it in their request
+        # 0. Restock Alert: extract inline email & resolve product if generic
         if (intent, action) == ("restock_alert", "subscribe_restock"):
-            if not entities.get("email") and not customer_email:
+            if customer_email and not entities.get("email"):
+                entities["email"] = customer_email
+            elif not entities.get("email"):
                 email_found = EMAIL_RE.search(message)
                 if email_found:
                     entities["email"] = email_found.group(0).lower()
+
+            prod_req = str(entities.get("product_name_or_id") or "").strip().lower()
+            if not prod_req or prod_req in ("the product", "this product", "product", "it", "this", "that", "the item", "item", "the", "when available", "available", "notify me"):
+                last_p = _SESSION_LAST_PRODUCT.get((req.shop, req.session_id))
+                if last_p and (last_p.get("name") or last_p.get("title")):
+                    entities["product_name_or_id"] = last_p.get("name") or last_p.get("title")
 
         # 1. Order History: Show all orders
         if (intent, action) in (("order_tracking", "list_recent_orders"), ("customer_account", "get_my_orders")):

@@ -21,6 +21,15 @@ from email.mime.multipart import MIMEMultipart
 
 DEFAULT_SENDER = "support@dripire.com"
 
+_DUMMY_DOMAINS = {"domain.com", "example.com", "test.com", "sample.com", "store.com"}
+
+
+def _is_dummy_email(email: str) -> bool:
+    if not email or "@" not in email:
+        return True
+    dom = email.split("@")[-1].strip().lower()
+    return dom in _DUMMY_DOMAINS
+
 
 def _get_smtp_config():
     host = os.environ.get("SMTP_HOST", "").strip()
@@ -50,6 +59,10 @@ def is_smtp_configured() -> bool:
 
 
 def send_email(to_email: str, subject: str, body: str, reply_to: str = None, from_name: str = None) -> bool:
+    if _is_dummy_email(to_email):
+        print(f"[email_utils] Skipped dummy/test recipient {to_email!r} (preventing bounce report to store owner).")
+        return True
+
     host, port, user, password, from_addr = _get_smtp_config()
     if not (host and user and password):
         safe_subj = str(subject).encode("ascii", "replace").decode("ascii")
@@ -81,6 +94,10 @@ def send_email(to_email: str, subject: str, body: str, reply_to: str = None, fro
 
 
 def send_html_email(to_email: str, subject: str, html_body: str, text_body: str = "", reply_to: str = None, from_name: str = None) -> bool:
+    if _is_dummy_email(to_email):
+        print(f"[email_utils] Skipped dummy/test recipient {to_email!r} (preventing bounce report to store owner).")
+        return True
+
     host, port, user, password, from_addr = _get_smtp_config()
     if not (host and user and password):
         safe_subj = str(subject).encode("ascii", "replace").decode("ascii")

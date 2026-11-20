@@ -24,7 +24,9 @@ import shopify_actions
 # Prevents expensive repeated Shopify GraphQL calls and rate-limiting.
 # ---------------------------------------------------------------------------
 _CATALOG_CACHE: dict[str, tuple[float, list[dict]]] = {}
-_CATALOG_TTL_SECONDS = 300
+# Reduced TTL from 300s to 60s so that stock changes (restocked products)
+# are reflected within 1 minute rather than 5 minutes.
+_CATALOG_TTL_SECONDS = 60
 
 
 async def get_enriched_catalog(store, force_refresh: bool = False) -> list[dict]:
