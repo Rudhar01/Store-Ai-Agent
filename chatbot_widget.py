@@ -2420,11 +2420,7 @@ async def widget_config(shop: str):
     cfg = repo.ensure_customization(store["$id"])
     agent_name = cfg.get("agent_name", "AI Assistant")
     agent_title = cfg.get("agent_title", "How can I help you today?")
-    greeting = cfg.get("greeting_message") or (
-        f"Hey there! I'm {agent_name}. How can I help you today?"
-        if agent_title == "How can I help you today?"
-        else f"Hey there! I'm {agent_name}. {agent_title}"
-    )
+    greeting = cfg.get("greeting_message") or agent_title
     raw_icon = cfg.get("custom_icon_url") or cfg.get("icon_url") or ""
     import shopify_auth, hashlib
     app_url = (shopify_auth.APP_URL or "").rstrip("/")
@@ -2434,6 +2430,7 @@ async def widget_config(shop: str):
         "status": cfg.get("status", "active"),
         "agent_name": agent_name,
         "agent_title": agent_title,
+        "welcome_message": agent_title,
         "greeting_message": greeting,
         "icon_type": cfg.get("icon_type", "preset"),
         "theme_color": cfg.get("theme_color", "#2b2b2b"),
@@ -3161,6 +3158,7 @@ WIDGET_JS = r"""
     if (storedOrd) activeOrder = JSON.parse(storedOrd);
   } catch (e) {}
 
+  var storeCustomWelcome = "";
   var lastCustomGreeting = "";
   function getGreetingText(customMsg) {
     if (customMsg !== undefined && customMsg !== null && customMsg !== "") {
@@ -3187,11 +3185,15 @@ WIDGET_JS = r"""
       return "Welcome back! How can I help you today?";
     }
 
-    // 3. First-time logged-in customer or first-time visitor
+    // 3. First-time logged-in customer or first-time visitor (new user):
+    // Prioritize the custom welcome message set in the dashboard by the store admin
+    var custom = storeCustomWelcome || lastCustomGreeting;
+    if (custom) {
+      return custom;
+    }
     if (name) {
       return "Hi " + name + "! How can I help you today?";
     }
-    if (lastCustomGreeting && !/^(hi|hey|hello)\b/i.test(lastCustomGreeting)) return lastCustomGreeting;
     return "Hi there! How can I help you today?";
   }
 
@@ -3237,7 +3239,7 @@ WIDGET_JS = r"""
     }
 
     if (greetingBubble && (!chatHistory || chatHistory.length === 0)) {
-      greetingBubble.textContent = txt;
+      greetingBubble.textContent = (storeCustomWelcome && !activeOrder && !isReturningCustomer) ? storeCustomWelcome : txt;
     }
   }
 
@@ -4710,10 +4712,18 @@ WIDGET_JS = r"""
     .then(function (cfg) {
       if (cfg && cfg.status !== "inactive") {
         root.style.display = "block";
+        // Store the admin-configured welcome message so getGreetingText can use it
+        if (cfg.agent_title) storeCustomWelcome = cfg.agent_title;
         syncCustomerSession();
         restoreState();
         if (cfg.agent_name) headerName.textContent = cfg.agent_name;
-        if (cfg.agent_title) greetingBubble.textContent = cfg.agent_title;
+        // Update greetingBubble with the custom welcome for new (non-returning) users;
+        // returning visitors and users with active orders keep their personalised text
+        if (cfg.agent_title && greetingBubble && (!chatHistory || chatHistory.length === 0)) {
+          if (!activeOrder && !isReturningCustomer) {
+            greetingBubble.textContent = cfg.agent_title;
+          }
+        }
         if (cfg.theme_color) {
           fab.style.background = cfg.theme_color;
           headerAvatar.style.background = cfg.theme_color;
@@ -4743,7 +4753,7 @@ WIDGET_JS = r"""
           headerAvatar.innerHTML = '<img src="' + customIcon + '" alt="Avatar" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />';
         }
         refreshCartBadge();
-        var greetingMsg = cfg.greeting_message || cfg.agent_title || "";
+        var greetingMsg = cfg.agent_title || cfg.greeting_message || "";
         showOutsideGreeting(greetingMsg);
       }
     })
